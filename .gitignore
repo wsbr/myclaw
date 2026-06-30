@@ -1,0 +1,32 @@
+# Environment & secrets
+.env
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# Node
+node_modules/
+dist/
+*.log
+npm-debug.log*
+
+# IDE & OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Local tooling
+.claude/
+
+# Docker volumes (if created locally)
+mysql_data/
+redis_data/

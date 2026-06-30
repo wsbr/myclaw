@@ -1,0 +1,36 @@
+# 开发模式覆盖配置，仅在开发时使用：
+#   docker compose -f docker-compose.yml -f docker-compose.override.yml up
+#
+# 特性：
+# - api/worker/beat 挂载本地代码（热重载，无需重新 build 镜像）
+# - 前端用 Vite dev server（端口 5173，支持 HMR）
+#
+# 注意：此文件不要在 docker compose up -d 时自动加载
+#       生产/预览直接用 docker compose up -d 即可
+
+services:
+  api:
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - ./backend:/app
+    environment:
+      - WATCHFILES_FORCE_POLLING=true
+
+  worker:
+    command: celery -A app.workers.celery_app worker --loglevel=info --autoscale=4,1
+    volumes:
+      - ./backend:/app
+
+  beat:
+    command: celery -A app.workers.celery_app beat --loglevel=info
+    volumes:
+      - ./backend:/app
+
+  frontend:
+    image: node:20-alpine
+    working_dir: /app
+    volumes:
+      - ./frontend:/app
+    command: sh -c "npm install && npm run dev -- --host 0.0.0.0 --port 5173"
+    ports:
+      - "5173:5173"

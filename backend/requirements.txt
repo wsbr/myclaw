@@ -1,0 +1,38 @@
+# Web framework
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+python-multipart==0.0.20
+
+# Database
+sqlalchemy[asyncio]==2.0.36
+aiomysql==0.2.0
+alembic==1.14.0
+
+# Validation
+pydantic[email]==2.10.3
+pydantic-settings==2.7.0
+
+# Auth
+python-jose[cryptography]==3.3.0
+bcrypt==4.2.1
+
+# Async task queue
+celery==5.4.0
+redis==5.2.1
+
+# LLM SDKs
+anthropic==0.40.0
+openai==1.57.4
+
+# MCP client
+httpx==0.28.1
+httpx-sse==0.4.0
+
+# Encryption
+cryptography==44.0.0
+
+# Utils
+python-dotenv==1.0.1
+orjson==3.10.12
+croniter==3.0.3
+PyMySQL==1.1.1
