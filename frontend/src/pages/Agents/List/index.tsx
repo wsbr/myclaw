@@ -1,8 +1,36 @@
 import { useQuery } from '@tanstack/react-query'
-import { Card, Button, Tag, Space, Typography, Empty, Spin, Row, Col } from 'antd'
-import { PlusOutlined, RobotOutlined, SettingOutlined, MessageOutlined } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
-import { agentsApi } from '../../../api/agents'
+import {
+  Bot,
+  Loader2,
+  MessageSquare,
+  Pencil,
+  Plus,
+} from 'lucide-react'
+import { agentsApi } from '@/api/agents'
+import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardFooter,
+  CardHeader,
+  CardTitle,
+} from '@/components/ui/card'
+import { cn } from '@/lib/utils'
+
+const modeColors: Record<string, string> = {
+  chat: 'bg-blue-50 text-blue-700 border-blue-200',
+  plan: 'bg-purple-50 text-purple-700 border-purple-200',
+  group: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+}
+
+const statusColors: Record<string, string> = {
+  active: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+  draft: 'bg-amber-50 text-amber-700 border-amber-200',
+  inactive: 'bg-gray-50 text-gray-600 border-gray-200',
+}
 
 export default function AgentListPage() {
   const navigate = useNavigate()
@@ -11,54 +39,107 @@ export default function AgentListPage() {
     queryFn: agentsApi.list,
   })
 
-  const modeColors: Record<string, string> = { chat: 'blue', plan: 'purple', group: 'green' }
-
-  if (isLoading) return <Spin size="large" style={{ display: 'block', margin: '48px auto' }} />
+  if (isLoading) {
+    return (
+      <div className="flex h-64 items-center justify-center">
+        <Loader2 className="text-muted-foreground size-8 animate-spin" />
+      </div>
+    )
+  }
 
   return (
-    <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 24 }}>
-        <Typography.Title level={4} style={{ margin: 0 }}>Agent 列表</Typography.Title>
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => navigate('/agents/new/config')}>
+    <div className="mx-auto max-w-6xl">
+      <div className="mb-8 flex items-center justify-between">
+        <div>
+          <h2 className="text-2xl font-semibold tracking-tight">Agents</h2>
+          <p className="text-muted-foreground mt-1 text-sm">
+            装配和管理你的智能体，支持 Chat / Plan / Group 模式
+          </p>
+        </div>
+        <Button onClick={() => navigate('/agents/new/config')}>
+          <Plus className="size-4" />
           新建 Agent
         </Button>
       </div>
-      {agents?.length === 0 ? (
-        <Empty description="暂无 Agent，点击右上角新建" />
+
+      {!agents?.length ? (
+        <Card className="border-dashed">
+          <CardContent className="flex flex-col items-center justify-center py-16 text-center">
+            <div className="bg-muted mb-4 flex size-12 items-center justify-center rounded-xl">
+              <Bot className="text-muted-foreground size-6" />
+            </div>
+            <p className="font-medium">暂无 Agent</p>
+            <p className="text-muted-foreground mt-1 text-sm">点击右上角创建你的第一个智能体</p>
+            <Button className="mt-4" onClick={() => navigate('/agents/new/config')}>
+              <Plus className="size-4" />
+              新建 Agent
+            </Button>
+          </CardContent>
+        </Card>
       ) : (
-        <Row gutter={[16, 16]}>
-          {agents?.map((agent: any) => (
-            <Col xs={24} sm={12} md={8} xl={6} key={agent.id}>
-              <Card
-                hoverable
-                actions={[
-                  <Button key="config" type="text" icon={<SettingOutlined />} onClick={() => navigate(`/agents/${agent.id}/config`)}>配置</Button>,
-                  <Button key="chat" type="text" icon={<MessageOutlined />} onClick={() => navigate(`/agents/${agent.id}/chat`)}>对话</Button>,
-                ]}
-              >
-                <Card.Meta
-                  avatar={<RobotOutlined style={{ fontSize: 32, color: '#1677ff' }} />}
-                  title={agent.name}
-                  description={
-                    <Space direction="vertical" size={4}>
-                      <Typography.Text type="secondary" ellipsis style={{ maxWidth: 200 }}>
-                        {agent.description}
-                      </Typography.Text>
-                      <Space>
-                        {agent.modes?.map((m: string) => (
-                          <Tag key={m} color={modeColors[m]}>{m}</Tag>
-                        ))}
-                        <Tag color={agent.status === 'active' ? 'success' : 'default'}>
-                          {agent.status}
-                        </Tag>
-                      </Space>
-                    </Space>
-                  }
-                />
-              </Card>
-            </Col>
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {agents.map((agent: any) => (
+            <Card key={agent.id} className="group">
+              <CardHeader className="pb-2">
+                <div className="flex items-start gap-3">
+                  <div className="bg-primary/10 text-primary flex size-9 shrink-0 items-center justify-center rounded-lg">
+                    <Bot className="size-5" />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <CardTitle className="truncate">{agent.name}</CardTitle>
+                    <Badge
+                      variant="outline"
+                      className={cn('mt-1', statusColors[agent.status] ?? statusColors.draft)}
+                    >
+                      {agent.status}
+                    </Badge>
+                  </div>
+                </div>
+                {agent.description && (
+                  <CardDescription className="mt-2 line-clamp-2">
+                    {agent.description}
+                  </CardDescription>
+                )}
+              </CardHeader>
+
+              {agent.modes?.length > 0 && (
+                <CardContent className="pt-0 pb-2">
+                  <div className="flex flex-wrap gap-1.5">
+                    {agent.modes.map((m: string) => (
+                      <Badge
+                        key={m}
+                        variant="outline"
+                        className={modeColors[m] ?? ''}
+                      >
+                        {m}
+                      </Badge>
+                    ))}
+                  </div>
+                </CardContent>
+              )}
+
+              <CardFooter className="gap-2 pt-2">
+                <Button
+                  size="sm"
+                  className="flex-1"
+                  onClick={() => navigate(`/agents/${agent.id}/chat`)}
+                >
+                  <MessageSquare className="size-3.5" />
+                  对话
+                </Button>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  className="size-8"
+                  title="配置"
+                  onClick={() => navigate(`/agents/${agent.id}/config`)}
+                >
+                  <Pencil className="size-3.5" />
+                </Button>
+              </CardFooter>
+            </Card>
           ))}
-        </Row>
+        </div>
       )}
     </div>
   )

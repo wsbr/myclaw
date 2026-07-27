@@ -58,3 +58,7 @@ class AgentResponse(AgentListResponse):
     supported_channels: list
     group_config: dict | None
     alert_config: dict | None
+    tool_ids: list[str] = []
+    skill_ids: list[str] = []
+    mcp_server_ids: list[str] = []
+    builtin_tools: list[str] = []

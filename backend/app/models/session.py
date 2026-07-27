@@ -23,6 +23,7 @@ class Session(Base):
 
     runners: Mapped[list["Runner"]] = relationship("Runner", back_populates="session", lazy="select")
     orchestration_graph: Mapped["OrchestrationGraph | None"] = relationship("OrchestrationGraph", back_populates="session", uselist=False, lazy="select")
+    execution_plans: Mapped[list["ExecutionPlan"]] = relationship("ExecutionPlan", back_populates="session", lazy="select")
 
 
 class Runner(Base):
@@ -77,6 +78,24 @@ class Span(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     runner: Mapped["Runner"] = relationship("Runner", back_populates="spans")
+
+
+class ExecutionPlan(Base):
+    __tablename__ = "execution_plans"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    session_id: Mapped[str] = mapped_column(String(36), ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False)
+    goal: Mapped[str] = mapped_column(Text, nullable=False)
+    plan_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    status: Mapped[str] = mapped_column(
+        SAEnum("draft", "confirmed", "running", "completed", "failed"),
+        default="draft",
+    )
+    task_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("tasks.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    session: Mapped["Session"] = relationship("Session", back_populates="execution_plans")
 
 
 class OrchestrationGraph(Base):

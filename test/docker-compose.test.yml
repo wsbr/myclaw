@@ -1,0 +1,121 @@
+# Test infrastructure — isolated ports from dev stack
+#   MySQL 3307 | Redis 6380 | API 8001 | Frontend 8081 | Mock LLM 9090
+#
+# Quick start (infra only):
+#   docker compose -f docker-compose.test.yml up -d mysql-test redis-test
+#
+# Full stack deployment tests:
+#   docker compose -f docker-compose.test.yml --profile fullstack up -d --build
+
+services:
+  mysql-test:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpassword}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-myclaw_test}
+      MYSQL_USER: ${MYSQL_USER:-myclaw}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-mypassword}
+    ports:
+      - "3307:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "myclaw", "-pmypassword"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+    tmpfs:
+      - /var/lib/mysql
+
+  redis-test:
+    image: redis:7-alpine
+    command: redis-server --requirepass ${REDIS_PASSWORD:-redispassword}
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "redispassword", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  mock-llm:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.mock-llm
+    ports:
+      - "9090:9090"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9090/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    profiles:
+      - fullstack
+
+  api-test:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    command: >
+      sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    ports:
+      - "8001:8000"
+    env_file: .env.test
+    environment:
+      DATABASE_URL: mysql+aiomysql://myclaw:mypassword@mysql-test:3306/myclaw_test
+      REDIS_URL: redis://:redispassword@redis-test:6379/0
+      CELERY_BROKER_URL: redis://:redispassword@redis-test:6379/1
+      CELERY_RESULT_BACKEND: redis://:redispassword@redis-test:6379/2
+      CORS_ORIGINS: '["http://localhost:8081","http://localhost:8001"]'
+      INIT_ADMIN_EMAIL: admin@test.myclaw.local
+      INIT_ADMIN_PASSWORD: testpassword123
+    depends_on:
+      mysql-test:
+        condition: service_healthy
+      redis-test:
+        condition: service_healthy
+      mock-llm:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+    profiles:
+      - fullstack
+
+  worker-test:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=2
+    env_file: .env.test
+    environment:
+      DATABASE_URL: mysql+aiomysql://myclaw:mypassword@mysql-test:3306/myclaw_test
+      REDIS_URL: redis://:redispassword@redis-test:6379/0
+      CELERY_BROKER_URL: redis://:redispassword@redis-test:6379/1
+      CELERY_RESULT_BACKEND: redis://:redispassword@redis-test:6379/2
+    depends_on:
+      api-test:
+        condition: service_healthy
+    profiles:
+      - fullstack
+
+  frontend-test:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: http://localhost:8001
+    ports:
+      - "8081:80"
+    depends_on:
+      api-test:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:80').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+      start_period: 15s
+    profiles:
+      - fullstack

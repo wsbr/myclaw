@@ -36,3 +36,4 @@ python-dotenv==1.0.1
 orjson==3.10.12
 croniter==3.0.3
 PyMySQL==1.1.1
+nest-asyncio==1.6.0

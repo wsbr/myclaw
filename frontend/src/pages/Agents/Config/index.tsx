@@ -10,7 +10,7 @@ import {
 } from '@ant-design/icons'
 import { agentsApi } from '../../../api/agents'
 import PromptEditor from '../../../components/PromptEditor'
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import client from '../../../api/client'
 
 const MODES = ['chat', 'plan', 'group']
@@ -102,6 +102,46 @@ export default function AgentConfigPage() {
     onSuccess: () => refetchTokens(),
   })
 
+  useEffect(() => {
+    if (!agent) return
+    const mc = agent.model_config_ || {}
+    const cs = agent.context_strategy || {}
+    const mem = agent.memory_config || {}
+    form.setFieldsValue({
+      name: agent.name,
+      description: agent.description,
+      modes: agent.modes || ['chat'],
+      supported_channels: agent.supported_channels || ['platform_ui'],
+      identity: agent.system_prompt_blocks?.identity || '',
+      instructions: agent.system_prompt_blocks?.instructions || '',
+      context_block: agent.system_prompt_blocks?.context || '',
+      output_format: agent.system_prompt_blocks?.output_format || '',
+      provider_id: mc.provider_id,
+      model_id: mc.model_id,
+      temperature: mc.temperature ?? 0.7,
+      max_tokens: mc.max_tokens ?? 8192,
+      streaming: mc.streaming ?? true,
+      extended_thinking: mc.extended_thinking ?? false,
+      window_type: cs.window_type || 'sliding',
+      max_ctx_tokens: cs.max_tokens || 128000,
+      compression_threshold: cs.compression_threshold ?? 0.8,
+      short_term: mem.short_term ?? true,
+      long_term_enabled: mem.long_term?.enabled ?? false,
+      memory_scope: mem.long_term?.scope || 'user',
+      memory_ttl: mem.long_term?.ttl_days || 30,
+      group_enabled: agent.group_config?.enabled || false,
+      capability_manifest: JSON.stringify(agent.group_config?.capability_manifest || [], null, 2),
+      event_manifest: JSON.stringify(agent.group_config?.event_manifest || [], null, 2),
+      tool_ids: agent.tool_ids || [],
+      skill_ids: agent.skill_ids || [],
+      mcp_server_ids: agent.mcp_server_ids || [],
+      builtin_tools: agent.builtin_tools || [],
+      alert_error_rate: agent.alert_config?.alert_on_error_rate ?? 0.1,
+      alert_latency: agent.alert_config?.alert_on_latency_p99 ?? 30,
+      alert_cost: agent.alert_config?.alert_on_cost_daily ?? 100,
+    })
+  }, [agent, form])
+
   if (!isNew && isLoading) return <Spin size="large" style={{ display: 'block', margin: '48px auto' }} />
 
   const mc = agent?.model_config_ || {}
@@ -133,8 +173,10 @@ export default function AgentConfigPage() {
     group_enabled: agent.group_config?.enabled || false,
     capability_manifest: JSON.stringify(agent.group_config?.capability_manifest || [], null, 2),
     event_manifest: JSON.stringify(agent.group_config?.event_manifest || [], null, 2),
-    tool_ids: [], skill_ids: [], mcp_server_ids: [],
-    builtin_tools: [],
+    tool_ids: agent.tool_ids || [],
+    skill_ids: agent.skill_ids || [],
+    mcp_server_ids: agent.mcp_server_ids || [],
+    builtin_tools: agent.builtin_tools || [],
     alert_error_rate: agent.alert_config?.alert_on_error_rate ?? 0.1,
     alert_latency: agent.alert_config?.alert_on_latency_p99 ?? 30,
     alert_cost: agent.alert_config?.alert_on_cost_daily ?? 100,
@@ -207,11 +249,13 @@ export default function AgentConfigPage() {
   ]
 
   return (
-    <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16, alignItems: 'center' }}>
+    <div className="mx-auto max-w-5xl">
+      <div className="mb-6 flex items-center justify-between">
         <Space>
           <Button icon={<ArrowLeftOutlined />} onClick={() => navigate('/agents')}>返回</Button>
-          <Typography.Title level={4} style={{ margin: 0 }}>{isNew ? '新建 Agent' : `配置: ${agent?.name}`}</Typography.Title>
+          <div>
+            <h2 className="text-xl font-semibold">{isNew ? '新建 Agent' : `配置: ${agent?.name}`}</h2>
+          </div>
           {agent && <Tag color={agent.status === 'active' ? 'success' : 'default'}>{agent.status}</Tag>}
         </Space>
         <Space>

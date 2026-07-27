@@ -1,4 +1,5 @@
 from __future__ import annotations
+import gzip
 import json
 from typing import AsyncIterator
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -110,8 +111,39 @@ class SessionService:
         return result.scalars().all()
 
     @staticmethod
-    async def list_spans(db: AsyncSession, runner_id: str, current_user: User) -> list[Span]:
+    def _decode_blob(data: bytes | None) -> dict | None:
+        if data is None:
+            return None
+        try:
+            return json.loads(gzip.decompress(data))
+        except Exception:
+            return None
+
+    @staticmethod
+    def _serialize_span(span: Span) -> dict:
+        return {
+            "id": span.id,
+            "runner_id": span.runner_id,
+            "session_id": span.session_id,
+            "parent_span_id": span.parent_span_id,
+            "span_type": span.span_type,
+            "name": span.name,
+            "status": span.status,
+            "snapshot": SessionService._decode_blob(span.snapshot),
+            "request": SessionService._decode_blob(span.request),
+            "response": SessionService._decode_blob(span.response),
+            "input_tokens": span.input_tokens,
+            "output_tokens": span.output_tokens,
+            "cost_usd": span.cost_usd,
+            "duration_ms": span.duration_ms,
+            "error": span.error,
+            "started_at": span.started_at.isoformat() if span.started_at else None,
+            "completed_at": span.completed_at.isoformat() if span.completed_at else None,
+        }
+
+    @staticmethod
+    async def list_spans(db: AsyncSession, runner_id: str, current_user: User) -> list[dict]:
         result = await db.execute(
             select(Span).where(Span.runner_id == runner_id).order_by(Span.started_at)
         )
-        return result.scalars().all()
+        return [SessionService._serialize_span(s) for s in result.scalars().all()]

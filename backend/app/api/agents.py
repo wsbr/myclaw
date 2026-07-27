@@ -36,7 +36,7 @@ async def get_agent(
 ):
     agent = await AgentService.get_or_404(db, agent_id)
     require_owner_or_admin(agent.owner_id, current_user)
-    return agent
+    return await AgentService.to_response(db, agent)
 
 
 @router.put("/{agent_id}", response_model=AgentResponse)

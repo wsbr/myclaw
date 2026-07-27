@@ -1,7 +1,10 @@
-import { Form, Input, Button, Card, Typography, message } from 'antd'
+import { Form, Input, message } from 'antd'
 import { useNavigate } from 'react-router-dom'
-import { authApi } from '../../api/auth'
-import { useAuthStore } from '../../store/auth'
+import { Bot } from 'lucide-react'
+import { authApi } from '@/api/auth'
+import { useAuthStore } from '@/store/auth'
+import { Button } from '@/components/ui/button'
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 
 export default function LoginPage() {
   const navigate = useNavigate()
@@ -19,25 +22,46 @@ export default function LoginPage() {
   }
 
   return (
-    <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh', background: '#f0f2f5' }}>
-      <Card style={{ width: 400 }}>
-        <Typography.Title level={3} style={{ textAlign: 'center', marginBottom: 32 }}>
-          MyClaw
-        </Typography.Title>
-        <Form form={form} onFinish={onFinish} layout="vertical">
-          <Form.Item name="email" label="邮箱" rules={[{ required: true, type: 'email' }]}>
-            <Input size="large" placeholder="admin@myclaw.local" />
-          </Form.Item>
-          <Form.Item name="password" label="密码" rules={[{ required: true }]}>
-            <Input.Password size="large" />
-          </Form.Item>
-          <Form.Item>
-            <Button type="primary" htmlType="submit" size="large" block>
-              登录
-            </Button>
-          </Form.Item>
-        </Form>
-      </Card>
+    <div className="bg-background flex min-h-screen items-center justify-center p-6">
+      <div className="animate-fade-in w-full max-w-md">
+        <div className="mb-8 text-center">
+          <div className="bg-primary/10 text-primary mx-auto mb-4 flex size-14 items-center justify-center rounded-2xl">
+            <Bot className="size-7" />
+          </div>
+          <h1 className="text-primary font-serif text-3xl font-semibold">MyClaw</h1>
+          <p className="text-muted-foreground mt-2 text-sm">企业级 Agent 装配与编排平台</p>
+        </div>
+
+        <Card className="shadow-md">
+          <CardHeader>
+            <CardTitle>登录</CardTitle>
+            <CardDescription>使用管理员或用户账号登录工作台</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Form form={form} onFinish={onFinish} layout="vertical" requiredMark={false}>
+              <Form.Item
+                name="email"
+                label={<span className="text-sm font-medium">邮箱</span>}
+                rules={[{ required: true, type: 'email', message: '请输入有效邮箱' }]}
+              >
+                <Input size="large" placeholder="admin@myclaw.local" className="rounded-lg" />
+              </Form.Item>
+              <Form.Item
+                name="password"
+                label={<span className="text-sm font-medium">密码</span>}
+                rules={[{ required: true, message: '请输入密码' }]}
+              >
+                <Input.Password size="large" className="rounded-lg" />
+              </Form.Item>
+              <Form.Item className="mb-0 mt-2">
+                <Button type="submit" className="h-10 w-full text-sm">
+                  登录
+                </Button>
+              </Form.Item>
+            </Form>
+          </CardContent>
+        </Card>
+      </div>
     </div>
   )
 }

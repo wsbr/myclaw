@@ -1,10 +1,10 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Table, Tag, Button, Space, Typography, Select, Badge, Tooltip } from 'antd'
+import { Table, Tag, Button, Space, Select, Badge, Tooltip, Card } from 'antd'
 import { StopOutlined, ReloadOutlined } from '@ant-design/icons'
-import { tasksApi } from '../../api/tasks'
+import { tasksApi } from '@/api/tasks'
 import dayjs from 'dayjs'
 import relativeTime from 'dayjs/plugin/relativeTime'
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 
 dayjs.extend(relativeTime)
 
@@ -32,10 +32,12 @@ export default function TasksPage() {
     {
       title: '任务', dataIndex: 'title', key: 'title',
       render: (v: string, r: any) => (
-        <Space direction="vertical" size={0}>
-          <Typography.Text strong>{v || r.id.slice(0, 12)}</Typography.Text>
-          {r.waiting_reason && <Typography.Text type="warning" style={{ fontSize: 12 }}>{r.waiting_reason}</Typography.Text>}
-        </Space>
+        <div>
+          <div className="font-medium">{v || r.id.slice(0, 12)}</div>
+          {r.waiting_reason && (
+            <div className="text-amber-600 text-xs">{r.waiting_reason}</div>
+          )}
+        </div>
       ),
     },
     {
@@ -46,10 +48,10 @@ export default function TasksPage() {
     {
       title: '触发', dataIndex: 'trigger_type', key: 'trigger',
       render: (v: string, r: any) => (
-        <Space direction="vertical" size={0}>
+        <div>
           <Tag>{v}</Tag>
-          {r.cron_expr && <Typography.Text type="secondary" style={{ fontSize: 12 }}>{r.cron_expr}</Typography.Text>}
-        </Space>
+          {r.cron_expr && <div className="text-muted-foreground text-xs">{r.cron_expr}</div>}
+        </div>
       ),
     },
     {
@@ -73,9 +75,12 @@ export default function TasksPage() {
   ]
 
   return (
-    <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
-        <Typography.Title level={4} style={{ margin: 0 }}>Task 看板</Typography.Title>
+    <div className="mx-auto max-w-6xl">
+      <div className="mb-6 flex items-center justify-between">
+        <div>
+          <h2 className="text-2xl font-semibold tracking-tight">Tasks</h2>
+          <p className="text-muted-foreground mt-1 text-sm">异步任务看板，每 5 秒自动刷新</p>
+        </div>
         <Space>
           <Select
             allowClear
@@ -89,13 +94,15 @@ export default function TasksPage() {
           </Button>
         </Space>
       </div>
-      <Table
-        dataSource={tasks || []}
-        columns={columns}
-        rowKey="id"
-        loading={isLoading}
-        pagination={{ pageSize: 20 }}
-      />
+      <Card className="rounded-xl shadow-sm" bordered={false}>
+        <Table
+          dataSource={tasks || []}
+          columns={columns}
+          rowKey="id"
+          loading={isLoading}
+          pagination={{ pageSize: 20 }}
+        />
+      </Card>
     </div>
   )
 }

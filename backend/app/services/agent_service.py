@@ -1,10 +1,11 @@
 from __future__ import annotations
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 from fastapi import HTTPException, status
 from app.models.agent import Agent, AgentVersion, AgentTool, AgentSkill, AgentMcpServer, AgentBuiltinTool
 from app.models.user import User, ApiToken
-from app.schemas.agent import AgentCreate, AgentUpdate
+from app.schemas.agent import AgentCreate, AgentUpdate, AgentResponse
 import uuid
 import secrets
 import hashlib
@@ -27,6 +28,35 @@ class AgentService:
         if not agent:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
         return agent
+
+    @staticmethod
+    async def to_response(db: AsyncSession, agent: Agent) -> AgentResponse:
+        result = await db.execute(
+            select(Agent)
+            .where(Agent.id == agent.id)
+            .options(
+                selectinload(Agent.agent_tools),
+                selectinload(Agent.agent_skills),
+                selectinload(Agent.agent_mcp_servers),
+                selectinload(Agent.agent_builtin_tools),
+            )
+        )
+        loaded = result.scalar_one()
+        base = AgentResponse.model_validate(loaded)
+        return base.model_copy(update={
+            "tool_ids": [
+                t.tool_id for t in sorted(loaded.agent_tools, key=lambda row: row.sort_order)
+            ],
+            "skill_ids": [
+                s.skill_id for s in sorted(loaded.agent_skills, key=lambda row: row.sort_order)
+            ],
+            "mcp_server_ids": [
+                m.mcp_server_id for m in sorted(loaded.agent_mcp_servers, key=lambda row: row.sort_order)
+            ],
+            "builtin_tools": [
+                t.tool_key for t in loaded.agent_builtin_tools if t.enabled
+            ],
+        })
 
     @staticmethod
     async def create(db: AsyncSession, owner: User, body: AgentCreate) -> Agent:
@@ -100,10 +130,14 @@ class AgentService:
         await db.execute(
             AgentTool.__table__.delete().where(AgentTool.agent_id == agent.id)
         )
+        await db.execute(
+            AgentBuiltinTool.__table__.delete().where(AgentBuiltinTool.agent_id == agent.id)
+        )
         for i, tool_id in enumerate(body.get("tool_ids", [])):
             db.add(AgentTool(agent_id=agent.id, tool_id=tool_id, sort_order=i))
         for key, enabled in body.get("builtin_tools", {}).items():
-            db.add(AgentBuiltinTool(agent_id=agent.id, tool_key=key, enabled=enabled))
+            if enabled:
+                db.add(AgentBuiltinTool(agent_id=agent.id, tool_key=key, enabled=True))
         await db.commit()
 
     @staticmethod

@@ -1,0 +1,2 @@
+# MyClaw tests require Python 3.10+ (backend uses PEP 604 union syntax)
+python_requires = >=3.10

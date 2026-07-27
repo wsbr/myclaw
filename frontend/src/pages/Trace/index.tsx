@@ -71,9 +71,11 @@ export default function TracePage() {
 
   const treeData = spans ? buildTree(spans) : []
 
-  const decompressSnapshot = (b64?: string) => {
-    if (!b64) return null
-    try { return JSON.parse(atob(b64)) } catch { return null }
+  const decompressSnapshot = (raw?: unknown) => {
+    if (!raw) return null
+    if (typeof raw === 'object') return raw
+    if (typeof raw !== 'string') return null
+    try { return JSON.parse(atob(raw)) } catch { return null }
   }
 
   return (

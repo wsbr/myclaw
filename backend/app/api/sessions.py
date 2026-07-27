@@ -8,17 +8,16 @@ from app.models.user import User
 from app.models.session import Session, OrchestrationGraph
 from app.services.session_service import SessionService
 from app.schemas.session import SessionCreate, SessionResponse, ChatRequest, ForkRequest
+from app.schemas.plan import (
+    PlanGenerateRequest,
+    PlanUpdateRequest,
+    PlanReviseRequest,
+    PlanPreview,
+    PlanExecuteResponse,
+)
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
-
-
-class PlanGenerateRequest(BaseModel):
-    goal: str
-
-
-class PlanUpdateRequest(BaseModel):
-    steps: list[dict]
 
 
 class GroupOrchestrateRequest(BaseModel):
@@ -111,7 +110,7 @@ async def list_spans(
 
 # ── Plan mode ──────────────────────────────────────────────────────────────
 
-@router.post("/{session_id}/plan/generate")
+@router.post("/{session_id}/plan/generate", response_model=PlanPreview)
 async def plan_generate(
     session_id: str,
     body: PlanGenerateRequest,
@@ -122,19 +121,40 @@ async def plan_generate(
     from app.services.agent_service import AgentService
     session = await SessionService.get_or_404(db, session_id, current_user)
     snapshot = await AgentService.get_snapshot(db, session.agent_id)
-    return await PlanExecutor.generate_plan(db, session, snapshot, body.goal)
+    return await PlanExecutor.generate_plan(db, session, snapshot, body.goal, current_user.id)
 
 
-@router.put("/{session_id}/plan/{plan_id}")
-async def plan_update(session_id: str, plan_id: str, body: PlanUpdateRequest):
-    return {"plan_id": plan_id, "steps": body.steps, "status": "draft"}
-
-
-@router.post("/{session_id}/plan/{plan_id}/execute")
-async def plan_execute(
+@router.get("/{session_id}/plan/{plan_id}", response_model=PlanPreview)
+async def plan_get(
     session_id: str,
     plan_id: str,
-    body: dict = {},
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    from app.runtime.plan_executor import PlanExecutor, plan_to_preview
+    await SessionService.get_or_404(db, session_id, current_user)
+    plan = await PlanExecutor.get_plan_or_404(db, session_id, plan_id)
+    return plan_to_preview(plan)
+
+
+@router.put("/{session_id}/plan/{plan_id}", response_model=PlanPreview)
+async def plan_update(
+    session_id: str,
+    plan_id: str,
+    body: PlanUpdateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    from app.runtime.plan_executor import PlanExecutor
+    await SessionService.get_or_404(db, session_id, current_user)
+    return await PlanExecutor.update_plan(db, session_id, plan_id, [s.model_dump() for s in body.steps])
+
+
+@router.post("/{session_id}/plan/{plan_id}/revise", response_model=PlanPreview)
+async def plan_revise(
+    session_id: str,
+    plan_id: str,
+    body: PlanReviseRequest,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -142,9 +162,22 @@ async def plan_execute(
     from app.services.agent_service import AgentService
     session = await SessionService.get_or_404(db, session_id, current_user)
     snapshot = await AgentService.get_snapshot(db, session.agent_id)
-    plan = body if body else {}
-    task_id = await PlanExecutor.execute_plan(db, session, snapshot, plan)
-    return {"task_id": task_id}
+    return await PlanExecutor.revise_plan(db, session, snapshot, plan_id, body.instruction, current_user.id)
+
+
+@router.post("/{session_id}/plan/{plan_id}/execute", response_model=PlanExecuteResponse)
+async def plan_execute(
+    session_id: str,
+    plan_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    from app.runtime.plan_executor import PlanExecutor
+    from app.services.agent_service import AgentService
+    session = await SessionService.get_or_404(db, session_id, current_user)
+    snapshot = await AgentService.get_snapshot(db, session.agent_id)
+    task_id = await PlanExecutor.execute_plan(db, session, snapshot, plan_id)
+    return PlanExecuteResponse(task_id=task_id, plan_id=plan_id)
 
 
 # ── Group mode ─────────────────────────────────────────────────────────────

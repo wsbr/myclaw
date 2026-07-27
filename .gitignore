@@ -26,6 +26,10 @@ npm-debug.log*
 
 # Local tooling
 .claude/
+test/e2e/ui/node_modules/
+test/e2e/ui/playwright-report/
+test/e2e/ui/test-results/
+test/e2e/ui/.seed-data.json
 
 # Docker volumes (if created locally)
 mysql_data/

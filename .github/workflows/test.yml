@@ -1,0 +1,120 @@
+name: Tests
+
+on:
+  push:
+    branches: [main, dev_*]
+  pull_request:
+    branches: [main]
+
+jobs:
+  unit-integration:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: rootpassword
+          MYSQL_DATABASE: myclaw_test
+          MYSQL_USER: myclaw
+          MYSQL_PASSWORD: mypassword
+        ports:
+          - 3307:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost -u myclaw -pmypassword"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=15
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6380:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=5s
+          --health-timeout=3s
+          --health-retries=10
+
+    env:
+      DATABASE_URL: mysql+aiomysql://myclaw:mypassword@localhost:3307/myclaw_test
+      REDIS_URL: redis://@localhost:6380/0
+      CELERY_BROKER_URL: redis://@localhost:6380/1
+      CELERY_RESULT_BACKEND: redis://@localhost:6380/2
+      SECRET_KEY: test-secret-key-for-jwt-signing-32chars
+      ENCRYPTION_KEY: test-encryption-key-32-bytes-hex00
+      INIT_ADMIN_EMAIL: admin@test.myclaw.local
+      INIT_ADMIN_PASSWORD: testpassword123
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r test/requirements.txt
+
+      - name: Run migrations
+        working-directory: backend
+        run: alembic upgrade head
+
+      - name: Run unit tests
+        working-directory: test
+        run: pytest unit/ -m unit -v --tb=short
+
+      - name: Run integration tests
+        working-directory: test
+        run: pytest integration/ -m integration -v --tb=short
+
+      - name: Run in-process E2E tests
+        working-directory: test
+        run: pytest e2e/test_plan_execution_trace.py -m "e2e and not fullstack" -v --tb=short
+
+  fullstack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Python dependencies
+        run: pip install -r test/requirements.txt
+
+      - name: Start full stack
+        working-directory: test
+        run: |
+          docker compose -f docker-compose.test.yml --profile fullstack up -d --build
+          chmod +x scripts/wait_for_stack.sh
+          ./scripts/wait_for_stack.sh
+
+      - name: Run fullstack API tests
+        working-directory: test
+        env:
+          MYCLAW_FULLSTACK_API_URL: http://localhost:8001
+          MYCLAW_FULLSTACK_UI_URL: http://localhost:8081
+          MYCLAW_MOCK_LLM_URL: http://localhost:9090
+        run: pytest e2e/fullstack/ -m fullstack -v --tb=short
+
+      - name: Install Playwright and run UI tests
+        working-directory: test
+        env:
+          MYCLAW_FULLSTACK_API_URL: http://localhost:8001
+          MYCLAW_FULLSTACK_UI_URL: http://localhost:8081
+          MYCLAW_MOCK_LLM_INTERNAL_URL: http://mock-llm:9090
+        run: |
+          python -m playwright install chromium --with-deps
+          pytest e2e/ui/test_ui_fullstack.py -m fullstack -v --tb=short
+
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: test/e2e/ui/playwright-report/

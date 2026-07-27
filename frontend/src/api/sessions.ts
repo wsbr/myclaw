@@ -1,5 +1,22 @@
 import client, { API_BASE } from './client'
 
+export interface PlanStep {
+  id: string
+  description: string
+  tool?: string | null
+  depends_on?: string[]
+  status: 'pending' | 'running' | 'completed' | 'failed'
+  output?: string | null
+}
+
+export interface PlanPreview {
+  plan_id: string
+  session_id: string
+  goal: string
+  steps: PlanStep[]
+  status: string
+}
+
 export const sessionsApi = {
   list: (agentId?: string) =>
     client.get('/sessions', { params: { agent_id: agentId } }).then((r) => r.data),
@@ -11,6 +28,17 @@ export const sessionsApi = {
   listRunners: (id: string) => client.get(`/sessions/${id}/runners`).then((r) => r.data),
   listSpans: (sessionId: string, runnerId: string) =>
     client.get(`/sessions/${sessionId}/runners/${runnerId}/spans`).then((r) => r.data),
+
+  generatePlan: (sessionId: string, goal: string) =>
+    client.post<PlanPreview>(`/sessions/${sessionId}/plan/generate`, { goal }).then((r) => r.data),
+  getPlan: (sessionId: string, planId: string) =>
+    client.get<PlanPreview>(`/sessions/${sessionId}/plan/${planId}`).then((r) => r.data),
+  updatePlan: (sessionId: string, planId: string, steps: PlanStep[]) =>
+    client.put<PlanPreview>(`/sessions/${sessionId}/plan/${planId}`, { steps }).then((r) => r.data),
+  revisePlan: (sessionId: string, planId: string, instruction: string) =>
+    client.post<PlanPreview>(`/sessions/${sessionId}/plan/${planId}/revise`, { instruction }).then((r) => r.data),
+  executePlan: (sessionId: string, planId: string) =>
+    client.post<{ task_id: string; plan_id: string }>(`/sessions/${sessionId}/plan/${planId}/execute`).then((r) => r.data),
 }
 
 export function chatStream(

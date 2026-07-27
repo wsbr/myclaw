@@ -1,7 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import { useAuthStore } from './store/auth'
 import LoginPage from './pages/Login'
-import DashboardPage from './pages/Dashboard'
+import WorkspaceLayout from './components/layout/WorkspaceLayout'
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
   const token = useAuthStore((s) => s.token)
@@ -13,7 +13,14 @@ export default function App() {
     <BrowserRouter>
       <Routes>
         <Route path="/login" element={<LoginPage />} />
-        <Route path="/*" element={<PrivateRoute><DashboardPage /></PrivateRoute>} />
+        <Route
+          path="/*"
+          element={
+            <PrivateRoute>
+              <WorkspaceLayout />
+            </PrivateRoute>
+          }
+        />
       </Routes>
     </BrowserRouter>
   )
