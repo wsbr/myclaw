@@ -25,6 +25,8 @@ export const sessionsApi = {
   get: (id: string) => client.get(`/sessions/${id}`).then((r) => r.data),
   delete: (id: string) => client.delete(`/sessions/${id}`),
   fork: (id: string, data: object) => client.post(`/sessions/${id}/fork`, data).then((r) => r.data),
+  getMessages: (id: string) =>
+    client.get<{ role: 'user' | 'assistant'; content: string; created_at: string }[]>(`/sessions/${id}/messages`).then((r) => r.data),
   listRunners: (id: string) => client.get(`/sessions/${id}/runners`).then((r) => r.data),
   listSpans: (sessionId: string, runnerId: string) =>
     client.get(`/sessions/${sessionId}/runners/${runnerId}/spans`).then((r) => r.data),

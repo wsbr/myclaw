@@ -53,9 +53,27 @@ class AnthropicLLM(BaseLLM):
         if params.get("temperature") is not None:
             kwargs["temperature"] = params["temperature"]
 
+        # 用 SDK 自带的 get_final_message() 拿完整组装好的 tool_use 块和真实 usage，
+        # 而不是手写增量 JSON 片段累积器——messages.stream() 本来就已经做好了这层工作。
         async with self.client.messages.stream(**kwargs) as stream:
             async for text in stream.text_stream:
                 yield LLMChunk(type="text_delta", content=text)
+            final_message = await stream.get_final_message()
+
+        for block in final_message.content:
+            if block.type == "tool_use":
+                yield LLMChunk(
+                    type="tool_call_delta",
+                    tool_call=ToolCall(id=block.id, name=block.name, arguments=block.input),
+                )
+
+        yield LLMChunk(
+            type="done",
+            usage=TokenUsage(
+                input_tokens=final_message.usage.input_tokens,
+                output_tokens=final_message.usage.output_tokens,
+            ),
+        )
 
     async def count_tokens(self, messages: list[dict]) -> int:
         resp = await self.client.messages.count_tokens(

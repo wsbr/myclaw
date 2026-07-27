@@ -14,7 +14,12 @@ class CreateScheduledTaskTool(BaseTool):
             "title": {"type": "string", "description": "任务标题"},
             "description": {
                 "type": "string",
-                "description": "到点时 Agent 要执行的任务描述（如提醒用户复习某内容）",
+                "description": (
+                    "到点时 Agent 要执行的任务内容本身，只写「做什么」（如：提醒用户复习XX、生成并发送某段代码）。"
+                    "禁止在此字段中包含任何时间/延时信息（如「5分钟后」「明天」「每天8点」等）——"
+                    "所有时间信息已经由 delay/cron_expr/at 参数完全表达，本字段内容会在到点时原样交给"
+                    "Agent 执行，不会再被重新解析出时间含义。"
+                ),
             },
             "delay": {
                 "type": "string",
@@ -63,12 +68,27 @@ class CreateScheduledTaskTool(BaseTool):
         if not agent:
             return ToolResult(success=False, error="Agent not found")
 
+        if context.task_id:
+            from app.services.task_service import TaskService
+            depth = await TaskService.count_ancestor_chain_depth(db, context.task_id)
+            if depth >= TaskService.MAX_SCHEDULED_CHAIN_DEPTH:
+                return ToolResult(
+                    success=False,
+                    error=(
+                        f"Refusing to create another scheduled task: this task chain is already "
+                        f"{depth} levels deep (max {TaskService.MAX_SCHEDULED_CHAIN_DEPTH}). This usually "
+                        f"means a scheduled task is re-scheduling itself instead of executing its content. "
+                        f"Execute the task content directly instead of calling create_scheduled_task again."
+                    ),
+                )
+
         task = Task(
             id=str(uuid.uuid4()),
             agent_id=context.agent_id,
             agent_version=agent.version,
             user_id=context.user_id,
             session_id=context.session_id,
+            parent_task_id=context.task_id,
             title=args["title"],
             trigger_type="scheduled",
             cron_expr=resolved_cron,

@@ -111,6 +111,31 @@ class SessionService:
         return result.scalars().all()
 
     @staticmethod
+    async def get_messages(db: AsyncSession, session_id: str, current_user: User) -> list[dict]:
+        """Reconstruct a chat-bubble message list from this session's completed Runners.
+
+        Lets the frontend re-hydrate a conversation after the page was closed and
+        reopened, instead of only offering the raw Span/Trace view.
+        """
+        await SessionService.get_or_404(db, session_id, current_user)
+        result = await db.execute(
+            select(Runner)
+            .where(Runner.session_id == session_id, Runner.status == "completed")
+            .order_by(Runner.created_at)
+        )
+        messages: list[dict] = []
+        for r in result.scalars().all():
+            if r.input_data:
+                user_msg = r.input_data.get("message") or r.input_data.get("description", "")
+                if user_msg:
+                    messages.append({"role": "user", "content": user_msg, "created_at": r.created_at.isoformat()})
+            if r.output_data:
+                assistant_msg = r.output_data.get("content") or r.output_data.get("summary", "")
+                if assistant_msg:
+                    messages.append({"role": "assistant", "content": assistant_msg, "created_at": r.created_at.isoformat()})
+        return messages
+
+    @staticmethod
     def _decode_blob(data: bytes | None) -> dict | None:
         if data is None:
             return None

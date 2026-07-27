@@ -21,13 +21,14 @@ const PLAN_STATUS: Record<string, 'wait' | 'process' | 'finish' | 'error'> = {
 }
 
 export default function SessionPage() {
-  const { agentId } = useParams<{ agentId: string }>()
+  const { agentId, sessionId: urlSessionId } = useParams<{ agentId: string; sessionId?: string }>()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
   const [streaming, setStreaming] = useState(false)
-  const [sessionId, setSessionId] = useState<string | null>(null)
+  const [sessionId, setSessionId] = useState<string | null>(urlSessionId ?? null)
+  const [historyLoading, setHistoryLoading] = useState(false)
   const [plan, setPlan] = useState<PlanPreview | null>(null)
   const [planLoading, setPlanLoading] = useState(false)
   const [uiMode, setUiMode] = useState<'chat' | 'plan'>('chat')
@@ -36,6 +37,10 @@ export default function SessionPage() {
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const wsRef = useRef<WebSocket | null>(null)
+  // ensureSession() 新建会话后会把 session_id 写回 URL 以便刷新可续接；
+  // 这个 ref 用来告诉下面的历史消息 effect「这次 URL 变化是我们自己触发的
+  // URL 同步，本地 messages 已经是最新的，不要重置/重新拉历史」。
+  const skipNextHistorySync = useRef(false)
 
   const { data: agent } = useQuery({
     queryKey: ['agent', agentId],
@@ -48,6 +53,33 @@ export default function SessionPage() {
     queryFn: () => sessionsApi.list(agentId),
     enabled: !!agentId,
   })
+
+  // 页面(重新)打开时，如果 URL 里带了 session_id（历史会话或刷新后的当前会话），
+  // 从后端拉取该 session 的历史消息并还原成聊天气泡，而不是每次都清空重新开始。
+  useEffect(() => {
+    setSessionId(urlSessionId ?? null)
+
+    if (skipNextHistorySync.current) {
+      skipNextHistorySync.current = false
+      return
+    }
+
+    setMessages([])
+    setPlan(null)
+    setUiMode('chat')
+    setReviseMode(false)
+    setExecuting(false)
+    setActiveTaskId(null)
+
+    if (!urlSessionId) return
+    setHistoryLoading(true)
+    sessionsApi.getMessages(urlSessionId)
+      .then((history) => {
+        setMessages(history.map((m) => ({ role: m.role, content: m.content })))
+      })
+      .catch(() => message.error('历史会话加载失败'))
+      .finally(() => setHistoryLoading(false))
+  }, [urlSessionId])
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -107,6 +139,11 @@ export default function SessionPage() {
     if (sessionId) return sessionId
     const s = await sessionsApi.create(agentId!, mode)
     setSessionId(s.id)
+    // 把新建的 session_id 写进 URL：刷新/重开页面时能按此还原历史消息、重连 WebSocket。
+    // skipNextHistorySync 防止这次自己触发的 URL 变化被历史加载 effect 当成
+    // "切换到了别的会话"，从而清空刚刚已经写入本地 state 的消息。
+    skipNextHistorySync.current = true
+    navigate(`/agents/${agentId}/chat/${s.id}`, { replace: true })
     queryClient.invalidateQueries({ queryKey: ['sessions', agentId] })
     return s.id as string
   }
@@ -144,14 +181,21 @@ export default function SessionPage() {
       msg,
       (chunk) => {
         setMessages(prev => {
+          if (prev.length === 0 || prev[prev.length - 1].role !== 'assistant') {
+            return [...prev, { role: 'assistant', content: chunk }]
+          }
           const copy = [...prev]
-          copy[copy.length - 1] = { ...copy[copy.length - 1], content: copy[copy.length - 1].content + chunk }
+          const last = copy[copy.length - 1]
+          copy[copy.length - 1] = { ...last, content: last.content + chunk }
           return copy
         })
       },
       () => setStreaming(false),
       (err) => {
         setMessages(prev => {
+          if (prev.length === 0 || prev[prev.length - 1].role !== 'assistant') {
+            return [...prev, { role: 'assistant', content: `[错误] ${err}` }]
+          }
           const copy = [...prev]
           copy[copy.length - 1] = { ...copy[copy.length - 1], content: `[错误] ${err}` }
           return copy
@@ -226,10 +270,7 @@ export default function SessionPage() {
           <Button icon={<ArrowLeftOutlined />} block onClick={() => navigate('/agents')}>
             返回 Agents
           </Button>
-          <Button type="primary" block onClick={() => {
-            setMessages([]); setSessionId(null); setPlan(null); setUiMode('chat')
-            setReviseMode(false); setExecuting(false); setActiveTaskId(null)
-          }}>
+          <Button type="primary" block onClick={() => navigate(`/agents/${agentId}/chat`)}>
             新对话
           </Button>
           {sessionId && (
@@ -253,7 +294,7 @@ export default function SessionPage() {
                     ? 'bg-sidebar-accent text-sidebar-accent-foreground font-medium'
                     : 'text-muted-foreground hover:bg-sidebar-accent/60',
                 )}
-                onClick={() => navigate(`/sessions/${s.id}/trace`)}
+                onClick={() => navigate(`/agents/${agentId}/chat/${s.id}`)}
               >
                 <HistoryOutlined className="shrink-0 text-xs" />
                 <span className="truncate">{s.title || s.id.slice(0, 12)}</span>
@@ -367,7 +408,13 @@ export default function SessionPage() {
 
         <div className="flex-1 overflow-y-auto px-5 py-6">
           <div className="mx-auto max-w-3xl">
-            {messages.length === 0 && !plan && (
+            {historyLoading && (
+              <div className="flex flex-col items-center justify-center py-20 text-center">
+                <Spin />
+                <p className="text-muted-foreground mt-3 text-sm">正在恢复历史对话...</p>
+              </div>
+            )}
+            {!historyLoading && messages.length === 0 && !plan && (
               <div className="flex flex-col items-center justify-center py-20 text-center">
                 <div className="mb-3 text-3xl">👋</div>
                 <p className="text-lg font-semibold">开始与 {agent?.name} 对话</p>

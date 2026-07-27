@@ -56,6 +56,7 @@ async def _run_task(task_id: str) -> dict:
     from app.models.session import Session, Runner
     from app.services.agent_service import AgentService
     from app.runtime.agent_runtime import AgentRuntime
+    from app.runtime.context_builder import SCHEDULED_TASK_EXECUTION_CONTEXT
     from sqlalchemy import select
 
     async with AsyncSessionLocal() as db:
@@ -98,10 +99,11 @@ async def _run_task(task_id: str) -> dict:
             db.add(runner)
             await db.flush()
 
-            runtime = AgentRuntime(snapshot=snapshot, db=db, runner=runner, session=session)
+            runtime = AgentRuntime(snapshot=snapshot, db=db, runner=runner, session=session, task_id=task_id)
             user_input = (task.input_data or {}).get("description", str(task.input_data or ""))
+            execution_context = SCHEDULED_TASK_EXECUTION_CONTEXT if task.trigger_type == "scheduled" else None
             full_output = ""
-            async for event in runtime.run(user_input):
+            async for event in runtime.run(user_input, execution_context=execution_context):
                 if event.get("type") == "done":
                     full_output = event.get("content", "")
 
@@ -235,7 +237,7 @@ async def _run_plan_task(task_id: str, plan: dict) -> dict:
                 await db.flush()
 
                 step_prompt = build_step_prompt(step, step_outputs, goal)
-                runtime = AgentRuntime(snapshot=snapshot, db=db, runner=child_runner, session=session)
+                runtime = AgentRuntime(snapshot=snapshot, db=db, runner=child_runner, session=session, task_id=task_id)
                 step_output = ""
                 try:
                     async for event in runtime.run(step_prompt):
@@ -305,6 +307,17 @@ async def _run_plan_task(task_id: str, plan: dict) -> dict:
             if task.output_channel != "platform_ui":
                 from app.core.channels.dispatcher import ChannelDispatcher
                 await ChannelDispatcher.send(task.output_channel, full_output, db=db)
+            else:
+                from app.services.notification_service import NotificationService
+                await NotificationService.create(
+                    db,
+                    user_id=task.user_id,
+                    content=full_output,
+                    agent_id=task.agent_id,
+                    session_id=session.id,
+                    task_id=task_id,
+                    title=task.title or "计划执行完成",
+                )
 
             await broadcast_session_event(session.id, "plan_completed", {
                 "plan_id": plan_id,

@@ -19,6 +19,11 @@ BUILTIN_TOOLS: dict[str, BaseTool] = {
 }
 
 
+def _missing_required_fields(tool: BaseTool, args: dict) -> list[str]:
+    required = tool.input_schema.get("required") or []
+    return [f for f in required if f not in args or args.get(f) is None]
+
+
 class ToolRegistry:
 
     @staticmethod
@@ -26,6 +31,19 @@ class ToolRegistry:
         tool = BUILTIN_TOOLS.get(tool_name)
         if not tool:
             return ToolResult(success=False, error=f"Tool '{tool_name}' not found")
+
+        missing = _missing_required_fields(tool, args)
+        if missing:
+            required = tool.input_schema.get("required") or []
+            return ToolResult(
+                success=False,
+                error=(
+                    f"Missing required field(s): {', '.join(missing)}. "
+                    f"You provided: {list(args.keys())}. "
+                    f"Expected fields: {', '.join(required)}"
+                ),
+            )
+
         try:
             return await tool.execute(args, context, db=db)
         except Exception as e:

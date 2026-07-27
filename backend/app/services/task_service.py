@@ -91,3 +91,24 @@ class TaskService:
             task.status = "running"
             task.waiting_reason = None
             await db.commit()
+
+    MAX_SCHEDULED_CHAIN_DEPTH = 3
+
+    @staticmethod
+    async def count_ancestor_chain_depth(db: AsyncSession, task_id: str | None, max_walk: int = 20) -> int:
+        """Walk up the parent_task_id chain from `task_id`, bounded by max_walk to guard
+        against a corrupted/cyclic chain. Returns the number of ancestors found."""
+        depth = 0
+        current_id = task_id
+        seen: set[str] = set()
+        while current_id and depth < max_walk:
+            if current_id in seen:
+                break
+            seen.add(current_id)
+            result = await db.execute(select(Task.parent_task_id).where(Task.id == current_id))
+            parent_id = result.scalar_one_or_none()
+            if not parent_id:
+                break
+            depth += 1
+            current_id = parent_id
+        return depth

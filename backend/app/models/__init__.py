@@ -5,6 +5,7 @@ from app.models.session import Session, Runner, Span, ExecutionPlan, Orchestrati
 from app.models.task import Task
 from app.models.memory import Memory
 from app.models.stats import UsageStat, ChannelConfig
+from app.models.notification import Notification
 
 __all__ = [
     "User", "ApiToken",
@@ -14,4 +15,5 @@ __all__ = [
     "Task",
     "Memory",
     "UsageStat", "ChannelConfig",
+    "Notification",
 ]

@@ -89,6 +89,15 @@ async def fork_session(
     return await SessionService.fork(db, session_id, current_user, body)
 
 
+@router.get("/{session_id}/messages")
+async def get_messages(
+    session_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return await SessionService.get_messages(db, session_id, current_user)
+
+
 @router.get("/{session_id}/runners")
 async def list_runners(
     session_id: str,

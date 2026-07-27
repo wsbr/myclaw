@@ -15,7 +15,7 @@ class ChannelDispatcher:
     ) -> bool:
         try:
             if channel == "platform_ui":
-                return await ChannelDispatcher._send_platform_ui(content, context)
+                return await ChannelDispatcher._send_platform_ui(content, context, title=title, db=db)
 
             cfg = {}
             if db and agent_id:
@@ -68,9 +68,30 @@ class ChannelDispatcher:
             return False
 
     @staticmethod
-    async def _send_platform_ui(content: str, context: RuntimeContext | None) -> bool:
+    async def _send_platform_ui(
+        content: str,
+        context: RuntimeContext | None,
+        title: str | None = None,
+        db=None,
+    ) -> bool:
         import redis.asyncio as aioredis
         from app.config import settings
+
+        # 持久化通知：即使没有浏览器正在监听 WebSocket，用户之后打开
+        # 通知中心或刷新页面也能看到这条主动通知，不会被 Pub/Sub 丢弃。
+        if context and context.user_id and db is not None:
+            from app.services.notification_service import NotificationService
+            await NotificationService.create(
+                db,
+                user_id=context.user_id,
+                content=content,
+                agent_id=context.agent_id,
+                session_id=context.session_id,
+                task_id=context.task_id,
+                channel="platform_ui",
+                title=title,
+            )
+
         session_key = f"myclaw:session:{context.session_id}" if context else "myclaw:stream"
         async with aioredis.from_url(settings.redis_url, decode_responses=True) as r:
             await r.publish(session_key, json.dumps({"type": "task_output", "content": content}))

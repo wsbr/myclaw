@@ -49,9 +49,14 @@ class OpenAILLM(BaseLLM):
         self.client = oai.AsyncOpenAI(api_key=api_key, base_url=base_url)
 
     async def chat(self, messages: list[dict], tools: list[dict] | None, params: dict) -> LLMResponse:
+        system = params.pop("system", None)
+        msgs = normalize_messages_for_openai(messages)
+        if system:
+            msgs = [{"role": "system", "content": system}] + msgs
+
         kwargs = dict(
             model=params.get("model_id", "gpt-4o"),
-            messages=normalize_messages_for_openai(messages),
+            messages=msgs,
             max_tokens=params.get("max_tokens", 8192),
             temperature=params.get("temperature", 0.7),
         )
@@ -75,17 +80,60 @@ class OpenAILLM(BaseLLM):
         )
 
     async def stream(self, messages: list[dict], tools: list[dict] | None, params: dict) -> AsyncIterator[LLMChunk]:
+        system = params.pop("system", None)
+        msgs = normalize_messages_for_openai(messages)
+        if system:
+            msgs = [{"role": "system", "content": system}] + msgs
+
         kwargs = dict(
             model=params.get("model_id", "gpt-4o"),
-            messages=normalize_messages_for_openai(messages),
+            messages=msgs,
             stream=True,
+            stream_options={"include_usage": True},
         )
         if tools:
             kwargs["tools"] = [{"type": "function", "function": t} for t in tools]
+
+        # OpenAI 流式工具调用是按 index 分片到达的（id/name 只在首个分片出现，
+        # arguments 是需要跨多个 chunk 拼接的 JSON 字符串片段），流结束后统一解析。
+        tool_call_acc: dict[int, dict] = {}
+        usage = None
+
         async for chunk in await self.client.chat.completions.create(**kwargs):
-            delta = chunk.choices[0].delta if chunk.choices else None
+            if chunk.usage:
+                usage = chunk.usage
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
             if delta and delta.content:
                 yield LLMChunk(type="text_delta", content=delta.content)
+            if delta and delta.tool_calls:
+                for tc_delta in delta.tool_calls:
+                    entry = tool_call_acc.setdefault(tc_delta.index, {"id": None, "name": None, "arguments": ""})
+                    if tc_delta.id:
+                        entry["id"] = tc_delta.id
+                    if tc_delta.function:
+                        if tc_delta.function.name:
+                            entry["name"] = tc_delta.function.name
+                        if tc_delta.function.arguments:
+                            entry["arguments"] += tc_delta.function.arguments
+
+        for idx in sorted(tool_call_acc):
+            entry = tool_call_acc[idx]
+            try:
+                arguments = json.loads(entry["arguments"] or "{}")
+            except json.JSONDecodeError:
+                arguments = {}
+            yield LLMChunk(
+                type="tool_call_delta",
+                tool_call=ToolCall(id=entry["id"] or "", name=entry["name"] or "", arguments=arguments),
+            )
+
+        if usage:
+            yield LLMChunk(
+                type="done",
+                usage=TokenUsage(input_tokens=usage.prompt_tokens, output_tokens=usage.completion_tokens),
+            )
 
     async def count_tokens(self, messages: list[dict]) -> int:
         return sum(len(str(m.get("content", ""))) // 4 for m in messages)

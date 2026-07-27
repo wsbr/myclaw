@@ -32,6 +32,7 @@ class CreateTaskTool(BaseTool):
             agent_version=agent.version,
             user_id=context.user_id,
             session_id=context.session_id,
+            parent_task_id=context.task_id,
             title=args["title"],
             trigger_type="immediate",
             input_data={"description": args["description"]},

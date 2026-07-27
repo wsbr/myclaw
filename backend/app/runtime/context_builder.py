@@ -2,6 +2,18 @@ from __future__ import annotations
 from typing import Any
 
 
+SCHEDULED_TASK_EXECUTION_CONTEXT = (
+    "You are now EXECUTING an already-due scheduled or recurring task that was created earlier — "
+    "this is not a new live chat message, it is the scheduled action firing right now. "
+    "Complete the task content described in the user turn immediately (produce the requested output, "
+    "send it via the appropriate channel, etc). Do NOT call create_scheduled_task (or create_task with "
+    "delayed semantics) to reschedule or repeat this same action — the timing has already been fully "
+    "consumed by the scheduler. If the task content still contains a time phrase (e.g. '5分钟后', "
+    "'明天', '每天8点'), ignore it entirely: it describes when this task WAS scheduled to run, not an "
+    "instruction to schedule it again."
+)
+
+
 class ContextBuilder:
     """
     负责将 Agent 快照渲染成最终发送给 LLM 的 system prompt，
@@ -26,6 +38,7 @@ class ContextBuilder:
         skills: list[Any] | None = None,
         tool_descriptions: list[str] | None = None,
         group_agents: list[dict] | None = None,
+        execution_context: str | None = None,
     ) -> str:
         blocks = self.snapshot.get("system_prompt_blocks") or {}
         parts: list[str] = []
@@ -35,6 +48,9 @@ class ContextBuilder:
 
         if instructions := blocks.get("instructions", "").strip():
             parts.append(f"# Instructions\n{instructions}")
+
+        if execution_context:
+            parts.append(f"# Execution Context\n{execution_context}")
 
         if skills:
             skill_lines = "\n\n".join(

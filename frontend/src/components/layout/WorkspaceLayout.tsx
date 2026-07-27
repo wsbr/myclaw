@@ -17,6 +17,7 @@ import {
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { useAuthStore } from '@/store/auth'
+import NotificationBell from '@/components/layout/NotificationBell'
 import AgentListPage from '@/pages/Agents/List'
 import AgentConfigPage from '@/pages/Agents/Config'
 import SessionPage from '@/pages/Session'
@@ -157,6 +158,7 @@ export default function WorkspaceLayout() {
                 <p className="text-muted-foreground truncate text-xs">{user?.email}</p>
               </div>
             )}
+            <NotificationBell />
             <Button
               variant="ghost"
               size="icon"
@@ -190,7 +192,10 @@ export default function WorkspaceLayout() {
             <Route path="/agents" element={<AgentListPage />} />
             <Route path="/agents/new/config" element={<AgentConfigPage />} />
             <Route path="/agents/:id/config" element={<AgentConfigPage />} />
-            <Route path="/agents/:agentId/chat" element={<SessionPage />} />
+            {/* 用可选段而非两条独立 Route：否则带/不带 session_id 之间跳转会
+                被当成不同路由，导致 SessionPage 被卸载重装，正在流式写入的
+                聊天状态会被清空 */}
+            <Route path="/agents/:agentId/chat/:sessionId?" element={<SessionPage />} />
             <Route path="/tasks" element={<TasksPage />} />
             <Route path="/users" element={<UsersPage />} />
             <Route path="/tools" element={<ToolsPage />} />

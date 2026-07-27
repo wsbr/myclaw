@@ -9,20 +9,22 @@ from app.models.agent import AgentTool, AgentSkill, AgentBuiltinTool
 from app.runtime.tracer import Tracer
 from app.runtime.context_builder import ContextBuilder
 from app.core.model_hub.registry import ModelHub
+from app.core.model_hub.base import TokenUsage
 from app.core.tool_registry.registry import ToolRegistry
 from app.core.tool_registry.base import RuntimeContext
 
 
 class AgentRuntime:
-    def __init__(self, snapshot: dict, db: AsyncSession, runner: Runner, session: Session):
+    def __init__(self, snapshot: dict, db: AsyncSession, runner: Runner, session: Session, task_id: str | None = None):
         self.snapshot = snapshot
         self.db = db
         self.runner = runner
         self.session = session
+        self.task_id = task_id
         self.tracer = Tracer(db=db, runner=runner)
         self.ctx_builder = ContextBuilder(snapshot)
 
-    async def run(self, user_input: str) -> AsyncIterator[dict]:
+    async def run(self, user_input: str, execution_context: str | None = None) -> AsyncIterator[dict]:
         self.runner.status = "running"
         self.runner.started_at = datetime.utcnow()
         await self.db.flush()
@@ -35,6 +37,7 @@ class AgentRuntime:
         system_prompt = self.ctx_builder.render_system_prompt(
             skills=skills,
             group_agents=group_agents,
+            execution_context=execution_context,
         )
         tools = ToolRegistry.get_definitions(builtin_keys)
 
@@ -47,6 +50,7 @@ class AgentRuntime:
         context = RuntimeContext(
             session_id=self.session.id,
             runner_id=self.runner.id,
+            task_id=self.task_id,
             user_id=self.runner.user_id,
             agent_id=self.session.agent_id,
         )
@@ -68,6 +72,7 @@ class AgentRuntime:
 
                 chunk_text = ""
                 tool_calls_raw = []
+                usage: TokenUsage | None = None
 
                 async for chunk in llm.stream(messages, tools or None, dict(params)):
                     if chunk.type == "text_delta" and chunk.content:
@@ -75,16 +80,24 @@ class AgentRuntime:
                         yield {"type": "stream_chunk", "content": chunk.content}
                     elif chunk.type == "tool_call_delta" and chunk.tool_call:
                         tool_calls_raw.append(chunk.tool_call)
+                    elif chunk.type == "done" and chunk.usage:
+                        usage = chunk.usage
 
                 if not tool_calls_raw and not chunk_text:
+                    # 兜底：两个适配器都已上报 tool_call_delta + usage 后，这个分支应该很少触发
                     response = await llm.chat(messages, tools or None, dict(params))
                     chunk_text = response.content
                     tool_calls_raw = response.tool_calls
+                    usage = response.usage
                     if chunk_text:
                         yield {"type": "stream_chunk", "content": chunk_text}
 
-                input_tokens = await llm.count_tokens(messages)
-                output_tokens = max(len(chunk_text) // 4, 1)
+                if usage:
+                    input_tokens = usage.input_tokens
+                    output_tokens = usage.output_tokens
+                else:
+                    input_tokens = await llm.count_tokens(messages)
+                    output_tokens = max(len(chunk_text) // 4, 1)
 
                 await self.tracer.end_span(
                     span,

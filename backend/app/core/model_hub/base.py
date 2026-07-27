@@ -26,6 +26,7 @@ class LLMChunk(BaseModel):
     type: str                           # "text_delta" | "tool_call_delta" | "done"
     content: str | None = None
     tool_call: ToolCall | None = None
+    usage: TokenUsage | None = None
 
 
 class BaseLLM(ABC):
