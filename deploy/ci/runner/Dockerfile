@@ -2,7 +2,13 @@ FROM python:3.12-bookworm
 
 ARG DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update \
+RUN printf '%s\n' \
+        'Acquire::Retries "5";' \
+        'Acquire::http::Timeout "30";' \
+        'Acquire::https::Timeout "30";' \
+        > /etc/apt/apt.conf.d/80-myclaw-ci-retries \
+    && sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
         curl \
@@ -19,11 +25,6 @@ RUN apt-get update \
         docker-buildx-plugin \
         docker-ce-cli \
         docker-compose-plugin \
-    && printf '%s\n' \
-        'Acquire::Retries "5";' \
-        'Acquire::http::Timeout "30";' \
-        'Acquire::https::Timeout "30";' \
-        > /etc/apt/apt.conf.d/80-myclaw-ci-retries \
     && rm -rf /var/lib/apt/lists/*
 
 COPY backend/requirements.txt /opt/myclaw-deps/backend/requirements.txt
