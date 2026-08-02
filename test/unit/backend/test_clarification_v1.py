@@ -125,6 +125,7 @@ def test_clarification_authority_by_mode():
         input_snapshot={"agent_invocation_id": "inv"},
     )
     assert RuntimeWorker._can_request_clarification(run, direct) is True
+    assert RuntimeWorker._can_request_clarification(run, direct, has_answered=True) is False
     assert RuntimeWorker._can_request_clarification(run, delegated) is False
     group = Run(mode="group", execution_kind="normal")
     assert RuntimeWorker._can_request_clarification(group, delegated) is True

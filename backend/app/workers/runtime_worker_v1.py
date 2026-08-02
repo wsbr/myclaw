@@ -789,7 +789,16 @@ class RuntimeWorker:
                             implementation_version=tool.implementation_version,
                             config_version=tool.config_version, sort_order=order,
                         ))
-            if self._can_request_clarification(run, runner):
+            can_request_clarification = self._can_request_clarification(run, runner)
+            if can_request_clarification:
+                answered_clarification_id = await db.scalar(select(Clarification.id).where(
+                    Clarification.work_item_id == runner.work_item_id,
+                    Clarification.status == "answered",
+                ).limit(1))
+                can_request_clarification = self._can_request_clarification(
+                    run, runner, has_answered=answered_clarification_id is not None,
+                )
+            if can_request_clarification:
                 clarification_tool = await db.scalar(select(PlatformTool).where(
                     PlatformTool.tool_key == "request_clarification",
                     PlatformTool.enabled.is_(True),
@@ -1185,7 +1194,14 @@ class RuntimeWorker:
             )
 
     @staticmethod
-    def _can_request_clarification(run: Run, runner: DurableRunner) -> bool:
+    def _can_request_clarification(
+        run: Run, runner: DurableRunner, *, has_answered: bool = False,
+    ) -> bool:
+        # A clarification is a single durable user-wait for one WorkItem.  Once
+        # its answer is part of the resumed prompt, exposing the tool again lets
+        # stateless model providers repeat the same call indefinitely.
+        if has_answered:
+            return False
         if run.execution_kind != "normal":
             return False
         if runner.input_snapshot.get("plan_settlement") or runner.input_snapshot.get("group_settlement"):

@@ -17,7 +17,7 @@ from app.models.foundation import (
 )
 from app.models.registry import PlatformTool, PolicyDefinition, RegisteredModel, RegisteredSkill, SkillVersion
 from app.models.runtime_v1 import (
-    AgentInvocation, DurableRunner, Message, Run, RunnerCheckpoint, ToolAttempt, ToolConfirmation,
+    AgentInvocation, Clarification, DurableRunner, Message, Run, RunnerCheckpoint, ToolAttempt, ToolConfirmation,
     ToolInvocation, WorkItem,
     RunnerPolicySnapshot, RunnerSkillSnapshot, RunnerToolSnapshot,
 )
@@ -49,7 +49,7 @@ async def test_worker_claims_acknowledges_and_settles(monkeypatch):
         UserSession.__table__, ExecutionEvent.__table__,
         ExecutionEventRecipient.__table__, Message.__table__, Run.__table__,
         WorkItem.__table__, DurableRunner.__table__, RunnerCheckpoint.__table__,
-        ToolInvocation.__table__, ToolAttempt.__table__, ToolConfirmation.__table__,
+        ToolInvocation.__table__, ToolAttempt.__table__, ToolConfirmation.__table__, Clarification.__table__,
         AgentInvocation.__table__,
         RunnerSkillSnapshot.__table__, RunnerToolSnapshot.__table__, RunnerPolicySnapshot.__table__,
         OutboxCommand.__table__, Artifact.__table__, MessageArtifact.__table__,
