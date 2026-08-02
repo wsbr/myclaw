@@ -22,6 +22,7 @@
 | Group/Plan 视图无法处理模型临时请求的 Tool Confirmation/Clarification | required action 卡片改为三种会话模式共用；Chromium 通过页面按钮批准或填写回答，并继续严格等待 GroupRun 完成 | 真实模型浏览器测试的 required-action POST 必须成功、次数有界，最终完成断言仍保留 |
 | 真实模型偶发返回不可解析的 Plan/Group 结构化提案 | OpenAI-compatible streaming 传递冻结的 temperature/max_tokens；严格校验失败时使用 savepoint 回滚，仅排队一次 fenced repair Runner，不保存原始无效输出；第二次无效仍失败 | 模型参数转发、单次 epoch/attempt 递增、第二次拒绝重试单测；真实 API 与 Chromium 仍要求有效图并完成 |
 | 已回答 Clarification 在无状态模型恢复时可能被重复请求 | 同一 WorkItem 恢复时保留已回答问答上下文，并停止再次装配 `request_clarification`，防止重复进入用户等待 | Clarification 权限/恢复单测；真实模型 API 与 Chromium 仍须完成等待、回答和最终结算 |
+| pytest-playwright 默认清理 `test-results/`，导致多 Gate JUnit 互相覆盖 | Playwright trace/screenshot/video 独立写入 `test/playwright-results/`，JUnit、coverage 与迁移证据继续保留在 `test/test-results/` | 固定 SHA 顺序运行 unit、Mock、real 后三份 JUnit 必须同时存在，evidence collector 校验 SHA 与结果 |
 
 ## 七个场景映射
 
