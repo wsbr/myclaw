@@ -107,6 +107,7 @@ def test_browser_chat_plan_group_and_admin_surfaces(
     group_completed = page.get_by_text("GroupRun completed", exact=True)
     group_deadline = time.monotonic() + phase_api.run_timeout * 2
     confirmations_approved = 0
+    clarifications_answered = 0
     while time.monotonic() < group_deadline:
         if group_completed.is_visible():
             break
@@ -123,9 +124,25 @@ def test_browser_chat_plan_group_and_admin_surfaces(
                 approve.first.click()
             assert decision.value.ok, decision.value.text()
             confirmations_approved += 1
+        clarification = page.get_by_placeholder(
+            "输入回答；只会恢复提出该问题的 Work Item", exact=True,
+        )
+        submit_answer = page.get_by_role("button", name=re.compile(r"提\s*交\s*回\s*答"))
+        if clarification.count() and clarification.first.is_visible():
+            clarification.first.fill("Continue with a concise direct response and do not call any Tool.")
+            with page.expect_response(
+                lambda response: "/api/v1/clarifications/" in response.url
+                and response.url.endswith("/answer")
+                and response.request.method == "POST",
+                timeout=15_000,
+            ) as answer:
+                submit_answer.first.click()
+            assert answer.value.ok, answer.value.text()
+            clarifications_answered += 1
         page.wait_for_timeout(500)
     expect(group_completed).to_be_visible(timeout=1_000)
     assert confirmations_approved <= 4, "GroupRun exceeded the bounded Tool confirmation budget"
+    assert clarifications_answered <= 4, "GroupRun exceeded the bounded Clarification budget"
 
     assert not browser_errors
     record_property("chromium_ui_chat_plan_group_admin", "passed")
