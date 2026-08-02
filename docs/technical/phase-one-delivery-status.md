@@ -23,6 +23,7 @@
 | 真实模型偶发返回不可解析的 Plan/Group 结构化提案 | OpenAI-compatible streaming 传递冻结的 temperature/max_tokens；严格校验失败时使用 savepoint 回滚，仅排队一次 fenced repair Runner，不保存原始无效输出；第二次无效仍失败 | 模型参数转发、单次 epoch/attempt 递增、第二次拒绝重试单测；真实 API 与 Chromium 仍要求有效图并完成 |
 | 已回答 Clarification 在无状态模型恢复时可能被重复请求 | 同一 WorkItem 恢复时保留已回答问答上下文，并停止再次装配 `request_clarification`，防止重复进入用户等待 | Clarification 权限/恢复单测；真实模型 API 与 Chromium 仍须完成等待、回答和最终结算 |
 | pytest-playwright 默认清理 `test-results/`，导致多 Gate JUnit 互相覆盖 | Playwright trace/screenshot/video 独立写入 `test/playwright-results/`，JUnit、coverage 与迁移证据继续保留在 `test/test-results/` | 固定 SHA 顺序运行 unit、Mock、real 后三份 JUnit 必须同时存在，evidence collector 校验 SHA 与结果 |
+| OpenAI-compatible Endpoint 可能在零输出时返回瞬时 timeout | 仅当尚未收到任何 text/tool payload 且错误属于 timeout、连接、限流或服务端瞬时错误时重试一次；已产生 delta 后绝不重放 | 单测分别验证零输出重试成功与已有 delta 时不重试；真实模型全栈仍要求无失败完成 |
 
 ## 七个场景映射
 
@@ -38,7 +39,7 @@
 
 ## 覆盖率与 CI Gate
 
-CI 对 Runtime Worker、Group Formation、Agents API、Groups API 启用 branch coverage，综合下限为 30%。本轮固定提交基线为 105 项单测全部通过：Runtime Worker 40%、Group Formation 100%、Agents API 42%、Groups API 30%，综合 40.72%。覆盖率只用于防回退；场景断言、错误语义和真实模型 Gate 不得因覆盖率而放宽。
+CI 对 Runtime Worker、Group Formation、Agents API、Groups API 启用 branch coverage，综合下限为 30%。本轮固定提交基线为 107 项单测全部通过：Runtime Worker 40%、Group Formation 100%、Agents API 42%、Groups API 30%，综合 40.72%。覆盖率只用于防回退；场景断言、错误语义和真实模型 Gate 不得因覆盖率而放宽。
 
 ## 正式证据契约
 

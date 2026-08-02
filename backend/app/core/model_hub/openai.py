@@ -1,4 +1,5 @@
 from typing import AsyncIterator
+import asyncio
 import json
 import openai as oai
 from app.core.model_hub.base import BaseLLM, LLMResponse, LLMChunk, ToolCall, TokenUsage
@@ -43,6 +44,18 @@ def normalize_messages_for_openai(messages: list[dict]) -> list[dict]:
         else:
             normalized.append(msg)
     return normalized
+
+
+def _is_retryable_zero_output_error(error: Exception) -> bool:
+    """Classify transport/provider failures that are safe before any delta."""
+    status_code = getattr(error, "status_code", None)
+    if status_code in {408, 409, 429} or (isinstance(status_code, int) and status_code >= 500):
+        return True
+    message = str(error).lower()
+    return any(marker in message for marker in (
+        "request timed out", "timeout", "timed out", "temporarily unavailable",
+        "connection reset", "connection error",
+    ))
 
 
 class OpenAILLM(BaseLLM):
@@ -106,27 +119,41 @@ class OpenAILLM(BaseLLM):
 
         # OpenAI 流式工具调用是按 index 分片到达的（id/name 只在首个分片出现，
         # arguments 是需要跨多个 chunk 拼接的 JSON 字符串片段），流结束后统一解析。
-        tool_call_acc: dict[int, dict] = {}
-        usage = None
-
-        async for chunk in await self.client.chat.completions.create(**kwargs):
-            if chunk.usage:
-                usage = chunk.usage
-            if not chunk.choices:
-                continue
-            delta = chunk.choices[0].delta
-            if delta and delta.content:
-                yield LLMChunk(type="text_delta", content=delta.content)
-            if delta and delta.tool_calls:
-                for tc_delta in delta.tool_calls:
-                    entry = tool_call_acc.setdefault(tc_delta.index, {"id": None, "name": None, "arguments": ""})
-                    if tc_delta.id:
-                        entry["id"] = tc_delta.id
-                    if tc_delta.function:
-                        if tc_delta.function.name:
-                            entry["name"] = tc_delta.function.name
-                        if tc_delta.function.arguments:
-                            entry["arguments"] += tc_delta.function.arguments
+        # A provider timeout is retried once only before any user-visible/model
+        # payload arrives. Retrying after a delta could duplicate SSE or a Tool.
+        for attempt in range(2):
+            tool_call_acc: dict[int, dict] = {}
+            usage = None
+            received_payload = False
+            try:
+                async for chunk in await self.client.chat.completions.create(**kwargs):
+                    if chunk.usage:
+                        usage = chunk.usage
+                    if not chunk.choices:
+                        continue
+                    delta = chunk.choices[0].delta
+                    if delta and delta.content:
+                        received_payload = True
+                        yield LLMChunk(type="text_delta", content=delta.content)
+                    if delta and delta.tool_calls:
+                        received_payload = True
+                        for tc_delta in delta.tool_calls:
+                            entry = tool_call_acc.setdefault(
+                                tc_delta.index, {"id": None, "name": None, "arguments": ""},
+                            )
+                            if tc_delta.id:
+                                entry["id"] = tc_delta.id
+                            if tc_delta.function:
+                                if tc_delta.function.name:
+                                    entry["name"] = tc_delta.function.name
+                                if tc_delta.function.arguments:
+                                    entry["arguments"] += tc_delta.function.arguments
+                break
+            except Exception as error:
+                if attempt == 0 and not received_payload and _is_retryable_zero_output_error(error):
+                    await asyncio.sleep(0.25)
+                    continue
+                raise
 
         for idx in sorted(tool_call_acc):
             entry = tool_call_acc[idx]

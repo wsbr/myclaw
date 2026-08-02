@@ -97,3 +97,65 @@ async def test_stream_forwards_frozen_temperature_and_output_limit():
     )] == []
     assert captured["temperature"] == 0
     assert captured["max_tokens"] == 4096
+
+
+@pytest.mark.asyncio
+async def test_stream_retries_one_transient_failure_only_before_output(monkeypatch):
+    calls = 0
+
+    class Completions:
+        async def create(self, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("Request timed out.")
+
+            async def chunks():
+                yield SimpleNamespace(
+                    usage=None,
+                    choices=[SimpleNamespace(delta=SimpleNamespace(content="ok", tool_calls=None))],
+                )
+
+            return chunks()
+
+    async def no_sleep(_delay):
+        return None
+
+    monkeypatch.setattr("app.core.model_hub.openai.asyncio.sleep", no_sleep)
+    model = OpenAILLM("unused-test-key")
+    model.client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+    chunks = [chunk async for chunk in model.stream(
+        [{"role": "user", "content": "return json"}], None, {"model_id": "model"},
+    )]
+    assert calls == 2
+    assert [chunk.content for chunk in chunks] == ["ok"]
+
+
+@pytest.mark.asyncio
+async def test_stream_never_retries_after_a_delta():
+    calls = 0
+
+    class Completions:
+        async def create(self, **kwargs):
+            nonlocal calls
+            calls += 1
+
+            async def chunks():
+                yield SimpleNamespace(
+                    usage=None,
+                    choices=[SimpleNamespace(delta=SimpleNamespace(content="partial", tool_calls=None))],
+                )
+                raise RuntimeError("Request timed out.")
+
+            return chunks()
+
+    model = OpenAILLM("unused-test-key")
+    model.client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+    received = []
+    with pytest.raises(RuntimeError, match="timed out"):
+        async for chunk in model.stream(
+            [{"role": "user", "content": "return json"}], None, {"model_id": "model"},
+        ):
+            received.append(chunk.content)
+    assert calls == 1
+    assert received == ["partial"]
