@@ -20,6 +20,7 @@
 | 缺少备份恢复与事故处置 | 提供压缩逻辑备份、SHA-256 验证、显式恢复确认和故障矩阵 | [生产运行手册](../operations/phase-one-runbook.md) 与 `deploy/scripts/` |
 | 真实模型结果和七场景证据分散 | 一个 API 综合测试按七场景逐项记录 JUnit suite property，另有 Chromium UI 测试 | `test_phase_one_acceptance.py`、`test_ui_acceptance.py`、正式 evidence manifest |
 | Group/Plan 视图无法处理模型临时请求的 Tool Confirmation | required action 卡片改为三种会话模式共用；Chromium 通过页面按钮批准并继续严格等待 GroupRun 完成 | 真实模型浏览器测试的确认 POST 必须成功，最终完成断言仍保留 |
+| 真实模型偶发返回不可解析的 Plan/Group 结构化提案 | OpenAI-compatible streaming 传递冻结的 temperature/max_tokens；严格校验失败时使用 savepoint 回滚，仅排队一次 fenced repair Runner，不保存原始无效输出；第二次无效仍失败 | 模型参数转发、单次 epoch/attempt 递增、第二次拒绝重试单测；真实 API 与 Chromium 仍要求有效图并完成 |
 
 ## 七个场景映射
 
@@ -35,7 +36,7 @@
 
 ## 覆盖率与 CI Gate
 
-CI 对 Runtime Worker、Group Formation、Agents API、Groups API 启用 branch coverage，综合下限为 30%。本轮预提交基线为 103 项单测全部通过：Runtime Worker 39%、Group Formation 100%、Agents API 42%、Groups API 30%，综合 40.09%。覆盖率只用于防回退；场景断言、错误语义和真实模型 Gate 不得因覆盖率而放宽。
+CI 对 Runtime Worker、Group Formation、Agents API、Groups API 启用 branch coverage，综合下限为 30%。本轮预提交基线为 105 项单测全部通过：Runtime Worker 40%、Group Formation 100%、Agents API 42%、Groups API 30%，综合 40.42%。覆盖率只用于防回退；场景断言、错误语义和真实模型 Gate 不得因覆盖率而放宽。
 
 ## 正式证据契约
 

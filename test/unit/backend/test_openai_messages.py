@@ -1,8 +1,10 @@
 """Unit tests for OpenAI message normalization."""
 
+from types import SimpleNamespace
+
 import pytest
 
-from app.core.model_hub.openai import normalize_messages_for_openai
+from app.core.model_hub.openai import OpenAILLM, normalize_messages_for_openai
 
 pytestmark = pytest.mark.unit
 
@@ -72,3 +74,26 @@ class TestNormalizeMessagesForOpenAI:
             {"role": "assistant", "content": "hi"},
         ]
         assert normalize_messages_for_openai(messages) == messages
+
+
+@pytest.mark.asyncio
+async def test_stream_forwards_frozen_temperature_and_output_limit():
+    captured = {}
+
+    class Completions:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+
+            async def chunks():
+                yield SimpleNamespace(usage=None, choices=[])
+
+            return chunks()
+
+    model = OpenAILLM("unused-test-key")
+    model.client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+    assert [chunk async for chunk in model.stream(
+        [{"role": "user", "content": "return json"}], None,
+        {"model_id": "model", "temperature": 0, "max_tokens": 4096},
+    )] == []
+    assert captured["temperature"] == 0
+    assert captured["max_tokens"] == 4096

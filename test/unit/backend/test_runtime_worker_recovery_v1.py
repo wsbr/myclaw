@@ -341,3 +341,44 @@ async def test_plan_coordination_settles_after_child_without_resuming_owner_mode
     assert caller_work.result_data == {"batch_key": "caller-runner", "plan_node_id": "plan-node"}
     assert run.lifecycle == "running" and run.wait_reason is None
     assert schedule.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_invalid_structured_proposal_gets_one_fenced_repair_attempt(monkeypatch):
+    import app.workers.runtime_worker_v1 as worker_module
+
+    runner = DurableRunner(
+        id="proposal-runner", work_item_id="proposal-work", run_id="proposal-run",
+        session_id="session", agent_id="owner", agent_version_id="owner-version",
+        execution_epoch=1, status="running", principal_snapshot={"user_id": "user"},
+        assembly_snapshot={}, prompt_manifest={}, input_snapshot={"goal": "Form a group"}, version=1,
+    )
+    work = WorkItem(
+        id="proposal-work", run_id="proposal-run", session_id="session", user_id="user", mode="group",
+        owner_agent_id="owner", agent_version_id="owner-version", goal="Form a group", status="running",
+        active_runner_id="proposal-runner", execution_epoch=1, attempt_no=1, version=1,
+    )
+    run = Run(
+        id="proposal-run", session_id="session", user_id="user", mode="group",
+        execution_kind="proposal_generation", lifecycle="running", entry_agent_id="owner", version=1,
+    )
+    persist = AsyncMock()
+    event_writer = SimpleNamespace(append=AsyncMock(return_value=SimpleNamespace(id="queued-event")))
+    outbox_writer = SimpleNamespace(enqueue=AsyncMock())
+    monkeypatch.setattr(worker_module, "persist_replacement_runner", persist)
+    monkeypatch.setattr(worker_module, "ExecutionEventWriter", lambda _db: event_writer)
+    monkeypatch.setattr(worker_module, "OutboxWriter", lambda _db: outbox_writer)
+    worker = RuntimeWorker("structured-retry-test")
+
+    assert await worker._schedule_structured_proposal_retry(
+        SimpleNamespace(), runner, work, run, ValueError("not JSON"),
+    ) is True
+    replacement = persist.await_args.args[2]
+    assert runner.status == "failed" and runner.error_code == "invalid_structured_output"
+    assert work.status == "queued" and work.execution_epoch == 2 and work.attempt_no == 2
+    assert replacement.execution_epoch == 2
+    assert replacement.input_snapshot["structured_retry_no"] == 1
+    assert run.lifecycle == "running" and run.wait_reason is None
+    assert await worker._schedule_structured_proposal_retry(
+        SimpleNamespace(), replacement, work, run, ValueError("still invalid"),
+    ) is False

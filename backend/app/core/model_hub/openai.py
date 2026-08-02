@@ -98,6 +98,8 @@ class OpenAILLM(BaseLLM):
             messages=msgs,
             stream=True,
             stream_options={"include_usage": True},
+            max_tokens=params.get("max_tokens", 8192),
+            temperature=params.get("temperature", 0.7),
         )
         if tools:
             kwargs["tools"] = to_openai_tools(tools, strict=self.tool_strict)

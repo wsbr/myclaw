@@ -1028,6 +1028,13 @@ class RuntimeWorker:
                     params["system"] += "\n\nCallable Agent Catalog:\n" + json.dumps(
                         callable_catalog, ensure_ascii=False, separators=(",", ":")
                     )
+            if run.execution_kind == "proposal_generation" and runner.input_snapshot.get("structured_retry_no"):
+                params["system"] += (
+                    "\n\nThe previous proposal was rejected by the strict JSON schema validator. "
+                    "This is the single bounded repair attempt. Return exactly one non-empty JSON object: "
+                    "the first character must be { and the final character must be }. Do not include prose, "
+                    "analysis, comments, or markdown fences."
+                )
             if (run.execution_kind == "proposal_generation"
                     or runner.input_snapshot.get("plan_settlement")
                     or runner.input_snapshot.get("group_settlement")):
@@ -1933,18 +1940,23 @@ class RuntimeWorker:
         value = content.strip()
         if value.startswith("```"): value = value.split("\n", 1)[1].rsplit("```", 1)[0]
         try:
-            payload = json.loads(value)
-            participants = [GroupParticipantInput.model_validate(item) for item in payload["participants"]]
-            work_items = [GroupInitialWorkItemInput.model_validate(item) for item in payload["initial_work_items"]]
-            edges = [GroupSuggestedEdgeInput.model_validate(item) for item in payload.get("suggested_edges", [])]
-            revision = await create_revision(
-                db, proposal, goal=str(payload.get("goal") or runner.input_snapshot.get("goal")),
-                bootstrap_context=str(payload["bootstrap_context"]), participants=participants,
-                work_items=work_items, edges=edges, source="generated", edited_by_type="agent",
-                edited_by_id=runner.agent_id,
-            )
+            async with db.begin_nested():
+                payload = json.loads(value)
+                participants = [GroupParticipantInput.model_validate(item) for item in payload["participants"]]
+                work_items = [GroupInitialWorkItemInput.model_validate(item) for item in payload["initial_work_items"]]
+                edges = [GroupSuggestedEdgeInput.model_validate(item) for item in payload.get("suggested_edges", [])]
+                revision = await create_revision(
+                    db, proposal, goal=str(payload.get("goal") or runner.input_snapshot.get("goal")),
+                    bootstrap_context=str(payload["bootstrap_context"]), participants=participants,
+                    work_items=work_items, edges=edges, source="generated", edited_by_type="agent",
+                    edited_by_id=runner.agent_id,
+                )
         except Exception as error:
-            raise RuntimeError(f"invalid structured Group Formation proposal: {error}") from error
+            if await self._schedule_structured_proposal_retry(db, runner, work, run, error):
+                return
+            raise RuntimeError(
+                f"invalid structured Group Formation proposal after repair: {type(error).__name__}"
+            ) from None
         runner.status = "succeeded"; runner.lease_expires_at = None; runner.version += 1
         work.status = "succeeded"; work.active_runner_id = None; work.result_summary = "Group Formation generated"
         work.result_data = {"proposal_id": proposal.id, "revision_no": revision.revision_no}; work.version += 1
@@ -1962,6 +1974,53 @@ class RuntimeWorker:
             db, session_id=run.session_id, triggering_event_id=proposed_event.id,
             event_type="graph_confirmation_required", run_id=run.id,
         )
+
+    async def _schedule_structured_proposal_retry(
+        self, db, runner: DurableRunner, work: WorkItem, run: Run, error: Exception,
+    ) -> bool:
+        retry_no = int(runner.input_snapshot.get("structured_retry_no") or 0)
+        if retry_no >= 1:
+            return False
+        runner.status = "failed"
+        runner.lease_expires_at = None
+        runner.error_code = "invalid_structured_output"
+        runner.error_detail = f"{type(error).__name__}: strict structured proposal validation failed"
+        runner.version += 1
+        work.execution_epoch += 1
+        work.attempt_no += 1
+        work.status = "queued"
+        work.error_code = None
+        work.error_detail = None
+        work.retryable = True
+        work.version += 1
+        replacement = DurableRunner(
+            id=uuid7(), work_item_id=work.id, run_id=run.id, session_id=run.session_id,
+            agent_id=runner.agent_id, agent_version_id=runner.agent_version_id,
+            execution_epoch=work.execution_epoch, status="queued",
+            principal_snapshot=dict(runner.principal_snapshot),
+            assembly_snapshot=dict(runner.assembly_snapshot),
+            prompt_manifest=dict(runner.prompt_manifest),
+            input_snapshot={**dict(runner.input_snapshot), "structured_retry_no": retry_no + 1},
+        )
+        run.lifecycle = "running"
+        run.wait_reason = None
+        run.version += 1
+        await persist_replacement_runner(db, work, replacement)
+        queued = await ExecutionEventWriter(db).append(
+            session_id=run.session_id, run_id=run.id, event_type="runner.queued",
+            event_dedupe_key=f"transition:runner:{replacement.id}:0:1:structured_proposal_retry",
+            actor_type="service", actor_id=self.worker_id, entity_type="runner",
+            entity_id=replacement.id, entity_version=replacement.version, visibility="private",
+            private_owner=("runner", replacement.id), summary="Structured proposal repair Runner queued",
+            payload={"retry_no": retry_no + 1, "error_code": "invalid_structured_output"},
+            correlation_id=run.id,
+        )
+        await OutboxWriter(db).enqueue(
+            topic="runtime.runner", action="execute", aggregate_type="runner", aggregate_id=replacement.id,
+            partition_key=run.session_id, dedupe_key=f"event:{queued.id}:execute",
+            payload_ref={"runner_id": replacement.id, "structured_retry_no": retry_no + 1},
+        )
+        return True
 
     async def _settle_group_work(self, db, runner: DurableRunner, work: WorkItem, run: Run, content: str) -> None:
         group_run = await db.scalar(select(GroupRun).where(
@@ -2248,18 +2307,23 @@ class RuntimeWorker:
         if value.startswith("```"):
             value = value.split("\n", 1)[1].rsplit("```", 1)[0]
         try:
-            payload = json.loads(value)
-            nodes = [PlanNodeInput.model_validate(item) for item in payload["nodes"]]
-            dependencies = [PlanDependencyInput.model_validate(item) for item in payload.get("dependencies", [])]
-            goal = str(payload.get("goal") or plan.goal)
-            deliverable = str(payload["deliverable"])
+            async with db.begin_nested():
+                payload = json.loads(value)
+                nodes = [PlanNodeInput.model_validate(item) for item in payload["nodes"]]
+                dependencies = [PlanDependencyInput.model_validate(item) for item in payload.get("dependencies", [])]
+                goal = str(payload.get("goal") or plan.goal)
+                deliverable = str(payload["deliverable"])
+                await replace_draft_graph(
+                    db, plan, goal=goal, deliverable=deliverable, nodes=nodes,
+                    dependencies=dependencies,
+                    increment_revision=bool(runner.input_snapshot.get("increment_graph_revision")),
+                )
         except Exception as error:
-            raise RuntimeError(f"invalid structured Plan proposal: {error}") from error
-        await replace_draft_graph(
-            db, plan, goal=goal, deliverable=deliverable, nodes=nodes,
-            dependencies=dependencies,
-            increment_revision=bool(runner.input_snapshot.get("increment_graph_revision")),
-        )
+            if await self._schedule_structured_proposal_retry(db, runner, work, run, error):
+                return
+            raise RuntimeError(
+                f"invalid structured Plan proposal after repair: {type(error).__name__}"
+            ) from None
         runner.status = "succeeded"
         runner.lease_expires_at = None
         runner.version += 1
