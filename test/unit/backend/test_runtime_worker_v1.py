@@ -38,6 +38,26 @@ class FakeLLM:
         )
 
 
+@pytest.mark.parametrize(
+    ("request_text", "tool_name", "expected"),
+    [
+        ("You must call execute once with the supplied arguments.", "execute", True),
+        ("Verification first.\nYou must call `search_group_history` exactly once.",
+         "search_group_history", True),
+        ("you MUST call 'invoke_agent' now!", "invoke_agent", True),
+        ("Use execute only when necessary.", "execute", False),
+        ("The Tool catalog contains search_group_history.", "search_group_history", False),
+        ("You must call execute_extra.", "execute", False),
+        ("Do not repeat the words You must call execute", "execute", False),
+        ("", "execute", False),
+    ],
+)
+def test_delegated_tool_authorization_requires_exact_capability_phrase(
+    request_text, tool_name, expected,
+):
+    assert RuntimeWorker._delegated_tool_is_authorized(request_text, tool_name) is expected
+
+
 @pytest.mark.asyncio
 async def test_worker_claims_acknowledges_and_settles(monkeypatch):
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
