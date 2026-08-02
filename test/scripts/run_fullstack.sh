@@ -4,6 +4,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+docker_host_addr="${MYCLAW_DOCKER_HOST_ADDR:-localhost}"
+export MYCLAW_MOCK_LLM_URL="${MYCLAW_MOCK_LLM_URL:-http://${docker_host_addr}:9090}"
+export MYCLAW_FULLSTACK_API_URL="${MYCLAW_FULLSTACK_API_URL:-http://${docker_host_addr}:8001}"
+export MYCLAW_FULLSTACK_UI_URL="${MYCLAW_FULLSTACK_UI_URL:-http://${docker_host_addr}:8081}"
+
 echo "==> Building and starting full stack..."
 runtime_replicas="${MYCLAW_RUNTIME_WORKER_REPLICAS:-2}"
 docker compose -f docker-compose.test.yml --profile fullstack up -d --build \
@@ -11,9 +16,6 @@ docker compose -f docker-compose.test.yml --profile fullstack up -d --build \
 
 echo "==> Waiting for all services..."
 "$ROOT/scripts/wait_for_stack.sh"
-
-export MYCLAW_FULLSTACK_API_URL="${MYCLAW_FULLSTACK_API_URL:-http://localhost:8001}"
-export MYCLAW_FULLSTACK_UI_URL="${MYCLAW_FULLSTACK_UI_URL:-http://localhost:8081}"
 
 if [ "${MYCLAW_LLM_MODE:-mock}" = "real" ]; then
   : "${MYCLAW_REAL_LLM_API_KEY:?MYCLAW_REAL_LLM_API_KEY is required for real-model acceptance}"

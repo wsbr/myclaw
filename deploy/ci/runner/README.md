@@ -14,11 +14,19 @@ Runner 必须能够访问 Docker Engine，并以宿主机上的相同绝对路�
 docker run -d \
   --name myclaw-ci-runner \
   --restart unless-stopped \
+  --network host \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v "$PWD:$PWD" \
   -w "$PWD" \
   myclaw-ci-runner
 ```
+
+Runner 容器通过 host network 访问 Compose 发布端口，并让 Chromium 继续使用安全上下文
+`http://localhost`（前端依赖 `crypto.randomUUID()`）。Linux Docker Engine 必须保留上述
+`--network host`；Docker Desktop 需要启用 host networking。若运行环境不支持 host network，
+应把 Runner 直接安装在宿主机，而不是回退到非安全的 HTTP 自定义主机名。HTTPS 环境可通过
+`MYCLAW_DOCKER_HOST_ADDR` 或完整的 `MYCLAW_FULLSTACK_API_URL`、`MYCLAW_FULLSTACK_UI_URL`
+显式覆盖。
 
 编排器只需设置固定 Commit SHA 后调用统一入口：
 

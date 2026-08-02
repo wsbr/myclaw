@@ -74,7 +74,7 @@ services:
     environment:
       DATABASE_URL: mysql+aiomysql://myclaw:mypassword@mysql-test:3306/myclaw_test
       REDIS_URL: redis://:redispassword@redis-test:6379/0
-      CORS_ORIGINS: '["http://localhost:8081","http://localhost:8001"]'
+      CORS_ORIGINS: '["${MYCLAW_FULLSTACK_UI_URL:-http://localhost:8081}","${MYCLAW_FULLSTACK_API_URL:-http://localhost:8001}"]'
       INIT_ADMIN_EMAIL: admin@test.myclaw.local
       INIT_ADMIN_PASSWORD: testpassword123
       MYCLAW_REAL_LLM_API_KEY: ${MYCLAW_REAL_LLM_API_KEY:-}
@@ -149,7 +149,7 @@ services:
       context: ../frontend
       dockerfile: Dockerfile
       args:
-        VITE_API_BASE_URL: http://localhost:8001
+        VITE_API_BASE_URL: ${MYCLAW_FULLSTACK_API_URL:-http://localhost:8001}
     ports:
       - "8081:80"
     depends_on:
