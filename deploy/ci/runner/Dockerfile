@@ -19,16 +19,24 @@ RUN apt-get update \
         docker-buildx-plugin \
         docker-ce-cli \
         docker-compose-plugin \
+    && printf '%s\n' \
+        'Acquire::Retries "5";' \
+        'Acquire::http::Timeout "30";' \
+        'Acquire::https::Timeout "30";' \
+        > /etc/apt/apt.conf.d/80-myclaw-ci-retries \
     && rm -rf /var/lib/apt/lists/*
 
 COPY backend/requirements.txt /opt/myclaw-deps/backend/requirements.txt
 COPY test/requirements.txt /opt/myclaw-deps/test/requirements.txt
 
-RUN python -m venv /opt/myclaw-ci \
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python -m venv /opt/myclaw-ci \
     && /opt/myclaw-ci/bin/pip install --no-cache-dir --upgrade pip \
-    && /opt/myclaw-ci/bin/pip install --no-cache-dir -r /opt/myclaw-deps/test/requirements.txt \
-    && /opt/myclaw-ci/bin/playwright install --with-deps chromium \
-    && rm -rf /var/lib/apt/lists/* /root/.cache/pip
+    && /opt/myclaw-ci/bin/pip install -r /opt/myclaw-deps/test/requirements.txt
+
+RUN PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT=120000 \
+    /opt/myclaw-ci/bin/playwright install --with-deps chromium \
+    && rm -rf /var/lib/apt/lists/*
 
 ENV MYCLAW_TEST_PYTEST=/opt/myclaw-ci/bin/pytest
 ENV PATH=/opt/myclaw-ci/bin:$PATH
