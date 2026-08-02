@@ -110,7 +110,10 @@ def test_browser_chat_plan_group_and_admin_surfaces(
     while time.monotonic() < group_deadline:
         if group_completed.is_visible():
             break
-        approve = page.get_by_role("button", name="批准", exact=True)
+        # Ant Design inserts visual spacing between two CJK characters, which is
+        # also reflected in Chromium's accessible name ("批 准"). Match the
+        # semantic button while allowing that presentation-only whitespace.
+        approve = page.get_by_role("button", name=re.compile(r"批\s*准"))
         if approve.count() and approve.first.is_visible():
             with page.expect_response(
                 lambda response: "/api/v1/tool-confirmations/" in response.url
