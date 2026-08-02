@@ -7,7 +7,7 @@ import {
   Pencil,
   Plus,
 } from 'lucide-react'
-import { agentsApi } from '@/api/agents'
+import { agentsApi, AgentSummary } from '@/api/agents'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import {
@@ -19,21 +19,18 @@ import {
   CardTitle,
 } from '@/components/ui/card'
 import { cn } from '@/lib/utils'
-
-const modeColors: Record<string, string> = {
-  chat: 'bg-blue-50 text-blue-700 border-blue-200',
-  plan: 'bg-purple-50 text-purple-700 border-purple-200',
-  group: 'bg-emerald-50 text-emerald-700 border-emerald-200',
-}
+import { useAuthStore } from '@/store/auth'
 
 const statusColors: Record<string, string> = {
-  active: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+  published: 'bg-emerald-50 text-emerald-700 border-emerald-200',
   draft: 'bg-amber-50 text-amber-700 border-amber-200',
   inactive: 'bg-gray-50 text-gray-600 border-gray-200',
 }
 
 export default function AgentListPage() {
   const navigate = useNavigate()
+  const user = useAuthStore(state => state.user)
+  const canCreate = Boolean(user?.roles.some(role => role === 'builder' || role === 'admin'))
   const { data: agents, isLoading } = useQuery({
     queryKey: ['agents'],
     queryFn: agentsApi.list,
@@ -56,10 +53,10 @@ export default function AgentListPage() {
             装配和管理你的智能体，支持 Chat / Plan / Group 模式
           </p>
         </div>
-        <Button onClick={() => navigate('/agents/new/config')}>
+        {canCreate && <Button onClick={() => navigate('/agents/new/config')}>
           <Plus className="size-4" />
           新建 Agent
-        </Button>
+        </Button>}
       </div>
 
       {!agents?.length ? (
@@ -70,15 +67,15 @@ export default function AgentListPage() {
             </div>
             <p className="font-medium">暂无 Agent</p>
             <p className="text-muted-foreground mt-1 text-sm">点击右上角创建你的第一个智能体</p>
-            <Button className="mt-4" onClick={() => navigate('/agents/new/config')}>
+            {canCreate && <Button className="mt-4" onClick={() => navigate('/agents/new/config')}>
               <Plus className="size-4" />
               新建 Agent
-            </Button>
+            </Button>}
           </CardContent>
         </Card>
       ) : (
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {agents.map((agent: any) => (
+          {agents.map((agent: AgentSummary) => (
             <Card key={agent.id} className="group">
               <CardHeader className="pb-2">
                 <div className="flex items-start gap-3">
@@ -102,32 +99,25 @@ export default function AgentListPage() {
                 )}
               </CardHeader>
 
-              {agent.modes?.length > 0 && (
-                <CardContent className="pt-0 pb-2">
-                  <div className="flex flex-wrap gap-1.5">
-                    {agent.modes.map((m: string) => (
-                      <Badge
-                        key={m}
-                        variant="outline"
-                        className={modeColors[m] ?? ''}
-                      >
-                        {m}
-                      </Badge>
-                    ))}
-                  </div>
-                </CardContent>
-              )}
+              <CardContent className="flex flex-wrap gap-1.5 pt-0 pb-2">
+                <Badge variant="outline">v{agent.latest_published_version_no ?? '—'}</Badge>
+                <Badge variant="outline">{agent.visibility}</Badge>
+                {agent.group_enabled && <Badge variant="outline">Group</Badge>}
+              </CardContent>
 
               <CardFooter className="gap-2 pt-2">
                 <Button
                   size="sm"
                   className="flex-1"
+                  disabled={agent.status !== 'published'}
                   onClick={() => navigate(`/agents/${agent.id}/chat`)}
                 >
                   <MessageSquare className="size-3.5" />
                   对话
                 </Button>
-                <Button
+                {(user?.roles.includes('admin') || (
+                  user?.roles.includes('builder') && agent.owner_account_id === user.id
+                )) && <Button
                   size="icon"
                   variant="ghost"
                   className="size-8"
@@ -135,7 +125,7 @@ export default function AgentListPage() {
                   onClick={() => navigate(`/agents/${agent.id}/config`)}
                 >
                   <Pencil className="size-3.5" />
-                </Button>
+                </Button>}
               </CardFooter>
             </Card>
           ))}

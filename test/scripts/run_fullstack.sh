@@ -5,27 +5,29 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 echo "==> Building and starting full stack..."
-docker compose -f docker-compose.test.yml --profile fullstack up -d --build
+runtime_replicas="${MYCLAW_RUNTIME_WORKER_REPLICAS:-2}"
+docker compose -f docker-compose.test.yml --profile fullstack up -d --build \
+  --scale runtime-worker-test="$runtime_replicas"
 
 echo "==> Waiting for all services..."
 "$ROOT/scripts/wait_for_stack.sh"
 
 export MYCLAW_FULLSTACK_API_URL="${MYCLAW_FULLSTACK_API_URL:-http://localhost:8001}"
 export MYCLAW_FULLSTACK_UI_URL="${MYCLAW_FULLSTACK_UI_URL:-http://localhost:8081}"
-export MYCLAW_MOCK_LLM_INTERNAL_URL="${MYCLAW_MOCK_LLM_INTERNAL_URL:-http://mock-llm:9090}"
 
-source .venv/bin/activate
+if [ "${MYCLAW_LLM_MODE:-mock}" = "real" ]; then
+  : "${MYCLAW_REAL_LLM_API_KEY:?MYCLAW_REAL_LLM_API_KEY is required for real-model acceptance}"
+  : "${MYCLAW_REAL_LLM_ENDPOINT:?MYCLAW_REAL_LLM_ENDPOINT is required for real-model acceptance}"
+  : "${MYCLAW_REAL_LLM_MODEL:?MYCLAW_REAL_LLM_MODEL is required for real-model acceptance}"
+fi
 
-# Install Playwright browser if needed
-python -m playwright install chromium 2>/dev/null || true
+if [ ! -x "$ROOT/.venv/bin/pytest" ]; then
+  echo "Missing test/.venv; create it and install test/requirements.txt first."
+  exit 1
+fi
 
-echo ""
-echo "==> [1/2] Full-stack API tests (real deployment)..."
-pytest e2e/fullstack/ -m fullstack -v --tb=short
-
-echo ""
-echo "==> [2/2] Full-stack UI tests (Playwright browser)..."
-pytest e2e/ui/test_ui_fullstack.py -m fullstack -v --tb=short
+echo "==> Full-stack acceptance (real API, workers, database, sandbox and frontend)..."
+"$ROOT/.venv/bin/pytest" e2e/fullstack/ -m fullstack -v --tb=short "$@"
 
 echo ""
 echo "All full-stack tests passed."

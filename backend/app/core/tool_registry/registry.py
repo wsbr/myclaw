@@ -1,20 +1,18 @@
 from app.core.tool_registry.base import BaseTool, ToolResult, RuntimeContext
-from app.core.tool_registry.builtin.create_task import CreateTaskTool
-from app.core.tool_registry.builtin.create_scheduled_task import CreateScheduledTaskTool
-from app.core.tool_registry.builtin.search_tasks import SearchTasksTool
-from app.core.tool_registry.builtin.send_to_channel import SendToChannelTool
-from app.core.tool_registry.builtin.emit_event import EmitEventTool
-from app.core.tool_registry.builtin.find_agents import FindAgentsTool
-from app.core.tool_registry.builtin.get_agent_schema import GetAgentSchemaTool
 from app.core.tool_registry.builtin.invoke_agent import InvokeAgentTool
-from app.core.tool_registry.builtin.get_task_status import GetTaskStatusTool
+from app.core.tool_registry.builtin.request_clarification import RequestClarificationTool
+from app.core.tool_registry.builtin.read_file import ReadFileTool
+from app.core.tool_registry.builtin.write_file import WriteFileTool
+from app.core.tool_registry.builtin.execute import ExecuteTool
+from app.core.tool_registry.builtin.search_group_history import SearchGroupHistoryTool
+from app.core.tool_registry.builtin.publish_artifact import PublishArtifactTool
 
 BUILTIN_TOOLS: dict[str, BaseTool] = {
     t.name: t()
     for t in [
-        CreateTaskTool, CreateScheduledTaskTool, SearchTasksTool,
-        SendToChannelTool, EmitEventTool, FindAgentsTool,
-        GetAgentSchemaTool, InvokeAgentTool, GetTaskStatusTool,
+        InvokeAgentTool, RequestClarificationTool,
+        ReadFileTool, WriteFileTool, ExecuteTool, SearchGroupHistoryTool,
+        PublishArtifactTool,
     ]
 }
 

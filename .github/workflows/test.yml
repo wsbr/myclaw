@@ -2,12 +2,75 @@ name: Tests
 
 on:
   push:
-    branches: [main, dev_*]
+    branches: [main, "dev_*", "codex/**"]
   pull_request:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      real_model_endpoint:
+        description: OpenAI-compatible endpoint used by the real-model acceptance job
+        required: false
+        type: string
+      real_model_name:
+        description: Model name used by the real-model acceptance job
+        required: false
+        type: string
 
 jobs:
-  unit-integration:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            test/requirements.txt
+      - name: Install test dependencies
+        run: pip install -r test/requirements.txt
+      - name: Run unit tests
+        working-directory: test
+        run: |
+          mkdir -p test-results
+          pytest unit/backend -m unit -v --tb=short \
+            --junitxml=test-results/unit.xml \
+            --cov=app.workers.runtime_worker_v1 \
+            --cov=app.services.group_formation_service \
+            --cov=app.api.agents \
+            --cov=app.api.groups \
+            --cov-branch \
+            --cov-report=term \
+            --cov-report=xml:test-results/critical-coverage.xml \
+            --cov-fail-under=30
+      - name: Upload unit and coverage evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-and-critical-coverage
+          path: test/test-results/
+
+  frontend-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.15.0
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+      - name: Build frontend
+        working-directory: frontend
+        run: pnpm build
+      - name: Build production static-server image
+        run: docker build -t myclaw-frontend-ci ./frontend
+
+  empty-database-migration:
     runs-on: ubuntu-latest
     services:
       mysql:
@@ -24,97 +87,107 @@ jobs:
           --health-interval=5s
           --health-timeout=5s
           --health-retries=15
-
-      redis:
-        image: redis:7-alpine
-        ports:
-          - 6380:6379
-        options: >-
-          --health-cmd="redis-cli ping"
-          --health-interval=5s
-          --health-timeout=3s
-          --health-retries=10
-
     env:
       DATABASE_URL: mysql+aiomysql://myclaw:mypassword@localhost:3307/myclaw_test
-      REDIS_URL: redis://@localhost:6380/0
-      CELERY_BROKER_URL: redis://@localhost:6380/1
-      CELERY_RESULT_BACKEND: redis://@localhost:6380/2
-      SECRET_KEY: test-secret-key-for-jwt-signing-32chars
-      ENCRYPTION_KEY: test-encryption-key-32-bytes-hex00
-      INIT_ADMIN_EMAIL: admin@test.myclaw.local
-      INIT_ADMIN_PASSWORD: testpassword123
-
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
-      - name: Install dependencies
-        run: pip install -r test/requirements.txt
-
-      - name: Run migrations
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+      - name: Install backend dependencies
+        run: pip install -r backend/requirements.txt
+      - name: Upgrade an empty database to head
         working-directory: backend
         run: alembic upgrade head
+      - name: Verify a single migration head
+        working-directory: backend
+        run: |
+          mkdir -p ../test/test-results
+          alembic current | tee ../test/test-results/migration-current.txt
+          alembic heads | tee ../test/test-results/migration-heads.txt
+          test "$(alembic heads | wc -l | tr -d ' ')" = "1"
+      - name: Upload migration evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: empty-database-migration
+          path: test/test-results/migration-*.txt
 
-      - name: Run unit tests
-        working-directory: test
-        run: pytest unit/ -m unit -v --tb=short
-
-      - name: Run integration tests
-        working-directory: test
-        run: pytest integration/ -m integration -v --tb=short
-
-      - name: Run in-process E2E tests
-        working-directory: test
-        run: pytest e2e/test_plan_execution_trace.py -m "e2e and not fullstack" -v --tb=short
-
-  fullstack:
+  mock-fullstack:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Install Python dependencies
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            test/requirements.txt
+      - name: Install test dependencies
         run: pip install -r test/requirements.txt
-
-      - name: Start full stack
-        working-directory: test
-        run: |
-          docker compose -f docker-compose.test.yml --profile fullstack up -d --build
-          chmod +x scripts/wait_for_stack.sh
-          ./scripts/wait_for_stack.sh
-
-      - name: Run fullstack API tests
-        working-directory: test
+      - name: Install Chromium
+        run: python -m playwright install chromium --with-deps
+      - name: Run Docker full-stack regression with two Runtime workers
         env:
-          MYCLAW_FULLSTACK_API_URL: http://localhost:8001
-          MYCLAW_FULLSTACK_UI_URL: http://localhost:8081
-          MYCLAW_MOCK_LLM_URL: http://localhost:9090
-        run: pytest e2e/fullstack/ -m fullstack -v --tb=short
-
-      - name: Install Playwright and run UI tests
+          MYCLAW_ACCEPTANCE_COMMIT_SHA: ${{ github.sha }}
         working-directory: test
-        env:
-          MYCLAW_FULLSTACK_API_URL: http://localhost:8001
-          MYCLAW_FULLSTACK_UI_URL: http://localhost:8081
-          MYCLAW_MOCK_LLM_INTERNAL_URL: http://mock-llm:9090
-        run: |
-          python -m playwright install chromium --with-deps
-          pytest e2e/ui/test_ui_fullstack.py -m fullstack -v --tb=short
-
-      - name: Upload Playwright report on failure
+        run: ./scripts/run_fullstack.sh --junitxml=test-results/mock-fullstack.xml
+      - name: Capture stack diagnostics on failure
         if: failure()
+        working-directory: test
+        run: docker compose -f docker-compose.test.yml --profile fullstack logs --no-color > fullstack.log
+      - name: Upload full-stack diagnostics on failure
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: playwright-report
-          path: test/e2e/ui/playwright-report/
+          name: mock-fullstack-evidence
+          path: |
+            test/fullstack.log
+            test/test-results/
+
+  real-model-acceptance:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      MYCLAW_LLM_MODE: real
+      MYCLAW_REAL_LLM_ENDPOINT: ${{ inputs.real_model_endpoint }}
+      MYCLAW_REAL_LLM_MODEL: ${{ inputs.real_model_name }}
+      MYCLAW_REAL_LLM_API_KEY: ${{ secrets.MYCLAW_REAL_LLM_API_KEY }}
+      MYCLAW_ACCEPTANCE_COMMIT_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            backend/requirements.txt
+            test/requirements.txt
+      - name: Require secret and non-secret model inputs
+        shell: bash
+        run: |
+          test -n "$MYCLAW_REAL_LLM_ENDPOINT"
+          test -n "$MYCLAW_REAL_LLM_MODEL"
+          test -n "$MYCLAW_REAL_LLM_API_KEY"
+      - name: Install test dependencies
+        run: pip install -r test/requirements.txt
+      - name: Install Chromium
+        run: python -m playwright install chromium --with-deps
+      - name: Run real-model Docker API and browser acceptance
+        working-directory: test
+        run: ./scripts/run_fullstack.sh --junitxml=test-results/real-model-fullstack.xml
+      - name: Capture sanitized real-model diagnostics on failure
+        if: failure()
+        working-directory: test
+        run: docker compose -f docker-compose.test.yml --profile fullstack logs --no-color > real-model-fullstack.log
+      - name: Upload real-model acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-model-fullstack-evidence
+          path: |
+            test/test-results/
+            test/real-model-fullstack.log

@@ -11,5 +11,9 @@ class ModelHub:
         if provider_type == "anthropic":
             return AnthropicLLM(api_key=api_key, base_url=base_url)
         elif provider_type in _OPENAI_COMPATIBLE:
-            return OpenAILLM(api_key=api_key, base_url=base_url)
+            return OpenAILLM(
+                api_key=api_key,
+                base_url=base_url,
+                tool_strict=provider_type == "openai",
+            )
         raise ValueError(f"Unsupported provider: {provider_type}")

@@ -18,15 +18,15 @@ class TestNormalizeMessagesForOpenAI:
                     {
                         "id": "call_1",
                         "type": "tool_use",
-                        "name": "create_scheduled_task",
-                        "input": {"title": "提醒", "delay": "5m"},
+                        "name": "write_file",
+                        "input": {"path": "note.txt", "content": "reminder"},
                     }
                 ],
             },
             {
                 "role": "tool",
                 "tool_use_id": "call_1",
-                "content": '{"task_id": "abc"}',
+                "content": '{"path": "note.txt"}',
             },
         ]
 
@@ -36,14 +36,14 @@ class TestNormalizeMessagesForOpenAI:
             "id": "call_1",
             "type": "function",
             "function": {
-                "name": "create_scheduled_task",
-                "arguments": '{"title": "提醒", "delay": "5m"}',
+                "name": "write_file",
+                "arguments": '{"path": "note.txt", "content": "reminder"}',
             },
         }]
         assert result[2] == {
             "role": "tool",
             "tool_call_id": "call_1",
-            "content": '{"task_id": "abc"}',
+            "content": '{"path": "note.txt"}',
         }
 
     def test_leaves_openai_format_unchanged(self):

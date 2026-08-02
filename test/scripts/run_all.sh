@@ -2,13 +2,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-cd "$ROOT"
 
-echo "==> Starting test infrastructure (MySQL + Redis)..."
-docker compose -f docker-compose.test.yml up -d mysql-test redis-test
+echo "==> [1/2] Unit and service tests"
+"$ROOT/scripts/run_unit.sh" "$@"
 
-echo "==> Waiting for services..."
-"$ROOT/scripts/wait_for_services.sh"
-
-echo "==> Running all tests..."
-pytest "$@" -v --tb=short
+echo "==> [2/2] Real deployment acceptance"
+"$ROOT/scripts/run_fullstack.sh" "$@"

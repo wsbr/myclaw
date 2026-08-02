@@ -1,272 +1,322 @@
-from fastapi import APIRouter, Depends
+from __future__ import annotations
+
+import hashlib
+import json
+from datetime import timedelta
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy.ext.asyncio import AsyncSession
+import asyncio
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.database import get_db
-from app.deps import get_current_user
-from app.models.user import User
-from app.models.session import Session, OrchestrationGraph
-from app.services.session_service import SessionService
-from app.schemas.session import SessionCreate, SessionResponse, ChatRequest, ForkRequest
-from app.schemas.plan import (
-    PlanGenerateRequest,
-    PlanUpdateRequest,
-    PlanReviseRequest,
-    PlanPreview,
-    PlanExecuteResponse,
+from app.deps import SessionActor, get_session_actor
+from app.models.agent_v1 import AgentBlueprint
+from app.models.common import utcnow, uuid7
+from app.models.foundation import IdempotencyRecord, UserIdentity, UserSession
+from app.models.runtime_v1 import Message, Run, SessionSandbox
+from app.schemas.runtime_v1 import (
+    ChatCommandResponse,
+    MessageCreateRequest,
+    MessageResponse,
+    RunResponse,
+    SessionCreateRequest,
+    SessionSandboxResponse,
+    SessionResponse,
 )
-from pydantic import BaseModel
+from app.services.chat_service import AgentUnavailable, create_user_session, enqueue_chat_message
+from app.services.visible_events import VisibleEventProjection, event_public_dict
+from app.services.cursor_service import SortKey, paginate_scalars
+from app.database import AsyncSessionLocal
+from app.config import settings
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
 
-class GroupOrchestrateRequest(BaseModel):
-    goal: str
+def _hash(value: dict) -> str:
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
 
 
-class SubstitutionRequest(BaseModel):
-    node_id: str
-    new_agent_id: str
+async def _idempotency(
+    db: AsyncSession, *, actor: SessionActor, operation: str,
+    key: str, request: dict,
+) -> tuple[IdempotencyRecord, bool]:
+    digest = _hash(request)
+    record = await db.scalar(select(IdempotencyRecord).where(
+        IdempotencyRecord.principal_type == actor.principal_type,
+        IdempotencyRecord.principal_id == actor.principal_id,
+        IdempotencyRecord.operation == operation,
+        IdempotencyRecord.idempotency_key == key,
+    ))
+    if record:
+        if record.request_hash != digest:
+            raise HTTPException(status_code=409, detail={"code": "idempotency_mismatch"})
+        return record, True
+    record = IdempotencyRecord(
+        id=uuid7(), principal_type=actor.principal_type, principal_id=actor.principal_id,
+        operation=operation, idempotency_key=key, request_hash=digest,
+        expires_at=utcnow() + timedelta(days=7),
+    )
+    db.add(record)
+    await db.flush()
+    return record, False
 
 
-@router.get("", response_model=list[SessionResponse])
+async def _owned_session(db: AsyncSession, session_id: str, actor: SessionActor) -> UserSession:
+    session = await db.get(UserSession, session_id)
+    allowed = session is not None and (
+        (actor.account is not None and session.user_id == actor.account.user_id)
+        or (actor.api_key is not None and session.origin_api_key_id == actor.api_key.id
+            and session.entry_agent_id == actor.api_key.agent_id)
+    )
+    if not allowed:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return session
+
+
+async def _session_response(db: AsyncSession, session: UserSession) -> SessionResponse:
+    sandbox = await db.scalar(select(SessionSandbox).where(SessionSandbox.session_id == session.id))
+    value = SessionResponse.model_validate(session).model_copy(
+        update={"session_sandbox": SessionSandboxResponse.model_validate(sandbox) if sandbox else None}
+    )
+    return value
+
+
+@router.get("", response_model=dict)
 async def list_sessions(
-    agent_id: str | None = None,
+    user_id: str | None = None, limit: int = 50, cursor: str | None = None,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    actor: SessionActor = Depends(get_session_actor),
 ):
-    return await SessionService.list(db, current_user, agent_id=agent_id)
+    if actor.api_key and not user_id:
+        raise HTTPException(status_code=422, detail={"code": "user_id_required"})
+    target_user_id = user_id if actor.api_key else actor.account.user_id
+    query = select(UserSession).where(UserSession.user_id == target_user_id)
+    if actor.api_key:
+        query = query.where(UserSession.origin_api_key_id == actor.api_key.id,
+                            UserSession.entry_agent_id == actor.api_key.agent_id)
+    rows, next_cursor = await paginate_scalars(
+        db, query, sort=(SortKey(UserSession.updated_at), SortKey(UserSession.id)),
+        limit=limit, cursor=cursor,
+        principal=f"{actor.principal_type}:{actor.principal_id}", resource="sessions",
+        filters={"user_id": target_user_id},
+    )
+    return {"items": [(await _session_response(db, row)).model_dump(mode="json") for row in rows],
+            "next_cursor": next_cursor}
 
 
 @router.post("", response_model=SessionResponse, status_code=201)
 async def create_session(
-    body: SessionCreate,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    body: SessionCreateRequest, idempotency_key: str = Header(alias="Idempotency-Key"),
+    db: AsyncSession = Depends(get_db), actor: SessionActor = Depends(get_session_actor),
 ):
-    return await SessionService.create(db, current_user, body)
+    expected_origin = "api" if actor.api_key else "web"
+    if body.origin_type != expected_origin:
+        raise HTTPException(status_code=403, detail={"code": "invalid_session_origin", "expected": expected_origin})
+    if actor.api_key and body.entry_agent_id != actor.api_key.agent_id:
+        raise HTTPException(status_code=403, detail={"code": "api_key_agent_mismatch"})
+    target_user_id = body.user_id if actor.api_key else actor.account.user_id
+    if actor.api_key and not target_user_id:
+        raise HTTPException(status_code=422, detail={"code": "user_id_required"})
+    if not actor.api_key and body.user_id and body.user_id != actor.account.user_id:
+        raise HTTPException(status_code=403, detail={"code": "user_id_not_allowed"})
+    identity = await db.get(UserIdentity, target_user_id)
+    if identity is None or identity.status != "active":
+        raise HTTPException(status_code=409, detail={"code": "identity_not_preprovisioned"})
+    agent = await db.get(AgentBlueprint, body.entry_agent_id)
+    if agent is None or (not actor.api_key and agent.visibility == "private" and agent.owner_account_id != actor.account.id and "admin" not in actor.roles):
+        raise HTTPException(status_code=404, detail="Agent not found")
+    record, replay = await _idempotency(
+        db, actor=actor, operation="create_session", key=idempotency_key,
+        request=body.model_dump(mode="json"),
+    )
+    if replay and record.response_snapshot:
+        return SessionResponse.model_validate(record.response_snapshot)
+    try:
+        session = await create_user_session(
+            db, user_id=target_user_id, entry_agent_id=body.entry_agent_id,
+            origin_type=expected_origin, origin_api_key_id=actor.api_key.id if actor.api_key else None,
+            title=body.title,
+        )
+    except AgentUnavailable as error:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail={"code": "agent_unavailable", "message": str(error)})
+    response = await _session_response(db, session)
+    record.resource_type, record.resource_id, record.http_status = "user_session", session.id, 201
+    record.response_snapshot = response.model_dump(mode="json")
+    await db.commit()
+    return response
 
 
 @router.get("/{session_id}", response_model=SessionResponse)
 async def get_session(
-    session_id: str,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    session_id: str, db: AsyncSession = Depends(get_db),
+    actor: SessionActor = Depends(get_session_actor),
 ):
-    return await SessionService.get_or_404(db, session_id, current_user)
+    return await _session_response(db, await _owned_session(db, session_id, actor))
 
 
 @router.delete("/{session_id}", status_code=204)
-async def delete_session(
-    session_id: str,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+async def close_session(
+    session_id: str, idempotency_key: str = Header(alias="Idempotency-Key"),
+    db: AsyncSession = Depends(get_db), actor: SessionActor = Depends(get_session_actor),
 ):
-    await SessionService.delete(db, session_id, current_user)
+    session = await _owned_session(db, session_id, actor)
+    record, replay = await _idempotency(
+        db, actor=actor, operation="close_session", key=idempotency_key,
+        request={"session_id": session_id},
+    )
+    if not replay:
+        session.status = "closed"
+        session.closed_at = utcnow()
+        session.version += 1
+        record.resource_type, record.resource_id, record.http_status = "user_session", session.id, 204
+        record.response_snapshot = {"closed": True}
+        await db.commit()
+    return None
 
 
-@router.post("/{session_id}/chat")
-async def chat(
-    session_id: str,
-    body: ChatRequest,
+@router.get("/{session_id}/messages", response_model=dict)
+async def list_messages(
+    session_id: str, scope: str = "chat", limit: int = 100, cursor: str | None = None,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    actor: SessionActor = Depends(get_session_actor),
 ):
+    await _owned_session(db, session_id, actor)
+    if scope not in {"chat", "group", "all"}:
+        raise HTTPException(status_code=422, detail={"code": "invalid_message_scope"})
+    query = select(Message).where(Message.session_id == session_id)
+    if scope != "all":
+        query = query.where(Message.scope_type == scope)
+    rows, next_cursor = await paginate_scalars(
+        db, query,
+        sort=(SortKey(Message.created_at, descending=False), SortKey(Message.id, descending=False)),
+        limit=limit, cursor=cursor,
+        principal=f"{actor.principal_type}:{actor.principal_id}",
+        resource=f"session:{session_id}:messages", filters={"scope": scope},
+    )
+    return {"items": [MessageResponse.model_validate(row).model_dump(mode="json") for row in rows],
+            "next_cursor": next_cursor}
+
+
+@router.post("/{session_id}/messages", response_model=ChatCommandResponse, status_code=202)
+async def create_message(
+    session_id: str, body: MessageCreateRequest,
+    idempotency_key: str = Header(alias="Idempotency-Key"),
+    db: AsyncSession = Depends(get_db), actor: SessionActor = Depends(get_session_actor),
+):
+    if body.mode != "chat":
+        raise HTTPException(status_code=422, detail={"code": "unsupported_mode"})
+    session = await _owned_session(db, session_id, actor)
+    record, replay = await _idempotency(
+        db, actor=actor, operation="create_chat_run", key=idempotency_key,
+        request={"session_id": session_id, **body.model_dump()},
+    )
+    if replay and record.response_snapshot:
+        return ChatCommandResponse.model_validate(record.response_snapshot)
+    try:
+        message, run, _, _ = await enqueue_chat_message(
+            db, session_id=session_id, user_id=session.user_id,
+            content=body.content, idempotency_record_id=record.id,
+        )
+    except (ValueError, RuntimeError, AgentUnavailable) as error:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail={"code": "chat_command_rejected", "message": str(error)})
+    response = ChatCommandResponse(
+        message=MessageResponse.model_validate(message), run=RunResponse.model_validate(run),
+        required_actions=[], links={"events": f"/api/v1/sessions/{session_id}/events/stream"},
+    )
+    record.resource_type, record.resource_id, record.http_status = "run", run.id, 202
+    record.response_snapshot = response.model_dump(mode="json")
+    await db.commit()
+    return response
+
+
+@router.get("/{session_id}/events")
+async def list_events(
+    session_id: str, after_sequence: int = 0, scan_limit: int = 500, limit: int = 100,
+    db: AsyncSession = Depends(get_db), actor: SessionActor = Depends(get_session_actor),
+):
+    session = await _owned_session(db, session_id, actor)
+    try:
+        page = await VisibleEventProjection(db).scan_session_user(
+            user_id=session.user_id, session_id=session_id,
+            after_sequence=after_sequence, scan_limit=scan_limit, limit=limit,
+        )
+    except LookupError:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {
+        "items": [event_public_dict(event) for event in page.items],
+        "scanned_through_sequence": page.scanned_through_sequence,
+        "session_high_watermark": page.session_high_watermark,
+        "has_more": page.has_more,
+    }
+
+
+@router.get("/{session_id}/events/stream")
+async def stream_events(
+    session_id: str, request: Request, after_sequence: int = 0,
+    last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
+    db: AsyncSession = Depends(get_db), actor: SessionActor = Depends(get_session_actor),
+):
+    # Authorize before starting the streaming response.
+    session = await _owned_session(db, session_id, actor)
+    try:
+        cursor = max(after_sequence, int(last_event_id or 0))
+    except ValueError:
+        raise HTTPException(status_code=400, detail={"code": "invalid_event_cursor"})
+    user_id = session.user_id
+
+    async def generate():
+        nonlocal cursor
+        redis_client = pubsub = None
+        try:
+            try:
+                import redis.asyncio as aioredis
+                redis_client = aioredis.from_url(settings.redis_url, decode_responses=True)
+                pubsub = redis_client.pubsub()
+                await pubsub.subscribe(f"myclaw:session:{session_id}:live")
+            except Exception:
+                if pubsub is not None:
+                    await pubsub.aclose()
+                if redis_client is not None:
+                    await redis_client.aclose()
+                redis_client = pubsub = None
+            while not await request.is_disconnected():
+                async with AsyncSessionLocal() as stream_db:
+                    page = await VisibleEventProjection(stream_db).scan_session_user(
+                        user_id=user_id, session_id=session_id, after_sequence=cursor,
+                        scan_limit=500, limit=100,
+                    )
+                    if page.items:
+                        for event in page.items:
+                            data = json.dumps(event_public_dict(event), ensure_ascii=False, separators=(",", ":"))
+                            yield f"id: {event.sequence}\nevent: {event.event_type}\ndata: {data}\n\n"
+                    if page.scanned_through_sequence > cursor:
+                        if not page.items:
+                            yield (
+                                f"id: {page.scanned_through_sequence}\nevent: cursor\n"
+                                f"data: {{\"scanned_through_sequence\":{page.scanned_through_sequence}}}\n\n"
+                            )
+                        cursor = page.scanned_through_sequence
+                if pubsub is not None:
+                    live = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1)
+                    if live and live.get("type") == "message":
+                        yield f"event: model.delta\ndata: {live['data']}\n\n"
+                    else:
+                        yield ": keepalive\n\n"
+                else:
+                    yield ": keepalive\n\n"
+                    await asyncio.sleep(1)
+        finally:
+            if pubsub is not None:
+                await pubsub.unsubscribe(f"myclaw:session:{session_id}:live")
+                await pubsub.aclose()
+            if redis_client is not None:
+                await redis_client.aclose()
+
     return StreamingResponse(
-        SessionService.chat_stream(db, session_id, current_user, body),
-        media_type="text/event-stream",
+        generate(), media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
-
-
-@router.post("/{session_id}/fork", response_model=SessionResponse, status_code=201)
-async def fork_session(
-    session_id: str,
-    body: ForkRequest,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    return await SessionService.fork(db, session_id, current_user, body)
-
-
-@router.get("/{session_id}/messages")
-async def get_messages(
-    session_id: str,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    return await SessionService.get_messages(db, session_id, current_user)
-
-
-@router.get("/{session_id}/runners")
-async def list_runners(
-    session_id: str,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    return await SessionService.list_runners(db, session_id, current_user)
-
-
-@router.get("/{session_id}/runners/{runner_id}/spans")
-async def list_spans(
-    session_id: str,
-    runner_id: str,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    return await SessionService.list_spans(db, runner_id, current_user)
-
-
-# ── Plan mode ──────────────────────────────────────────────────────────────
-
-@router.post("/{session_id}/plan/generate", response_model=PlanPreview)
-async def plan_generate(
-    session_id: str,
-    body: PlanGenerateRequest,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    from app.runtime.plan_executor import PlanExecutor
-    from app.services.agent_service import AgentService
-    session = await SessionService.get_or_404(db, session_id, current_user)
-    snapshot = await AgentService.get_snapshot(db, session.agent_id)
-    return await PlanExecutor.generate_plan(db, session, snapshot, body.goal, current_user.id)
-
-
-@router.get("/{session_id}/plan/{plan_id}", response_model=PlanPreview)
-async def plan_get(
-    session_id: str,
-    plan_id: str,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    from app.runtime.plan_executor import PlanExecutor, plan_to_preview
-    await SessionService.get_or_404(db, session_id, current_user)
-    plan = await PlanExecutor.get_plan_or_404(db, session_id, plan_id)
-    return plan_to_preview(plan)
-
-
-@router.put("/{session_id}/plan/{plan_id}", response_model=PlanPreview)
-async def plan_update(
-    session_id: str,
-    plan_id: str,
-    body: PlanUpdateRequest,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    from app.runtime.plan_executor import PlanExecutor
-    await SessionService.get_or_404(db, session_id, current_user)
-    return await PlanExecutor.update_plan(db, session_id, plan_id, [s.model_dump() for s in body.steps])
-
-
-@router.post("/{session_id}/plan/{plan_id}/revise", response_model=PlanPreview)
-async def plan_revise(
-    session_id: str,
-    plan_id: str,
-    body: PlanReviseRequest,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    from app.runtime.plan_executor import PlanExecutor
-    from app.services.agent_service import AgentService
-    session = await SessionService.get_or_404(db, session_id, current_user)
-    snapshot = await AgentService.get_snapshot(db, session.agent_id)
-    return await PlanExecutor.revise_plan(db, session, snapshot, plan_id, body.instruction, current_user.id)
-
-
-@router.post("/{session_id}/plan/{plan_id}/execute", response_model=PlanExecuteResponse)
-async def plan_execute(
-    session_id: str,
-    plan_id: str,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    from app.runtime.plan_executor import PlanExecutor
-    from app.services.agent_service import AgentService
-    session = await SessionService.get_or_404(db, session_id, current_user)
-    snapshot = await AgentService.get_snapshot(db, session.agent_id)
-    task_id = await PlanExecutor.execute_plan(db, session, snapshot, plan_id)
-    return PlanExecuteResponse(task_id=task_id, plan_id=plan_id)
-
-
-# ── Group mode ─────────────────────────────────────────────────────────────
-
-@router.post("/{session_id}/group/orchestrate")
-async def group_orchestrate(
-    session_id: str,
-    body: GroupOrchestrateRequest,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    from app.runtime.group_orchestrator import GroupOrchestrator
-    from app.services.agent_service import AgentService
-    session = await SessionService.get_or_404(db, session_id, current_user)
-    snapshot = await AgentService.get_snapshot(db, session.agent_id)
-    graph = await GroupOrchestrator.generate_graph(db, session, snapshot, body.goal)
-    return graph.graph_json
-
-
-@router.put("/{session_id}/group/graph")
-async def group_update_graph(
-    session_id: str,
-    body: dict,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    result = await db.execute(select(OrchestrationGraph).where(OrchestrationGraph.session_id == session_id))
-    graph = result.scalar_one_or_none()
-    if not graph:
-        from fastapi import HTTPException
-        raise HTTPException(status_code=404, detail="Graph not found")
-    graph.graph_json = body
-    await db.commit()
-    return graph.graph_json
-
-
-@router.post("/{session_id}/group/graph/validate-substitution")
-async def validate_substitution(
-    session_id: str,
-    body: SubstitutionRequest,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    from app.runtime.group_orchestrator import GroupOrchestrator
-    from app.services.agent_service import AgentService
-    session = await SessionService.get_or_404(db, session_id, current_user)
-    snapshot = await AgentService.get_snapshot(db, session.agent_id)
-    result = await db.execute(select(OrchestrationGraph).where(OrchestrationGraph.session_id == session_id))
-    graph = result.scalar_one_or_none()
-    return await GroupOrchestrator.validate_substitution(db, snapshot, body.node_id, body.new_agent_id, graph)
-
-
-@router.post("/{session_id}/group/execute")
-async def group_execute(
-    session_id: str,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    from app.runtime.group_orchestrator import GroupOrchestrator
-    session = await SessionService.get_or_404(db, session_id, current_user)
-    result = await db.execute(select(OrchestrationGraph).where(OrchestrationGraph.session_id == session_id))
-    graph = result.scalar_one_or_none()
-    if not graph:
-        from fastapi import HTTPException
-        raise HTTPException(status_code=404, detail="No orchestration graph found for this session")
-    graph.status = "confirmed"
-    await db.commit()
-    task_ids = await GroupOrchestrator.execute_graph(db, session, graph)
-    return {"task_ids": task_ids}
-
-
-@router.get("/{session_id}/group/graph")
-async def get_group_graph(
-    session_id: str,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    result = await db.execute(select(OrchestrationGraph).where(OrchestrationGraph.session_id == session_id))
-    graph = result.scalar_one_or_none()
-    if not graph:
-        from fastapi import HTTPException
-        raise HTTPException(status_code=404, detail="Graph not found")
-    return {"status": graph.status, "graph": graph.graph_json}

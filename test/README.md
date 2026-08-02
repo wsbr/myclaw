@@ -1,87 +1,40 @@
 # MyClaw 测试框架
 
-面向 MyClaw 全平台的系统性测试套件，覆盖单元测试、集成测试、进程内 E2E、**真实部署全栈测试**。
+第一阶段测试分为两层：快速的进程内单元/服务测试，以及基于真实 Docker 部署的全栈验收。测试对象只包含当前产品模型（Chat、Plan、Group、Agent、Tool、Skill、Model、Policy、Sandbox、Memory、Artifact、Channel 与 Trace），不再包含旧 Task、MCP、Celery 或旧 Orchestration 运行时。
 
-## 测试金字塔
+## 目录
 
-```
-                    ┌─────────────────────┐
-                    │  UI E2E (Playwright) │  ← 真实浏览器 + 真实部署
-                    │  全部页面功能         │
-                  ┌─┴─────────────────────┴─┐
-                  │  Fullstack API E2E      │  ← 真实 api + worker + mock-llm
-                  │  全部后端功能 + Trace    │
-                ┌─┴─────────────────────────┴─┐
-                │  In-process E2E             │  ← 快速回归，开发时用
-                │  Plan 模式 Trace 验证        │
-              ┌─┴─────────────────────────────┴─┐
-              │  Integration Tests              │  ← API + DB
-            ┌─┴─────────────────────────────────┴─┐
-            │  Unit Tests                         │  ← 纯函数
-            └─────────────────────────────────────┘
-```
-
-## 目录结构
-
-```
+```text
 test/
-├── unit/                        # 单元测试
-├── integration/                 # 集成测试（进程内，Mock LLM）
-├── e2e/
-│   ├── test_plan_execution_trace.py   # 进程内 E2E（快速回归）
-│   ├── fullstack/                     # 真实部署 API 全栈测试
-│   │   ├── test_stack_health.py
-│   │   ├── test_auth.py
-│   │   ├── test_agents.py
-│   │   ├── test_admin.py
-│   │   ├── test_chat.py
-│   │   ├── test_plan.py
-│   │   ├── test_tasks.py
-│   │   └── test_trace.py
-│   └── ui/                            # Playwright 浏览器测试
-│       ├── tests/
-│       │   ├── login.spec.ts
-│       │   ├── navigation.spec.ts
-│       │   ├── agents.spec.ts
-│       │   ├── tasks.spec.ts
-│       │   ├── admin.spec.ts
-│       │   ├── session-chat.spec.ts
-│       │   ├── session-plan.spec.ts
-│       │   └── trace.spec.ts
-│       └── playwright.config.ts
-├── shared/                      # 工具库
-├── docker/                      # Mock LLM 服务
-├── scripts/
-│   ├── run_unit.sh
-│   ├── run_integration.sh
-│   ├── run_e2e.sh             # 进程内 E2E（开发时快速跑）
-│   └── run_fullstack.sh         # 真实部署全栈测试（提测/上线前必跑）
-└── docker-compose.test.yml
+├── unit/backend/                       # SQLite 进程内领域与 API 测试
+├── e2e/fullstack/
+│   ├── conftest.py                     # 真实 HTTP 客户端与验收世界装配
+│   ├── test_phase_one_acceptance.py    # 七个第一阶段 API/Worker 端到端验收场景
+│   └── test_ui_acceptance.py           # Playwright Chat/Plan/Group/管理面验收
+├── docker/mock_llm_server.py           # OpenAI-compatible 确定性模型
+├── docker-compose.test.yml             # 隔离的真实部署栈
+└── scripts/
+    ├── run_unit.sh
+    ├── run_fullstack.sh
+    └── run_all.sh
 ```
 
-## 功能覆盖矩阵
+## 覆盖范围
 
-| 功能 / 页面 | 单元 | 集成 | 进程内 E2E | 全栈 API | UI E2E |
-|------------|------|------|-----------|---------|--------|
-| 登录鉴权 | - | ✅ | - | ✅ | ✅ |
-| Agent 列表/配置 | - | ✅ | - | ✅ | ✅ |
-| **Agent 装配（Tool/Skill/MCP/Builtin）** | - | ✅ | - | ✅ | ✅ |
-| Chat 对话 | - | - | - | ✅ | ✅ |
-| Plan 模式 + Trace | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Task 看板 | - | - | - | ✅ | ✅ |
-| 用户管理 | - | - | - | ✅ | ✅ |
-| Tool 管理 | - | - | - | ✅ | ✅ |
-| Skill 管理 | - | - | - | - | ✅ |
-| MCP 管理 | - | - | - | - | ✅ |
-| 模型管理 | - | - | - | ✅ | ✅ |
-| Trace 可视化 | - | - | - | ✅ | ✅ |
-| Group 编排 | - | - | - | - | - |
+| 能力 | 单元/服务测试 | 真实部署 API 验收 | Playwright UI |
+| --- | --- | --- | --- |
+| 账号、角色、企业身份断言、userId 变更 | ✅ | ✅ | 登录入口与管理面 |
+| Agent 版本、装配、API Key、冻结版本 | ✅ | ✅ | Agent 列表与会话入口 |
+| Chat、确认、重连、Runner 恢复 | ✅ | ✅ | Chat 完整往返 |
+| Tool 即时治理、Sandbox、文件与 Artifact | ✅ | ✅ | 管理面与 Timeline |
+| Plan 图编辑、冻结、并行节点与结算 | ✅ | ✅ | 提案、确认、完成 |
+| Group Formation、澄清、协作与历史检索 | ✅ | ✅ | Formation、确认、GroupRun |
+| Memory、History、Channel Delivery、Trace | ✅ | ✅ | 管理面与 Timeline |
+| OpenAPI 第一阶段关键路径 | — | ✅ | — |
 
-## 快速开始
+## 准备环境
 
-### 1. 安装依赖
-
-需要 **Python 3.10+**（推荐 3.12）。
+需要 Docker、Docker Compose 和 Python 3.12。
 
 ```bash
 cd test
@@ -91,95 +44,75 @@ pip install -r requirements.txt
 cp .env.test.example .env.test
 ```
 
-### 2. 开发时快速回归（进程内，无需部署应用）
+## 执行
+
+快速回归（不需要启动 Docker）：
 
 ```bash
-# 启动测试基础设施
-docker compose -f docker-compose.test.yml up -d mysql-test redis-test
-
-# 跑单元 + 集成 + 进程内 E2E
 ./scripts/run_unit.sh
-./scripts/run_integration.sh
-./scripts/run_e2e.sh
 ```
 
-### 3. 提测 / 上线前：真实部署全栈测试
+Docker Mock 模型快速回归：
 
 ```bash
-# 一键：部署全栈 + 跑 API 全栈测试 + 跑 UI 浏览器测试
 ./scripts/run_fullstack.sh
 ```
 
-这会：
-1. `docker compose --profile fullstack up --build` 部署完整栈：
-   - `mysql-test` (:3307)
-   - `redis-test` (:6380)
-   - `mock-llm` (:9090)
-   - `api-test` (:8001) — 真实 FastAPI
-   - `worker-test` — 真实 Celery Worker（异步执行）
-   - `frontend-test` (:8081) — 真实前端
-2. 跑 `e2e/fullstack/` — 通过 HTTP 测全部后端功能
-3. 跑 `e2e/ui/` — Playwright 浏览器测全部页面
-
-### 分步执行
+Mock 只用于确定性快速回归，不是第一阶段最终验收依据。最终验收必须显式使用真实模型模式，并从当前 shell 或 CI Secret 注入凭证：
 
 ```bash
-# 只部署全栈
-docker compose -f docker-compose.test.yml --profile fullstack up -d --build
-./scripts/wait_for_stack.sh
-
-# 只跑 API 全栈测试
-pytest e2e/fullstack/ -m fullstack -v
-
-# 只跑 UI 测试
-cd e2e/ui && npm install && npx playwright install chromium && npm test
+read -r -s MYCLAW_REAL_LLM_API_KEY
+export MYCLAW_REAL_LLM_API_KEY
+export MYCLAW_LLM_MODE=real
+export MYCLAW_REAL_LLM_ENDPOINT=https://example.invalid/compatible/v1
+export MYCLAW_REAL_LLM_MODEL=example-model
+./scripts/run_fullstack.sh
+unset MYCLAW_REAL_LLM_API_KEY
 ```
 
-## 测试分层说明
+真实模式只把 `env://MYCLAW_REAL_LLM_API_KEY` 保存为 Model Credential Ref。密钥不得写入 `.env.test`、Model Registry、测试快照、日志或 Trace。CI 的 `real-model-acceptance` 仅通过手工触发，并从 `MYCLAW_REAL_LLM_API_KEY` GitHub Secret 注入。
 
-| 层级 | 标记 | 部署方式 | 适用场景 |
-|------|------|---------|---------|
-| Unit | `@pytest.mark.unit` | 无 | 纯函数逻辑 |
-| Integration | `@pytest.mark.integration` | MySQL+Redis | API 契约 |
-| E2E (in-process) | `@pytest.mark.e2e` | MySQL+Redis，进程内 app | 开发时快速回归 |
-| **Fullstack API** | `@pytest.mark.fullstack` | **完整 Docker 栈** | 提测门禁 |
-| **UI E2E** | Playwright | **完整 Docker 栈 + 浏览器** | 上线门禁 |
+它会构建并启动以下隔离服务：
 
-## 全栈测试验证内容
+- MySQL：`localhost:3307`
+- Redis：`localhost:6380`
+- Mock LLM：`localhost:9090`
+- API：`localhost:8001`
+- Frontend：`localhost:8081`
+- 两个 durable runtime worker、一个 sandbox worker
+- OTel Collector（接收真实 OTLP/HTTP Span 与 AgentInvocation Link）
 
-### API 全栈（真实 Worker 异步执行）
+然后通过真实 HTTP 执行七个产品验收场景、核对关键 OpenAPI 路径，并以 Playwright Chromium 在真实前端完成 Chat、Plan、Group 与管理面验收。真实模型模式下，单个 Run 仍须在 180 秒内结算；综合场景只扩大总测试窗口，以容纳多个串行真实调用。需要同时执行快速回归和全栈验收时：
 
-- Auth 登录 / 鉴权
-- Agent CRUD + 激活
-- Admin 资源（Tools / Skills / MCP / Models / Users）
-- Chat 模式 SSE 流式 + Trace
-- Plan 模式完整链路 + TraceValidator
-- Task 看板创建 + 异步完成
-- Trace API 返回解码后的 Span 数据
-
-### UI 全栈（真实浏览器）
-
-- 登录页（成功 / 失败）
-- 侧边栏导航（全部 7 个页面可达）
-- Agent 列表 / 配置
-- Chat 对话（发消息 → 收到回复）
-- Plan 模式（生成计划 → 确认执行 → 等待完成）
-- Task 看板渲染
-- Admin 各管理页面
-- Trace 可视化页面
-
-## 环境变量
-
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `MYCLAW_FULLSTACK_API_URL` | `http://localhost:8001` | 部署的 API 地址 |
-| `MYCLAW_FULLSTACK_UI_URL` | `http://localhost:8081` | 部署的前端地址 |
-| `MYCLAW_MOCK_LLM_URL` | `http://localhost:9090` | Mock LLM 地址 |
-
-## 推荐工作流
-
+```bash
+./scripts/run_all.sh
 ```
-开发中     → ./scripts/run_e2e.sh          (秒级，进程内)
-提测前     → ./scripts/run_fullstack.sh    (分钟级，真实部署)
-上线前     → run_fullstack.sh + 人工冒烟    (全栈自动 + 人工补充)
+
+可覆盖 API 地址：
+
+```bash
+MYCLAW_FULLSTACK_API_URL=http://localhost:8001 ./scripts/run_fullstack.sh
 ```
+
+测试栈不会自动销毁，便于失败后检查数据库和日志。完成后可执行：
+
+```bash
+docker compose -f docker-compose.test.yml --profile fullstack down -v
+```
+
+该命令会删除测试栈及测试卷，只能在 `test/` 目录、确认目标 Compose 文件无误后执行。
+
+## 生产运行参数
+
+根目录 `.env.example` 只列变量名和非敏感默认值。生产 Compose 强制 `MYCLAW_ENVIRONMENT=production`，会拒绝默认 `SECRET_KEY`、默认 `ENCRYPTION_KEY`、默认管理员密码、`DEBUG=true`、非正数池/租约参数，以及不短于 Runner Lease 的 Heartbeat。
+
+Runtime 与 Sandbox 的轮询、Outbox Claim Lease、Runner Lease/Heartbeat、Sandbox Stale Window 和数据库连接池均可通过环境变量调优。启用本地 Collector 时使用：
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318 \
+docker compose --profile observability up -d --scale runtime-worker=2
+```
+
+Collector 默认只输出调试 Trace；正式环境应在 `deploy/otel-collector.yaml` 中替换或增加受控后端 exporter。
+
+生产 Frontend 使用 frozen `pnpm-lock.yaml` 构建并由 Nginx 提供静态文件，不使用 Vite preview。入口限流、Retention、备份恢复、发布与故障处置步骤见[生产运行手册](../docs/operations/phase-one-runbook.md)。

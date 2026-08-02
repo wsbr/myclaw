@@ -2,6 +2,7 @@ from typing import AsyncIterator
 import json
 import openai as oai
 from app.core.model_hub.base import BaseLLM, LLMResponse, LLMChunk, ToolCall, TokenUsage
+from app.core.model_hub.tool_wire import to_openai_tools
 
 
 def normalize_messages_for_openai(messages: list[dict]) -> list[dict]:
@@ -45,11 +46,18 @@ def normalize_messages_for_openai(messages: list[dict]) -> list[dict]:
 
 
 class OpenAILLM(BaseLLM):
-    def __init__(self, api_key: str, base_url: str | None = None):
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str | None = None,
+        *,
+        tool_strict: bool = False,
+    ):
         self.client = oai.AsyncOpenAI(api_key=api_key, base_url=base_url)
+        self.tool_strict = tool_strict
 
     async def chat(self, messages: list[dict], tools: list[dict] | None, params: dict) -> LLMResponse:
-        system = params.pop("system", None)
+        system = params.get("system")
         msgs = normalize_messages_for_openai(messages)
         if system:
             msgs = [{"role": "system", "content": system}] + msgs
@@ -61,7 +69,7 @@ class OpenAILLM(BaseLLM):
             temperature=params.get("temperature", 0.7),
         )
         if tools:
-            kwargs["tools"] = [{"type": "function", "function": t} for t in tools]
+            kwargs["tools"] = to_openai_tools(tools, strict=self.tool_strict)
 
         resp = await self.client.chat.completions.create(**kwargs)
         choice = resp.choices[0]
@@ -80,7 +88,7 @@ class OpenAILLM(BaseLLM):
         )
 
     async def stream(self, messages: list[dict], tools: list[dict] | None, params: dict) -> AsyncIterator[LLMChunk]:
-        system = params.pop("system", None)
+        system = params.get("system")
         msgs = normalize_messages_for_openai(messages)
         if system:
             msgs = [{"role": "system", "content": system}] + msgs
@@ -92,7 +100,7 @@ class OpenAILLM(BaseLLM):
             stream_options={"include_usage": True},
         )
         if tools:
-            kwargs["tools"] = [{"type": "function", "function": t} for t in tools]
+            kwargs["tools"] = to_openai_tools(tools, strict=self.tool_strict)
 
         # OpenAI 流式工具调用是按 index 分片到达的（id/name 只在首个分片出现，
         # arguments 是需要跨多个 chunk 拼接的 JSON 字符串片段），流结束后统一解析。

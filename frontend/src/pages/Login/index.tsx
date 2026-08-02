@@ -2,6 +2,7 @@ import { Form, Input, message } from 'antd'
 import { useNavigate } from 'react-router-dom'
 import { Bot } from 'lucide-react'
 import { authApi } from '@/api/auth'
+import { API_BASE } from '@/api/client'
 import { useAuthStore } from '@/store/auth'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -59,6 +60,19 @@ export default function LoginPage() {
                 </Button>
               </Form.Item>
             </Form>
+            <div className="my-5 flex items-center gap-3 text-xs text-muted-foreground">
+              <span className="h-px flex-1 bg-border" />
+              或
+              <span className="h-px flex-1 bg-border" />
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              className="h-10 w-full text-sm"
+              onClick={() => window.location.assign(`${API_BASE}/auth/enterprise/start`)}
+            >
+              企业身份登录
+            </Button>
           </CardContent>
         </Card>
       </div>

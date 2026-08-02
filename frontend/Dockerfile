@@ -1,21 +1,20 @@
 FROM node:20-alpine AS builder
 
 WORKDIR /app
-COPY package.json ./
-RUN npm install
+RUN corepack enable && corepack prepare pnpm@10.15.0 --activate
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile
 COPY . .
 
 # Vite bakes this in at build time
 ARG VITE_API_BASE_URL=http://localhost:8000
 ENV VITE_API_BASE_URL=$VITE_API_BASE_URL
 
-RUN npm run build
+RUN pnpm build
 
-FROM node:20-alpine
-WORKDIR /app
-COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/package.json ./
-COPY --from=builder /app/vite.config.ts ./
+FROM nginx:1.27-alpine
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=builder /app/dist /usr/share/nginx/html
 EXPOSE 80
-CMD ["npm", "run", "preview", "--", "--host", "0.0.0.0", "--port", "80"]
+HEALTHCHECK --interval=10s --timeout=3s --retries=3 CMD wget -qO- http://127.0.0.1/healthz || exit 1
+CMD ["nginx", "-g", "daemon off;"]

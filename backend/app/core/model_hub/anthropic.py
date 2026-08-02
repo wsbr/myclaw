@@ -1,14 +1,16 @@
 from typing import AsyncIterator
 import anthropic
 from app.core.model_hub.base import BaseLLM, LLMResponse, LLMChunk, ToolCall, TokenUsage
+from app.core.model_hub.tool_wire import to_anthropic_tools
 
 
 class AnthropicLLM(BaseLLM):
     def __init__(self, api_key: str, base_url: str | None = None):
         self.client = anthropic.AsyncAnthropic(api_key=api_key, base_url=base_url)
+        self.tool_strict = True
 
     async def chat(self, messages: list[dict], tools: list[dict] | None, params: dict) -> LLMResponse:
-        system = params.pop("system", None)
+        system = params.get("system")
         kwargs = dict(
             model=params.get("model_id", "claude-sonnet-4-6"),
             max_tokens=params.get("max_tokens", 8192),
@@ -17,7 +19,7 @@ class AnthropicLLM(BaseLLM):
         if system:
             kwargs["system"] = system
         if tools:
-            kwargs["tools"] = tools
+            kwargs["tools"] = to_anthropic_tools(tools, strict=self.tool_strict)
         if params.get("temperature") is not None:
             kwargs["temperature"] = params["temperature"]
 
@@ -40,7 +42,7 @@ class AnthropicLLM(BaseLLM):
         )
 
     async def stream(self, messages: list[dict], tools: list[dict] | None, params: dict) -> AsyncIterator[LLMChunk]:
-        system = params.pop("system", None)
+        system = params.get("system")
         kwargs = dict(
             model=params.get("model_id", "claude-sonnet-4-6"),
             max_tokens=params.get("max_tokens", 8192),
@@ -49,7 +51,7 @@ class AnthropicLLM(BaseLLM):
         if system:
             kwargs["system"] = system
         if tools:
-            kwargs["tools"] = tools
+            kwargs["tools"] = to_anthropic_tools(tools, strict=self.tool_strict)
         if params.get("temperature") is not None:
             kwargs["temperature"] = params["temperature"]
 

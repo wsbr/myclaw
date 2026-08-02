@@ -3,7 +3,7 @@ import ModelsTab from './ModelsTab'
 
 export default function ModelsPage() {
   return (
-    <AdminSectionPage title="模型 Provider" description="管理模型供应商与可用模型">
+    <AdminSectionPage title="模型注册表" description="管理可执行模型、凭证引用、能力与默认参数">
       <ModelsTab />
     </AdminSectionPage>
   )

@@ -28,9 +28,3 @@ client.interceptors.response.use(
 
 export default client
 export { API_BASE }
-
-// Derive WebSocket base from API base URL (http→ws, https→wss)
-// Falls back to current page host when no VITE_API_BASE_URL (same-domain proxy mode)
-export const WS_BASE = import.meta.env.VITE_API_BASE_URL
-  ? import.meta.env.VITE_API_BASE_URL.replace(/^http/, 'ws')
-  : `ws://${window.location.host}`

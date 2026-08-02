@@ -1,445 +1,224 @@
-import { useParams, useNavigate } from 'react-router-dom'
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import {
-  Tabs, Form, Input, Select, Button, Switch, Card, Space, Typography, message, Spin, Tag,
-  InputNumber, Slider, Table, Popconfirm, Modal,
-} from 'antd'
-import {
-  SaveOutlined, ArrowLeftOutlined, ThunderboltOutlined, PlusOutlined,
-  CopyOutlined, DeleteOutlined,
-} from '@ant-design/icons'
-import { agentsApi } from '../../../api/agents'
-import PromptEditor from '../../../components/PromptEditor'
-import { useState, useEffect } from 'react'
-import client from '../../../api/client'
+import { useEffect, useState } from 'react'
+import { useNavigate, useParams } from 'react-router-dom'
+import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Alert, Button, Card, Form, Input, Modal, Radio, Select, Space, Spin, Switch, Table, Tabs, Tag, Typography, message } from 'antd'
+import { ArrowLeftOutlined, CloudUploadOutlined, ExperimentOutlined, KeyOutlined, PauseCircleOutlined, PlayCircleOutlined, SaveOutlined } from '@ant-design/icons'
+import { agentsApi, AgentApiKey, AgentDraft, AgentOption } from '@/api/agents'
+import PromptEditor from '@/components/PromptEditor'
 
-const MODES = ['chat', 'plan', 'group']
-const CHANNELS = ['platform_ui', 'wechat', 'feishu', 'telegram', 'webhook', 'email']
-const BUILTIN_TOOLS = [
-  'create_task', 'create_scheduled_task', 'search_tasks', 'get_task_status',
-  'send_to_channel', 'emit_event', 'find_agents', 'get_agent_schema', 'invoke_agent',
-]
+const policyTypes = ['context', 'history', 'memory_write', 'memory_recall'] as const
 
 export default function AgentConfigPage() {
   const { id } = useParams<{ id: string }>()
+  const isNew = !id || id === 'new'
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [form] = Form.useForm()
-  const isNew = !id || id === 'new'
-  const [tokenModalOpen, setTokenModalOpen] = useState(false)
-  const [newTokenName, setNewTokenName] = useState('')
-  const [createdToken, setCreatedToken] = useState<string | null>(null)
+  const [keyForm] = Form.useForm()
+  const [testOpen, setTestOpen] = useState(false)
+  const [testContent, setTestContent] = useState('')
+  const [keyOpen, setKeyOpen] = useState(false)
 
-  const { data: agent, isLoading } = useQuery({
-    queryKey: ['agent', id],
-    queryFn: () => agentsApi.get(id!),
-    enabled: !isNew,
+  const { data: detail, isLoading } = useQuery({
+    queryKey: ['agent', id], queryFn: () => agentsApi.get(id!), enabled: !isNew,
   })
-
-  const { data: providers } = useQuery({
-    queryKey: ['model-providers'],
-    queryFn: () => client.get('/model-providers').then(r => r.data),
-  })
-
-  const { data: tools } = useQuery({
-    queryKey: ['tools'],
-    queryFn: () => client.get('/tools').then(r => r.data),
-  })
-
-  const { data: skills } = useQuery({
-    queryKey: ['skills'],
-    queryFn: () => client.get('/skills').then(r => r.data),
-  })
-
-  const { data: mcpServers } = useQuery({
-    queryKey: ['mcp-servers'],
-    queryFn: () => client.get('/mcp-servers').then(r => r.data),
-  })
-
-  const { data: apiTokens, refetch: refetchTokens } = useQuery({
-    queryKey: ['agent-tokens', id],
-    queryFn: () => agentsApi.listApiTokens(id!),
-    enabled: !isNew,
-  })
-
-  const saveMutation = useMutation({
-    mutationFn: (values: any) => isNew ? agentsApi.create(values) : agentsApi.update(id!, values),
-    onSuccess: (saved) => {
-      message.success('保存成功')
-      queryClient.invalidateQueries({ queryKey: ['agents'] })
-      queryClient.invalidateQueries({ queryKey: ['agent', id] })
-      if (isNew) navigate(`/agents/${saved.id}/config`)
-      else {
-        const v = form.getFieldsValue()
-        agentsApi.updateTools(id!, {
-          tool_ids: v.tool_ids || [],
-          builtin_tools: Object.fromEntries((v.builtin_tools || []).map((k: string) => [k, true])),
-        })
-        agentsApi.updateSkills(id!, { skill_ids: v.skill_ids || [] })
-        agentsApi.updateMcpServers(id!, { mcp_server_ids: v.mcp_server_ids || [] })
-      }
-    },
-    onError: () => message.error('保存失败'),
-  })
-
-  const activateMutation = useMutation({
-    mutationFn: () => agentsApi.activate(id!),
-    onSuccess: () => { message.success('已激活'); queryClient.invalidateQueries({ queryKey: ['agent', id] }) },
-  })
-
-  const duplicateMutation = useMutation({
-    mutationFn: () => agentsApi.duplicate(id!),
-    onSuccess: (copy: any) => { message.success('已复制'); navigate(`/agents/${copy.id}/config`) },
-  })
-
-  const createTokenMutation = useMutation({
-    mutationFn: (name: string) => agentsApi.createApiToken(id!, name),
-    onSuccess: (data: any) => { setCreatedToken(data.token); refetchTokens() },
-  })
-
-  const deleteTokenMutation = useMutation({
-    mutationFn: (tokenId: string) => agentsApi.deleteApiToken(id!, tokenId),
-    onSuccess: () => refetchTokens(),
-  })
+  const optionQueries = useQueries({ queries: [
+    { queryKey: ['agent-options', 'models'], queryFn: () => agentsApi.options('models') },
+    { queryKey: ['agent-options', 'sandbox-profiles'], queryFn: () => agentsApi.options('sandbox-profiles') },
+    { queryKey: ['agent-options', 'platform-tools'], queryFn: () => agentsApi.options('platform-tools') },
+    { queryKey: ['agent-options', 'skills'], queryFn: () => agentsApi.options('skills') },
+    { queryKey: ['agent-options', 'agents'], queryFn: () => agentsApi.options('agents') },
+    ...policyTypes.map(type => ({ queryKey: ['agent-options', 'policies', type], queryFn: () => agentsApi.options('policy-definitions', { policy_type: type }) })),
+  ] })
+  const [models, sandboxes, tools, skills, boundAgents, ...policies] = optionQueries.map(q => q.data ?? [])
+  const options = (items: AgentOption[]) => items.map(item => ({ label: item.key ? `${item.name} · ${item.key}` : item.name, value: item.id }))
 
   useEffect(() => {
-    if (!agent) return
-    const mc = agent.model_config_ || {}
-    const cs = agent.context_strategy || {}
-    const mem = agent.memory_config || {}
-    form.setFieldsValue({
-      name: agent.name,
-      description: agent.description,
-      modes: agent.modes || ['chat'],
-      supported_channels: agent.supported_channels || ['platform_ui'],
-      identity: agent.system_prompt_blocks?.identity || '',
-      instructions: agent.system_prompt_blocks?.instructions || '',
-      context_block: agent.system_prompt_blocks?.context || '',
-      output_format: agent.system_prompt_blocks?.output_format || '',
-      provider_id: mc.provider_id,
-      model_id: mc.model_id,
-      temperature: mc.temperature ?? 0.7,
-      max_tokens: mc.max_tokens ?? 8192,
-      streaming: mc.streaming ?? true,
-      extended_thinking: mc.extended_thinking ?? false,
-      window_type: cs.window_type || 'sliding',
-      max_ctx_tokens: cs.max_tokens || 128000,
-      compression_threshold: cs.compression_threshold ?? 0.8,
-      short_term: mem.short_term ?? true,
-      long_term_enabled: mem.long_term?.enabled ?? false,
-      memory_scope: mem.long_term?.scope || 'user',
-      memory_ttl: mem.long_term?.ttl_days || 30,
-      group_enabled: agent.group_config?.enabled || false,
-      capability_manifest: JSON.stringify(agent.group_config?.capability_manifest || [], null, 2),
-      event_manifest: JSON.stringify(agent.group_config?.event_manifest || [], null, 2),
-      tool_ids: agent.tool_ids || [],
-      skill_ids: agent.skill_ids || [],
-      mcp_server_ids: agent.mcp_server_ids || [],
-      builtin_tools: agent.builtin_tools || [],
-      alert_error_rate: agent.alert_config?.alert_on_error_rate ?? 0.1,
-      alert_latency: agent.alert_config?.alert_on_latency_p99 ?? 30,
-      alert_cost: agent.alert_config?.alert_on_cost_daily ?? 100,
-    })
-  }, [agent, form])
+    if (detail) form.setFieldsValue({ ...detail.draft, visibility: detail.agent.visibility })
+  }, [detail, form])
 
-  if (!isNew && isLoading) return <Spin size="large" style={{ display: 'block', margin: '48px auto' }} />
-
-  const mc = agent?.model_config_ || {}
-  const cs = agent?.context_strategy || {}
-  const mem = agent?.memory_config || {}
-
-  const initialValues = agent ? {
-    name: agent.name,
-    description: agent.description,
-    modes: agent.modes || ['chat'],
-    supported_channels: agent.supported_channels || ['platform_ui'],
-    identity: agent.system_prompt_blocks?.identity || '',
-    instructions: agent.system_prompt_blocks?.instructions || '',
-    context_block: agent.system_prompt_blocks?.context || '',
-    output_format: agent.system_prompt_blocks?.output_format || '',
-    provider_id: mc.provider_id,
-    model_id: mc.model_id,
-    temperature: mc.temperature ?? 0.7,
-    max_tokens: mc.max_tokens ?? 8192,
-    streaming: mc.streaming ?? true,
-    extended_thinking: mc.extended_thinking ?? false,
-    window_type: cs.window_type || 'sliding',
-    max_ctx_tokens: cs.max_tokens || 128000,
-    compression_threshold: cs.compression_threshold ?? 0.8,
-    short_term: mem.short_term ?? true,
-    long_term_enabled: mem.long_term?.enabled ?? false,
-    memory_scope: mem.long_term?.scope || 'user',
-    memory_ttl: mem.long_term?.ttl_days || 30,
-    group_enabled: agent.group_config?.enabled || false,
-    capability_manifest: JSON.stringify(agent.group_config?.capability_manifest || [], null, 2),
-    event_manifest: JSON.stringify(agent.group_config?.event_manifest || [], null, 2),
-    tool_ids: agent.tool_ids || [],
-    skill_ids: agent.skill_ids || [],
-    mcp_server_ids: agent.mcp_server_ids || [],
-    builtin_tools: agent.builtin_tools || [],
-    alert_error_rate: agent.alert_config?.alert_on_error_rate ?? 0.1,
-    alert_latency: agent.alert_config?.alert_on_latency_p99 ?? 30,
-    alert_cost: agent.alert_config?.alert_on_cost_daily ?? 100,
-  } : {
-    modes: ['chat'], supported_channels: ['platform_ui'],
-    temperature: 0.7, max_tokens: 8192, streaming: true,
-    window_type: 'sliding', max_ctx_tokens: 128000, compression_threshold: 0.8,
-    short_term: true, long_term_enabled: false, memory_scope: 'user', memory_ttl: 30,
-    group_enabled: false, capability_manifest: '[]', event_manifest: '[]',
-    tool_ids: [], skill_ids: [], mcp_server_ids: [], builtin_tools: [],
-    alert_error_rate: 0.1, alert_latency: 30, alert_cost: 100,
-  }
-
-  const onSave = () => {
-    form.validateFields().then((v) => {
-      saveMutation.mutate({
-        name: v.name,
-        description: v.description,
-        modes: v.modes,
-        supported_channels: v.supported_channels,
-        system_prompt_blocks: {
-          identity: v.identity,
-          instructions: v.instructions,
-          context: v.context_block,
-          output_format: v.output_format,
-        },
-        model_config_: {
-          provider_id: v.provider_id,
-          model_id: v.model_id,
-          temperature: v.temperature,
-          max_tokens: v.max_tokens,
-          streaming: v.streaming,
-          extended_thinking: v.extended_thinking,
-        },
-        context_strategy: {
-          window_type: v.window_type,
-          max_tokens: v.max_ctx_tokens,
-          compression_threshold: v.compression_threshold,
-        },
-        memory_config: {
-          short_term: v.short_term,
-          long_term: { enabled: v.long_term_enabled, scope: v.memory_scope, ttl_days: v.memory_ttl },
-        },
-        group_config: {
-          enabled: v.group_enabled,
-          capability_manifest: (() => { try { return JSON.parse(v.capability_manifest || '[]') } catch { return [] } })(),
-          event_manifest: (() => { try { return JSON.parse(v.event_manifest || '[]') } catch { return [] } })(),
-        },
-        alert_config: {
-          alert_on_error_rate: v.alert_error_rate,
-          alert_on_latency_p99: v.alert_latency,
-          alert_on_cost_daily: v.alert_cost,
-        },
-      })
-    })
-  }
-
-  const tokenColumns = [
-    { title: '名称', dataIndex: 'name', key: 'name' },
-    { title: '最后使用', dataIndex: 'last_used_at', key: 'lu', render: (v: string) => v && v !== 'None' ? v.slice(0, 10) : '未使用' },
-    { title: '过期', dataIndex: 'expires_at', key: 'exp', render: (v: string) => v && v !== 'None' ? v.slice(0, 10) : '永不' },
-    {
-      title: '', key: 'del',
-      render: (_: any, r: any) => (
-        <Popconfirm title="删除此 Token？" onConfirm={() => deleteTokenMutation.mutate(r.id)}>
-          <Button size="small" danger icon={<DeleteOutlined />} />
-        </Popconfirm>
-      ),
+  const save = useMutation({
+    mutationFn: async (values: Partial<AgentDraft> & { visibility?: string }) => {
+      const { visibility, ...draft } = values
+      if (isNew) return agentsApi.create(draft, visibility)
+      return agentsApi.patchDraft(id!, detail!.draft.draft_revision, draft)
     },
-  ]
+    onSuccess: (result: any) => {
+      message.success('草稿已保存')
+      queryClient.invalidateQueries({ queryKey: ['agents'] })
+      if (isNew) navigate(`/agents/${result.agent.id}/config`, { replace: true })
+      else queryClient.invalidateQueries({ queryKey: ['agent', id] })
+    },
+    onError: (error: any) => message.error(error?.response?.status === 409 ? '草稿已在别处更新，请重新载入' : '保存失败'),
+  })
+  const publish = useMutation({
+    mutationFn: () => agentsApi.publish(id!, detail!.draft.draft_revision),
+    onSuccess: () => {
+      message.success('已发布不可变版本')
+      queryClient.invalidateQueries({ queryKey: ['agent', id] })
+      queryClient.invalidateQueries({ queryKey: ['agents'] })
+    },
+    onError: (error: any) => {
+      const issues = error?.response?.data?.error?.details?.issues
+      message.error(issues?.join('；') || '发布失败')
+    },
+  })
+  const draftTest = useMutation({
+    mutationFn: () => agentsApi.testDraft(id!, detail!.draft.draft_revision, testContent.trim()),
+    onSuccess: result => {
+      setTestOpen(false)
+      setTestContent('')
+      message.success('已创建不可变草稿测试快照')
+      navigate(`/agents/${id}/chat/${result.message.session_id}`)
+    },
+    onError: (error: any) => message.error(error?.response?.data?.error?.details?.issues?.join('；') || '草稿测试创建失败'),
+  })
+  const stateChange = useMutation({
+    mutationFn: (target: 'deactivate' | 'reactivate') => agentsApi.setState(
+      id!, target, target === 'deactivate' ? 'Builder 从配置页停用' : 'Builder 从配置页重新启用',
+    ),
+    onSuccess: result => {
+      message.success(result.status === 'inactive' ? 'Agent 已停用' : 'Agent 已重新启用')
+      queryClient.invalidateQueries({ queryKey: ['agent', id] })
+      queryClient.invalidateQueries({ queryKey: ['agents'] })
+    },
+    onError: (error: any) => message.error(error?.response?.data?.error?.code || 'Agent 状态更新失败'),
+  })
+  const apiKeys = useQuery({
+    queryKey: ['agent-api-keys', id], queryFn: () => agentsApi.listApiKeys(id!), enabled: !isNew,
+  })
+  const showSecret = (key: AgentApiKey) => Modal.success({
+    title: 'API Key 仅显示一次',
+    width: 680,
+    content: <div className="space-y-2"><Alert type="warning" showIcon message="关闭后无法再次查看；请立即保存到企业密钥管理系统。" />
+      <Typography.Text copyable code>{key.secret}</Typography.Text></div>,
+  })
+  const createKey = useMutation({
+    mutationFn: (values: { name: string; caller_label: string; expires_at?: string }) =>
+      agentsApi.createApiKey(id!, { ...values, expires_at: values.expires_at || null }),
+    onSuccess: key => {
+      setKeyOpen(false); keyForm.resetFields(); showSecret(key)
+      queryClient.invalidateQueries({ queryKey: ['agent-api-keys', id] })
+    },
+    onError: (error: any) => message.error(error?.response?.data?.error?.code || 'API Key 创建失败'),
+  })
+  const rotateKey = useMutation({
+    mutationFn: (key: AgentApiKey) => agentsApi.rotateApiKey(id!, key),
+    onSuccess: key => {
+      showSecret(key)
+      queryClient.invalidateQueries({ queryKey: ['agent-api-keys', id] })
+    },
+    onError: (error: any) => message.error(error?.response?.data?.error?.code || 'API Key 轮换失败'),
+  })
+  const revokeKey = useMutation({
+    mutationFn: (key: AgentApiKey) => agentsApi.revokeApiKey(id!, key.id),
+    onSuccess: () => {
+      message.success('API Key 已吊销')
+      queryClient.invalidateQueries({ queryKey: ['agent-api-keys', id] })
+    },
+    onError: (error: any) => message.error(error?.response?.data?.error?.code || 'API Key 吊销失败'),
+  })
+
+  if (!isNew && isLoading) return <Spin size="large" className="mx-auto mt-20 block" />
+  const draft = detail?.draft
 
   return (
     <div className="mx-auto max-w-5xl">
-      <div className="mb-6 flex items-center justify-between">
-        <Space>
+      <div className="mb-6 flex items-start justify-between gap-4">
+        <Space align="start">
           <Button icon={<ArrowLeftOutlined />} onClick={() => navigate('/agents')}>返回</Button>
           <div>
-            <h2 className="text-xl font-semibold">{isNew ? '新建 Agent' : `配置: ${agent?.name}`}</h2>
+            <Typography.Title level={3} style={{ margin: 0 }}>{isNew ? '装配新 Agent' : draft?.name || '未命名 Agent'}</Typography.Title>
+            {!isNew && <Typography.Text type="secondary">草稿 revision {draft?.draft_revision} · 已发布 v{detail?.agent.latest_published_version_no ?? '—'}</Typography.Text>}
           </div>
-          {agent && <Tag color={agent.status === 'active' ? 'success' : 'default'}>{agent.status}</Tag>}
+          {detail && <Tag color={detail.agent.status === 'published' ? 'green' : 'gold'}>{detail.agent.status}</Tag>}
         </Space>
         <Space>
-          {!isNew && <Button icon={<CopyOutlined />} onClick={() => duplicateMutation.mutate()}>复制</Button>}
-          {agent?.status === 'draft' && <Button onClick={() => activateMutation.mutate()}>激活</Button>}
-          {!isNew && (
-            <Button icon={<ThunderboltOutlined />} onClick={() => navigate(`/agents/${id}/chat`)}>对话</Button>
-          )}
-          <Button type="primary" icon={<SaveOutlined />} onClick={onSave} loading={saveMutation.isPending}>保存</Button>
+          <Button icon={<SaveOutlined />} loading={save.isPending} onClick={() => form.validateFields().then(values => save.mutate(values))}>保存草稿</Button>
+          {!isNew && <Button icon={<ExperimentOutlined />} onClick={() => setTestOpen(true)}>测试草稿</Button>}
+          {!isNew && detail?.agent.current_published_version_id && <Button
+            danger={detail.agent.status !== 'inactive'}
+            icon={detail.agent.status === 'inactive' ? <PlayCircleOutlined /> : <PauseCircleOutlined />}
+            loading={stateChange.isPending}
+            onClick={() => Modal.confirm({
+              title: detail.agent.status === 'inactive' ? '重新启用 Agent？' : '停用 Agent？',
+              content: detail.agent.status === 'inactive'
+                ? '只影响后续新 Run；已经冻结的 Plan / Group 仍按其版本规则结算。'
+                : '将阻止新的 Chat、Plan Proposal 与 Group Formation；已确认执行不会被移除。',
+              onOk: () => stateChange.mutateAsync(detail.agent.status === 'inactive' ? 'reactivate' : 'deactivate'),
+            })}>{detail.agent.status === 'inactive' ? '重新启用' : '停用'}</Button>}
+          {!isNew && <Button type="primary" icon={<CloudUploadOutlined />} loading={publish.isPending} onClick={() => publish.mutate()}>发布版本</Button>}
         </Space>
       </div>
 
-      <Form form={form} initialValues={initialValues} layout="vertical">
-        <Tabs defaultActiveKey="basic">
-
-          <Tabs.TabPane tab="基础信息" key="basic">
-            <Card>
-              <Form.Item name="name" label="名称" rules={[{ required: true }]}><Input /></Form.Item>
-              <Form.Item name="description" label="描述" rules={[{ required: true }]}>
-                <Input.TextArea rows={3} />
-              </Form.Item>
-              <Form.Item name="modes" label="执行模式">
-                <Select mode="multiple" options={MODES.map(m => ({ label: m, value: m }))} />
-              </Form.Item>
-              <Form.Item name="supported_channels" label="输出渠道">
-                <Select mode="multiple" options={CHANNELS.map(c => ({ label: c, value: c }))} />
-              </Form.Item>
-            </Card>
-          </Tabs.TabPane>
-
-          <Tabs.TabPane tab="系统提示词" key="prompt">
-            <Card>
-              <Form.Item name="identity" label="Identity"><PromptEditor height={120} /></Form.Item>
-              <Form.Item name="instructions" label="Instructions"><PromptEditor height={200} /></Form.Item>
-              <Form.Item name="context_block" label="Context"><PromptEditor height={150} /></Form.Item>
-              <Form.Item name="output_format" label="Output Format"><PromptEditor height={100} /></Form.Item>
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                [skills] [tools] [group] 区块由平台自动注入，无需手动填写。
-              </Typography.Text>
-            </Card>
-          </Tabs.TabPane>
-
-          <Tabs.TabPane tab="模型配置" key="model">
-            <Card>
-              <Form.Item name="provider_id" label="模型 Provider" rules={[{ required: true }]}>
-                <Select
-                  placeholder="选择已配置的 Provider"
-                  options={(providers || []).filter((p: any) => p.is_active).map((p: any) => ({ label: `${p.name} (${p.provider})`, value: p.id }))}
-                />
-              </Form.Item>
-              <Form.Item name="model_id" label="模型 ID" rules={[{ required: true }]}>
-                <Input placeholder="e.g. claude-sonnet-4-6, gpt-4o" />
-              </Form.Item>
-              <Form.Item name="temperature" label="Temperature">
-                <Slider min={0} max={2} step={0.05} marks={{ 0: '0', 1: '1', 2: '2' }} />
-              </Form.Item>
-              <Form.Item name="max_tokens" label="Max Output Tokens">
-                <InputNumber min={256} max={200000} style={{ width: '100%' }} />
-              </Form.Item>
-              <Space>
-                <Form.Item name="streaming" label="流式输出" valuePropName="checked"><Switch /></Form.Item>
-                <Form.Item name="extended_thinking" label="Extended Thinking（Anthropic）" valuePropName="checked"><Switch /></Form.Item>
-              </Space>
-            </Card>
-          </Tabs.TabPane>
-
-          <Tabs.TabPane tab="工具与能力" key="tools">
-            <Card title="平台内置工具" style={{ marginBottom: 12 }}>
-              <Form.Item name="builtin_tools">
-                <Select mode="multiple" placeholder="按需开启" options={BUILTIN_TOOLS.map(k => ({ label: k, value: k }))} />
-              </Form.Item>
-            </Card>
-            <Card title="自定义 Tool" style={{ marginBottom: 12 }}>
-              <Form.Item name="tool_ids">
-                <Select mode="multiple" placeholder="从 Tool Registry 选配"
-                  options={(tools || []).map((t: any) => ({ label: t.display_name, value: t.id }))} />
-              </Form.Item>
-            </Card>
-            <Card title="Skill（提示词片段）" style={{ marginBottom: 12 }}>
-              <Form.Item name="skill_ids">
-                <Select mode="multiple" placeholder="选配 Skill"
-                  options={(skills || []).map((s: any) => ({ label: s.display_name, value: s.id }))} />
-              </Form.Item>
-            </Card>
-            <Card title="MCP Server">
-              <Form.Item name="mcp_server_ids">
-                <Select mode="multiple" placeholder="选配外部 MCP Server"
-                  options={(mcpServers || []).map((m: any) => ({ label: m.display_name, value: m.id }))} />
-              </Form.Item>
-            </Card>
-          </Tabs.TabPane>
-
-          <Tabs.TabPane tab="上下文策略" key="context">
-            <Card>
-              <Form.Item name="window_type" label="历史窗口策略">
-                <Select options={[
-                  { value: 'sliding', label: '滑动窗口（自动截断旧消息）' },
-                  { value: 'summary', label: '摘要压缩（旧消息转摘要）' },
-                  { value: 'full', label: '全量（不裁剪，适合短对话）' },
-                ]} />
-              </Form.Item>
-              <Form.Item name="max_ctx_tokens" label="最大上下文 Token 数">
-                <InputNumber min={4096} max={1000000} style={{ width: '100%' }} />
-              </Form.Item>
-              <Form.Item name="compression_threshold" label="触发压缩阈值（占满多少比例触发）">
-                <Slider min={0.5} max={1} step={0.05} marks={{ 0.5: '50%', 0.8: '80%', 1: '100%' }} />
-              </Form.Item>
-            </Card>
-          </Tabs.TabPane>
-
-          <Tabs.TabPane tab="记忆策略" key="memory">
-            <Card>
-              <Form.Item name="short_term" label="短期记忆（Session 内，Redis）" valuePropName="checked">
-                <Switch />
-              </Form.Item>
-              <Form.Item name="long_term_enabled" label="长期记忆（跨 Session，MySQL）" valuePropName="checked">
-                <Switch />
-              </Form.Item>
-              <Form.Item name="memory_scope" label="记忆可见范围">
-                <Select options={[
-                  { value: 'user', label: 'User（用户级别）' },
-                  { value: 'agent', label: 'Agent（Agent 级别）' },
-                  { value: 'global', label: 'Global（全平台共享）' },
-                ]} />
-              </Form.Item>
-              <Form.Item name="memory_ttl" label="有效期（天，0=永久）">
-                <InputNumber min={0} max={365} style={{ width: '100%' }} />
-              </Form.Item>
-            </Card>
-          </Tabs.TabPane>
-
-          <Tabs.TabPane tab="Group 配置" key="group">
-            <Card>
-              <Form.Item name="group_enabled" label="加入 Group 工作网" valuePropName="checked"><Switch /></Form.Item>
-              <Form.Item name="capability_manifest" label="能力清单（JSON 数组）">
-                <PromptEditor height={200} language="json" />
-              </Form.Item>
-              <Form.Item name="event_manifest" label="事件清单（JSON 数组）">
-                <PromptEditor height={150} language="json" />
-              </Form.Item>
-            </Card>
-          </Tabs.TabPane>
-
-          <Tabs.TabPane tab="API Token" key="tokens" disabled={isNew}>
-            <Card
-              title="外部调用令牌"
-              extra={<Button type="primary" icon={<PlusOutlined />} onClick={() => { setTokenModalOpen(true); setCreatedToken(null); setNewTokenName('') }}>新建</Button>}
-            >
-              <Table dataSource={apiTokens || []} columns={tokenColumns} rowKey="id" size="small" pagination={false} />
-            </Card>
-            <Modal
-              title="新建 API Token"
-              open={tokenModalOpen}
-              onOk={() => !createdToken && createTokenMutation.mutate(newTokenName)}
-              onCancel={() => setTokenModalOpen(false)}
-              okText={createdToken ? '关闭' : '创建'}
-            >
-              {createdToken ? (
-                <Space direction="vertical" style={{ width: '100%' }}>
-                  <Typography.Text type="warning">Token 只显示一次，请立即复制保存：</Typography.Text>
-                  <Input.TextArea value={createdToken} rows={3} readOnly style={{ fontFamily: 'monospace', fontSize: 12 }} />
-                </Space>
-              ) : (
-                <Input value={newTokenName} onChange={e => setNewTokenName(e.target.value)} placeholder="Token 名称，如：生产环境" />
-              )}
-            </Modal>
-          </Tabs.TabPane>
-
-          <Tabs.TabPane tab="统计与告警" key="stats" disabled={isNew}>
-            <Card title="告警阈值配置">
-              <Form.Item name="alert_error_rate" label="错误率告警（超过此值告警，0~1）">
-                <Slider min={0} max={1} step={0.01} marks={{ 0: '0%', 0.1: '10%', 0.5: '50%' }} />
-              </Form.Item>
-              <Form.Item name="alert_latency" label="P99 延迟告警（秒）">
-                <InputNumber min={1} max={300} style={{ width: '100%' }} addonAfter="秒" />
-              </Form.Item>
-              <Form.Item name="alert_cost" label="日均费用告警">
-                <InputNumber min={0} style={{ width: '100%' }} addonBefore="$" />
-              </Form.Item>
-            </Card>
-          </Tabs.TabPane>
-
-        </Tabs>
+      <Alert className="mb-4" type="info" showIcon message="Chat 新 Run 使用最新发布版本；已确认的 Plan / Group 不会随草稿变化。" />
+      <Form form={form} layout="vertical" initialValues={{ visibility: 'private', group_enabled: false, tool_ids: [], skill_ids: [], bound_agent_ids: [] }}>
+        <Tabs tabPosition="left" items={[
+          { key: 'basic', label: '基础信息', children: <Card>
+            <Form.Item name="name" label="名称" rules={[{ required: true }]}><Input maxLength={200} /></Form.Item>
+            <Form.Item name="description" label="任务描述" rules={[{ required: true }]}><Input.TextArea rows={4} /></Form.Item>
+            <Form.Item name="visibility" label="可见范围"><Radio.Group disabled={!isNew} options={[{ label: '私有', value: 'private' }, { label: '企业', value: 'enterprise' }]} /></Form.Item>
+          </Card> },
+          { key: 'model', label: '模型与指令', children: <Card>
+            <Form.Item name="model_id" label="模型" rules={[{ required: true }]}><Select options={options(models)} placeholder="选择平台模型" /></Form.Item>
+            <Form.Item name="sandbox_profile_id" label="Sandbox" rules={[{ required: true }]}><Select options={options(sandboxes)} /></Form.Item>
+            <Form.Item name="instructions" label="Agent Instructions" rules={[{ required: true }]}><PromptEditor height={320} /></Form.Item>
+            <Typography.Text type="secondary">采样参数由平台 Model Registry 统一治理。</Typography.Text>
+          </Card> },
+          { key: 'capabilities', label: '能力装配', children: <Card>
+            <Form.Item name="tool_ids" label="Platform Tools"><Select mode="multiple" options={options(tools)} optionFilterProp="label" /></Form.Item>
+            <Form.Item name="skill_ids" label="Skills"><Select mode="multiple" options={options(skills)} optionFilterProp="label" /></Form.Item>
+          </Card> },
+          { key: 'context', label: '上下文与记忆', children: <Card>
+            <Form.Item name="context_policy_id" label="Context Policy" rules={[{ required: true }]}><Select options={options(policies[0])} /></Form.Item>
+            <Form.Item name="history_policy_id" label="History Policy" rules={[{ required: true }]}><Select options={options(policies[1])} /></Form.Item>
+            <Form.Item name="memory_write_policy_id" label="Memory Write Policy" rules={[{ required: true }]}><Select options={options(policies[2])} /></Form.Item>
+            <Form.Item name="memory_recall_policy_id" label="Memory Recall Policy" rules={[{ required: true }]}><Select options={options(policies[3])} /></Form.Item>
+          </Card> },
+          { key: 'collaboration', label: '协作与访问', children: <Card>
+            <Form.Item name="bound_agent_ids" label="可调用 Agent"><Select mode="multiple" options={options(boundAgents.filter(item => item.id !== id))} optionFilterProp="label" /></Form.Item>
+            <Form.Item name="group_enabled" label="允许加入 Group" valuePropName="checked"><Switch /></Form.Item>
+            <Typography.Text type="secondary">绑定只授予发现与调用范围，不提升原始用户权限。</Typography.Text>
+          </Card> },
+          ...(!isNew ? [{ key: 'api', label: 'API 接入', children: <Card title="Agent API Keys"
+            extra={<Button type="primary" icon={<KeyOutlined />} onClick={() => setKeyOpen(true)}>创建 Key</Button>}>
+            <Alert className="mb-4" type="info" showIcon message="外部系统使用 AgentApiKey + userId 调用；Key 不代表新的用户身份。" />
+            <Table rowKey="id" loading={apiKeys.isLoading} dataSource={apiKeys.data ?? []} pagination={false} columns={[
+              { title: '名称', dataIndex: 'name' },
+              { title: '调用方', dataIndex: 'caller_label' },
+              { title: 'Prefix', dataIndex: 'prefix', render: (value: string) => <Typography.Text code>{value}</Typography.Text> },
+              { title: '状态', dataIndex: 'status', render: (value: string) => <Tag color={value === 'active' ? 'success' : 'default'}>{value}</Tag> },
+              { title: '到期', dataIndex: 'expires_at', render: (value: string | null) => value ? new Date(value).toLocaleString() : '永不' },
+              { title: '最后使用', dataIndex: 'last_used_at', render: (value: string | null) => value ? new Date(value).toLocaleString() : '—' },
+              { title: '操作', render: (_: unknown, key: AgentApiKey) => <Space>
+                <Button size="small" disabled={key.status !== 'active'} loading={rotateKey.isPending} onClick={() => Modal.confirm({
+                  title: '轮换 API Key？', content: '新 Key 会立即生效；旧 Key 将被吊销。', onOk: () => rotateKey.mutateAsync(key),
+                })}>轮换</Button>
+                <Button size="small" danger disabled={key.status !== 'active'} loading={revokeKey.isPending} onClick={() => Modal.confirm({
+                  title: '吊销 API Key？', content: '吊销立即生效且不可撤销。', okButtonProps: { danger: true }, onOk: () => revokeKey.mutateAsync(key),
+                })}>吊销</Button>
+              </Space> },
+            ]} />
+          </Card> }] : []),
+        ]} />
       </Form>
+      <Modal title="测试当前草稿" open={testOpen} onCancel={() => setTestOpen(false)}
+        okText="创建测试 Run" confirmLoading={draftTest.isPending}
+        okButtonProps={{ disabled: !testContent.trim() }} onOk={() => draftTest.mutate()}>
+        <Alert className="mb-3" type="warning" showIcon
+          message="平台会复制当前 revision 为不可变测试快照"
+          description="后续草稿编辑不会改变本次测试；该 Run 为私有 Chat，不能进入 Plan / Group，也不能被其他 Agent 调用。" />
+        <Input.TextArea value={testContent} onChange={event => setTestContent(event.target.value)}
+          placeholder="输入草稿测试消息" autoSize={{ minRows: 3, maxRows: 8 }} />
+      </Modal>
+      <Modal title="创建 Agent API Key" open={keyOpen} onCancel={() => setKeyOpen(false)}
+        onOk={() => keyForm.submit()} confirmLoading={createKey.isPending}>
+        <Form form={keyForm} layout="vertical" onFinish={values => createKey.mutate(values)}>
+          <Form.Item name="name" label="名称" rules={[{ required: true }]}><Input /></Form.Item>
+          <Form.Item name="caller_label" label="调用方标识" rules={[{ required: true }]}><Input /></Form.Item>
+          <Form.Item name="expires_at" label="到期时间（ISO 8601，可选）"><Input placeholder="2026-12-31T23:59:59+08:00" /></Form.Item>
+        </Form>
+      </Modal>
     </div>
   )
 }

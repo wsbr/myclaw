@@ -1,18 +1,90 @@
 import client from './client'
 
+export interface AgentSummary {
+  id: string
+  owner_account_id: string
+  visibility: 'private' | 'enterprise'
+  status: 'draft' | 'published' | 'inactive'
+  version: number
+  draft_version_id: string
+  current_published_version_id: string | null
+  name: string
+  description: string
+  group_enabled: boolean
+  latest_published_version_no: number | null
+}
+
+export interface AgentDraft {
+  id: string
+  agent_id: string
+  draft_revision: number
+  derived_from_version_id: string | null
+  name: string
+  description: string
+  instructions: string
+  model_id: string | null
+  sandbox_profile_id: string | null
+  context_policy_id: string | null
+  history_policy_id: string | null
+  memory_write_policy_id: string | null
+  memory_recall_policy_id: string | null
+  group_enabled: boolean
+  tool_ids: string[]
+  skill_ids: string[]
+  bound_agent_ids: string[]
+}
+
+export interface AgentDetail { agent: AgentSummary; draft: AgentDraft }
+export interface AgentOption { id: string; key?: string; name: string; description?: string }
+export interface AgentApiKey {
+  id: string
+  agent_id: string
+  name: string
+  caller_label: string
+  prefix: string
+  status: string
+  expires_at: string | null
+  last_used_at: string | null
+  rotated_from_id: string | null
+  version: number
+  created_at: string
+  secret?: string | null
+}
+
 export const agentsApi = {
-  list: () => client.get('/agents').then(r => r.data),
-  get: (id: string) => client.get(`/agents/${id}`).then(r => r.data),
-  create: (data: object) => client.post('/agents', data).then(r => r.data),
-  update: (id: string, data: object) => client.put(`/agents/${id}`, data).then(r => r.data),
-  delete: (id: string) => client.delete(`/agents/${id}`),
-  activate: (id: string) => client.post(`/agents/${id}/activate`).then(r => r.data),
-  duplicate: (id: string) => client.post(`/agents/${id}/duplicate`).then(r => r.data),
-  listVersions: (id: string) => client.get(`/agents/${id}/versions`).then(r => r.data),
-  updateTools: (id: string, data: object) => client.put(`/agents/${id}/tools`, data),
-  updateSkills: (id: string, data: object) => client.put(`/agents/${id}/skills`, data),
-  updateMcpServers: (id: string, data: object) => client.put(`/agents/${id}/mcp-servers`, data),
-  listApiTokens: (id: string) => client.get(`/agents/${id}/api-tokens`).then(r => r.data),
-  createApiToken: (id: string, name: string) => client.post(`/agents/${id}/api-tokens`, { name }).then(r => r.data),
-  deleteApiToken: (agentId: string, tokenId: string) => client.delete(`/agents/${agentId}/api-tokens/${tokenId}`),
+  list: () => client.get<{ items: AgentSummary[] }>('/agents').then(r => r.data.items),
+  getSummary: (id: string) => client.get<AgentSummary>(`/agents/${id}/summary`).then(r => r.data),
+  get: (id: string) => client.get<AgentDetail>(`/agents/${id}`).then(r => r.data),
+  create: (draft: Partial<AgentDraft>, visibility = 'private') =>
+    client.post<AgentDetail>('/agents', { visibility, draft }).then(r => r.data),
+  patchDraft: (id: string, revision: number, data: Partial<AgentDraft>) =>
+    client.patch<AgentDraft>(`/agents/${id}/draft`, data, { headers: { 'If-Match': `W/"${revision}"` } }).then(r => r.data),
+  publish: (id: string, revision: number) =>
+    client.post(`/agents/${id}/publish`, { expected_draft_revision: revision }, {
+      headers: { 'Idempotency-Key': crypto.randomUUID() },
+    }).then(r => r.data),
+  testDraft: (id: string, revision: number, content: string) =>
+    client.post(`/agents/${id}/draft/test-runs`, {
+      expected_draft_revision: revision, content,
+    }, { headers: { 'Idempotency-Key': crypto.randomUUID() } }).then(r => r.data),
+  setState: (id: string, target: 'deactivate' | 'reactivate', reason: string) =>
+    client.post<AgentSummary>(`/agents/${id}/${target}`, { reason }, {
+      headers: { 'Idempotency-Key': crypto.randomUUID() },
+    }).then(r => r.data),
+  listVersions: (id: string) => client.get(`/agents/${id}/versions`).then(r => r.data.items),
+  listApiKeys: (id: string) => client.get<{ items: AgentApiKey[] }>(`/agents/${id}/api-keys`).then(r => r.data.items),
+  createApiKey: (id: string, values: { name: string; caller_label: string; expires_at?: string | null }) =>
+    client.post<AgentApiKey>(`/agents/${id}/api-keys`, values, {
+      headers: { 'Idempotency-Key': crypto.randomUUID() },
+    }).then(r => r.data),
+  rotateApiKey: (id: string, key: AgentApiKey) =>
+    client.post<AgentApiKey>(`/agents/${id}/api-keys/${key.id}/rotate`, {
+      name: key.name, caller_label: key.caller_label, expires_at: key.expires_at,
+    }, { headers: { 'Idempotency-Key': crypto.randomUUID() } }).then(r => r.data),
+  revokeApiKey: (id: string, keyId: string) =>
+    client.delete(`/agents/${id}/api-keys/${keyId}`, {
+      headers: { 'Idempotency-Key': crypto.randomUUID() },
+    }),
+  options: (resource: string, params?: object) =>
+    client.get<AgentOption[]>(`/agent-options/${resource}`, { params }).then(r => r.data),
 }

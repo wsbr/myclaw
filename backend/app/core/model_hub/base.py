@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import AsyncIterator
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class TokenUsage(BaseModel):
@@ -16,7 +16,7 @@ class ToolCall(BaseModel):
 
 class LLMResponse(BaseModel):
     content: str
-    tool_calls: list[ToolCall] = []
+    tool_calls: list[ToolCall] = Field(default_factory=list)
     usage: TokenUsage
     model: str
     finish_reason: str = "stop"
@@ -30,6 +30,7 @@ class LLMChunk(BaseModel):
 
 
 class BaseLLM(ABC):
+    tool_strict: bool = False
 
     @abstractmethod
     async def chat(

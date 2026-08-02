@@ -2,17 +2,19 @@ import { useState, useEffect } from 'react'
 import { useNavigate, useLocation, Routes, Route, Navigate } from 'react-router-dom'
 import {
   Bot,
+  Brain,
   ChevronRight,
   Cpu,
   LayoutDashboard,
   LogOut,
   PanelLeftClose,
   PanelLeftOpen,
-  Plug,
+  ScrollText,
+  ShieldCheck,
   Sparkles,
+  UserRound,
   Users,
   Wrench,
-  Zap,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
@@ -21,42 +23,46 @@ import NotificationBell from '@/components/layout/NotificationBell'
 import AgentListPage from '@/pages/Agents/List'
 import AgentConfigPage from '@/pages/Agents/Config'
 import SessionPage from '@/pages/Session'
-import TasksPage from '@/pages/Tasks'
 import TracePage from '@/pages/Trace'
-import OrchestrationPage from '@/pages/Orchestration'
 import UsersPage from '@/pages/Admin/UsersPage'
 import ToolsPage from '@/pages/Admin/ToolsPage'
 import SkillsPage from '@/pages/Admin/SkillsPage'
-import McpPage from '@/pages/Admin/McpPage'
 import ModelsPage from '@/pages/Admin/ModelsPage'
+import GovernancePage from '@/pages/Admin/GovernancePage'
+import AuditPage from '@/pages/Admin/AuditPage'
+import MemoriesPage from '@/pages/Memories'
+import AccountPage from '@/pages/Account'
 
 const SIDEBAR_KEY = 'myclaw_sidebar_collapsed'
 
-const navItems = [
+const navItems: { key: string; label: string; icon: typeof Bot; roles?: string[] }[] = [
   { key: '/agents', label: 'Agents', icon: Bot },
-  { key: '/tasks', label: 'Tasks', icon: Zap },
-  { key: '/users', label: '用户管理', icon: Users },
-  { key: '/tools', label: 'Tool 管理', icon: Wrench },
-  { key: '/skills', label: 'Skill 管理', icon: Sparkles },
-  { key: '/mcp', label: 'MCP 管理', icon: Plug },
-  { key: '/models', label: '模型管理', icon: Cpu },
+  { key: '/memories', label: 'Memory', icon: Brain },
+  { key: '/account', label: '我的账号', icon: UserRound },
+  { key: '/users', label: '用户管理', icon: Users, roles: ['admin'] },
+  { key: '/tools', label: 'Tool 管理', icon: Wrench, roles: ['admin'] },
+  { key: '/skills', label: 'Skill 管理', icon: Sparkles, roles: ['builder', 'admin'] },
+  { key: '/models', label: '模型管理', icon: Cpu, roles: ['admin'] },
+  { key: '/governance', label: 'Policy / Sandbox', icon: ShieldCheck, roles: ['admin'] },
+  { key: '/audit', label: 'Platform Audit', icon: ScrollText, roles: ['admin'] },
 ]
 
 const breadcrumbMap: Record<string, string> = {
   '/agents': 'Agents',
-  '/tasks': 'Tasks',
+  '/memories': 'Memory',
+  '/account': '我的账号',
   '/users': '用户管理',
   '/tools': 'Tool 管理',
   '/skills': 'Skill 管理',
-  '/mcp': 'MCP 管理',
   '/models': '模型管理',
+  '/governance': 'Policy / Sandbox',
+  '/audit': 'Platform Audit',
 }
 
 function breadcrumbLabel(pathname: string): string {
   if (pathname.startsWith('/agents') && pathname.includes('/config')) return 'Agent 配置'
   if (pathname.startsWith('/agents') && pathname.includes('/chat')) return '对话'
   if (pathname.startsWith('/sessions') && pathname.includes('/trace')) return 'Trace'
-  if (pathname.startsWith('/sessions') && pathname.includes('/orchestration')) return '编排图'
 
   const match = navItems
     .filter((item) => pathname === item.key || pathname.startsWith(`${item.key}/`))
@@ -90,6 +96,7 @@ export default function WorkspaceLayout() {
 
   const selectedKey = getSelectedKey(location.pathname)
   const isChatPage = location.pathname.includes('/chat')
+  const visibleNavItems = navItems.filter(item => !item.roles || item.roles.includes(user?.role || 'user'))
 
   return (
     <div className="flex h-screen w-full bg-background">
@@ -122,7 +129,7 @@ export default function WorkspaceLayout() {
         </div>
 
         <nav className="flex flex-1 flex-col gap-1 overflow-y-auto p-2">
-          {navItems.map(({ key, label, icon: Icon }) => {
+          {visibleNavItems.map(({ key, label, icon: Icon }) => {
             const active = selectedKey === key
             return (
               <button
@@ -196,15 +203,16 @@ export default function WorkspaceLayout() {
                 被当成不同路由，导致 SessionPage 被卸载重装，正在流式写入的
                 聊天状态会被清空 */}
             <Route path="/agents/:agentId/chat/:sessionId?" element={<SessionPage />} />
-            <Route path="/tasks" element={<TasksPage />} />
+            <Route path="/memories" element={<MemoriesPage />} />
+            <Route path="/account" element={<AccountPage />} />
             <Route path="/users" element={<UsersPage />} />
             <Route path="/tools" element={<ToolsPage />} />
             <Route path="/skills" element={<SkillsPage />} />
-            <Route path="/mcp" element={<McpPage />} />
             <Route path="/models" element={<ModelsPage />} />
+            <Route path="/governance" element={<GovernancePage />} />
+            <Route path="/audit" element={<AuditPage />} />
             <Route path="/admin" element={<Navigate to="/users" replace />} />
             <Route path="/sessions/:sessionId/trace" element={<TracePage />} />
-            <Route path="/sessions/:sessionId/orchestration" element={<OrchestrationPage />} />
           </Routes>
         </main>
       </div>

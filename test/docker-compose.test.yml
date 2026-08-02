@@ -10,6 +10,7 @@
 services:
   mysql-test:
     image: mysql:8.0
+    command: --log-bin-trust-function-creators=1
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpassword}
       MYSQL_DATABASE: ${MYSQL_DATABASE:-myclaw_test}
@@ -50,6 +51,17 @@ services:
     profiles:
       - fullstack
 
+  otel-collector-test:
+    image: otel/opentelemetry-collector-contrib:0.153.0
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./docker/otel-collector.test.yaml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "4319:4318"
+      - "13134:13133"
+    profiles:
+      - fullstack
+
   api-test:
     build:
       context: ../backend
@@ -62,11 +74,12 @@ services:
     environment:
       DATABASE_URL: mysql+aiomysql://myclaw:mypassword@mysql-test:3306/myclaw_test
       REDIS_URL: redis://:redispassword@redis-test:6379/0
-      CELERY_BROKER_URL: redis://:redispassword@redis-test:6379/1
-      CELERY_RESULT_BACKEND: redis://:redispassword@redis-test:6379/2
       CORS_ORIGINS: '["http://localhost:8081","http://localhost:8001"]'
       INIT_ADMIN_EMAIL: admin@test.myclaw.local
       INIT_ADMIN_PASSWORD: testpassword123
+      MYCLAW_REAL_LLM_API_KEY: ${MYCLAW_REAL_LLM_API_KEY:-}
+      OTEL_SERVICE_NAME: myclaw-api-test
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector-test:4318
     depends_on:
       mysql-test:
         condition: service_healthy
@@ -82,23 +95,54 @@ services:
       start_period: 15s
     profiles:
       - fullstack
+    volumes:
+      - myclaw-test-data:/var/lib/myclaw
 
-  worker-test:
+  runtime-worker-test:
     build:
       context: ../backend
       dockerfile: Dockerfile
-    command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=2
+    command: python -m app.workers.runtime_worker_v1
     env_file: .env.test
     environment:
       DATABASE_URL: mysql+aiomysql://myclaw:mypassword@mysql-test:3306/myclaw_test
       REDIS_URL: redis://:redispassword@redis-test:6379/0
-      CELERY_BROKER_URL: redis://:redispassword@redis-test:6379/1
-      CELERY_RESULT_BACKEND: redis://:redispassword@redis-test:6379/2
+      MYCLAW_REAL_LLM_API_KEY: ${MYCLAW_REAL_LLM_API_KEY:-}
+      RUNTIME_WORKER_POLL_SECONDS: "0.1"
+      RUNTIME_OUTBOX_CLAIM_LEASE_SECONDS: "5"
+      RUNTIME_RUNNER_LEASE_SECONDS: "8"
+      RUNTIME_RUNNER_HEARTBEAT_SECONDS: "2"
+      OTEL_SERVICE_NAME: myclaw-runtime-worker-test
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector-test:4318
     depends_on:
       api-test:
         condition: service_healthy
     profiles:
       - fullstack
+    volumes:
+      - myclaw-test-data:/var/lib/myclaw
+
+  sandbox-worker-test:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+    command: python -m app.workers.sandbox_worker
+    env_file: .env.test
+    environment:
+      DATABASE_URL: mysql+aiomysql://myclaw:mypassword@mysql-test:3306/myclaw_test
+      REDIS_URL: redis://:redispassword@redis-test:6379/0
+      SANDBOX_WORKER_POLL_SECONDS: "0.1"
+      SANDBOX_OUTBOX_CLAIM_LEASE_SECONDS: "5"
+      SANDBOX_ATTEMPT_STALE_SECONDS: "10"
+      OTEL_SERVICE_NAME: myclaw-sandbox-worker-test
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector-test:4318
+    depends_on:
+      api-test:
+        condition: service_healthy
+    profiles:
+      - fullstack
+    volumes:
+      - myclaw-test-data:/var/lib/myclaw
 
   frontend-test:
     build:
@@ -112,10 +156,13 @@ services:
       api-test:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://localhost:80').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      test: ["CMD", "wget", "-qO-", "http://localhost:80/healthz"]
       interval: 5s
       timeout: 5s
       retries: 15
       start_period: 15s
     profiles:
       - fullstack
+
+volumes:
+  myclaw-test-data:

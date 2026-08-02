@@ -1,243 +1,134 @@
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Table, Button, Form, Input, Select, Modal, Tag, message, Popconfirm, Space, Alert, Divider } from 'antd'
-import {
-  PlusOutlined, DeleteOutlined, StopOutlined, CheckCircleOutlined, ApiOutlined,
-} from '@ant-design/icons'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Alert, Button, Form, Input, Modal, Select, Space, Switch, Table, Tag, message } from 'antd'
+import { ApiOutlined, EditOutlined, PlusOutlined } from '@ant-design/icons'
 import { useState } from 'react'
 import client from '../../api/client'
 
-const PROVIDER_OPTIONS = [
-  { value: 'anthropic',         label: 'Anthropic' },
-  { value: 'openai',            label: 'OpenAI' },
-  { value: 'openai_compatible', label: 'OpenAI Compatible（兼容协议）' },
-  { value: 'azure_openai',      label: 'Azure OpenAI' },
-  { value: 'ollama',            label: 'Ollama（本地）' },
-]
-
-// 常见 OpenAI-compatible 第三方服务预填
-const COMPATIBLE_PRESETS: Record<string, { label: string; base_url: string }> = {
-  deepseek:   { label: 'DeepSeek',    base_url: 'https://api.deepseek.com/v1' },
-  moonshot:   { label: 'Moonshot',    base_url: 'https://api.moonshot.cn/v1' },
-  minimax:    { label: 'MiniMax',     base_url: 'https://api.minimax.chat/v1' },
-  groq:       { label: 'Groq',        base_url: 'https://api.groq.com/openai/v1' },
-  together:   { label: 'Together AI', base_url: 'https://api.together.xyz/v1' },
-  siliconflow:{ label: 'SiliconFlow', base_url: 'https://api.siliconflow.cn/v1' },
-  zhipu:      { label: '智谱 GLM',    base_url: 'https://open.bigmodel.cn/api/paas/v4' },
-  baichuan:   { label: '百川',        base_url: 'https://api.baichuan-ai.com/v1' },
+type Model = {
+  id: string
+  key: string
+  provider: string
+  model_name: string
+  endpoint?: string
+  credential_configured: boolean
+  default_parameters: Record<string, unknown>
+  capabilities: Record<string, unknown>
+  enabled: boolean
+  version: number
 }
 
-function providerColor(v: string) {
-  return v === 'anthropic' ? 'blue'
-    : v === 'openai' ? 'green'
-    : v === 'openai_compatible' ? 'cyan'
-    : v === 'azure_openai' ? 'geekblue'
-    : v === 'ollama' ? 'orange'
-    : 'default'
+const providers = ['openai', 'anthropic', 'openai_compatible'].map(value => ({ value, label: value }))
+const commandHeaders = () => ({ 'Idempotency-Key': crypto.randomUUID() })
+
+function parseObject(value?: string) {
+  if (!value?.trim()) return {}
+  return JSON.parse(value)
 }
 
 export default function ModelsTab() {
-  const qc = useQueryClient()
-  const [open, setOpen] = useState(false)
+  const queryClient = useQueryClient()
   const [form] = Form.useForm()
-  const [selectedProvider, setSelectedProvider] = useState<string>('')
-  const [testResults, setTestResults] = useState<Record<string, { ok: boolean; message: string }>>({})
-  const [testingId, setTestingId] = useState<string | null>(null)
+  const [editing, setEditing] = useState<Model | null>(null)
+  const [open, setOpen] = useState(false)
+  const [testResult, setTestResult] = useState<{ id: string; ok: boolean; latency_ms: number; provider_error_code?: string }>()
 
-  const { data, isLoading } = useQuery({
-    queryKey: ['model-providers'],
-    queryFn: () => client.get('/model-providers').then(r => r.data),
+  const models = useQuery({
+    queryKey: ['models'],
+    queryFn: () => client.get('/models').then(response => response.data.items as Model[]),
   })
 
-  const createMutation = useMutation({
-    mutationFn: (v: any) => client.post('/model-providers', v).then(r => r.data),
+  const save = useMutation({
+    mutationFn: async (values: any) => {
+      const payload = {
+        ...values,
+        default_parameters: parseObject(values.default_parameters),
+        capabilities: parseObject(values.capabilities),
+      }
+      if (editing) {
+        delete payload.key
+        delete payload.provider
+        delete payload.model_name
+        return client.patch(`/models/${editing.id}`, payload, {
+          headers: { ...commandHeaders(), 'If-Match': `"${editing.version}"` },
+        }).then(response => response.data)
+      }
+      return client.post('/models', payload, { headers: commandHeaders() }).then(response => response.data)
+    },
     onSuccess: () => {
-      message.success('模型 Provider 已添加')
-      qc.invalidateQueries({ queryKey: ['model-providers'] })
+      message.success(editing ? '模型配置已更新' : '模型已创建')
       setOpen(false)
+      setEditing(null)
       form.resetFields()
-      setSelectedProvider('')
+      queryClient.invalidateQueries({ queryKey: ['models'] })
     },
-    onError: (e: any) => {
-      message.error(e?.response?.data?.detail || '添加失败')
-    },
+    onError: (error: any) => message.error(error?.response?.data?.error?.code || error?.message || '保存失败'),
   })
 
-  const deleteMutation = useMutation({
-    mutationFn: (id: string) => client.delete(`/model-providers/${id}`),
-    onSuccess: () => {
-      message.success('已删除')
-      qc.invalidateQueries({ queryKey: ['model-providers'] })
-    },
-    onError: () => message.error('删除失败'),
+  const toggle = useMutation({
+    mutationFn: ({ model, enabled }: { model: Model; enabled: boolean }) =>
+      client.post(`/models/${model.id}/${enabled ? 'enable' : 'disable'}`, {}, { headers: commandHeaders() }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['models'] }),
+    onError: () => message.error('状态更新失败'),
   })
 
-  const activateMutation = useMutation({
-    mutationFn: ({ id, active }: { id: string; active: boolean }) =>
-      client.patch(`/model-providers/${id}/${active ? 'activate' : 'deactivate'}`).then(r => r.data),
-    onSuccess: (_data, { active }) => {
-      message.success(active ? '已启用' : '已禁用')
-      qc.invalidateQueries({ queryKey: ['model-providers'] })
-    },
-    onError: () => message.error('操作失败'),
-  })
-
-  const handleTest = async (id: string) => {
-    setTestingId(id)
-    try {
-      const res = await client.post(`/model-providers/${id}/test`).then(r => r.data)
-      setTestResults(prev => ({ ...prev, [id]: res }))
-    } catch {
-      setTestResults(prev => ({ ...prev, [id]: { ok: false, message: '请求失败' } }))
-    } finally {
-      setTestingId(null)
-    }
+  const testConnection = async (model: Model) => {
+    const result = await client.post(`/models/${model.id}/connection-test`).then(response => response.data)
+    setTestResult({ id: model.id, ...result })
   }
 
-  const applyPreset = (key: string) => {
-    const p = COMPATIBLE_PRESETS[key]
-    if (!p) return
-    form.setFieldsValue({ name: key, base_url: p.base_url })
+  const edit = (model: Model) => {
+    setEditing(model)
+    form.setFieldsValue({
+      ...model,
+      default_parameters: JSON.stringify(model.default_parameters, null, 2),
+      capabilities: JSON.stringify(model.capabilities, null, 2),
+    })
+    setOpen(true)
   }
-
-  const columns = [
-    { title: '标识名', dataIndex: 'name', key: 'name' },
-    {
-      title: '提供商',
-      dataIndex: 'provider',
-      key: 'provider',
-      render: (v: string) => <Tag color={providerColor(v)}>{v}</Tag>,
-    },
-    { title: 'Base URL', dataIndex: 'base_url', key: 'url', ellipsis: true },
-    {
-      title: '状态',
-      dataIndex: 'is_active',
-      key: 'active',
-      render: (v: boolean) => <Tag color={v ? 'success' : 'default'}>{v ? '启用' : '禁用'}</Tag>,
-    },
-    {
-      title: '操作',
-      key: 'action',
-      render: (_: any, record: any) => (
-        <Space wrap>
-          <Button
-            size="small"
-            icon={<ApiOutlined />}
-            loading={testingId === record.id}
-            onClick={() => handleTest(record.id)}
-          >
-            测试连接
-          </Button>
-          {record.is_active ? (
-            <Button
-              size="small"
-              icon={<StopOutlined />}
-              onClick={() => activateMutation.mutate({ id: record.id, active: false })}
-            >
-              禁用
-            </Button>
-          ) : (
-            <Button
-              size="small"
-              type="primary"
-              ghost
-              icon={<CheckCircleOutlined />}
-              onClick={() => activateMutation.mutate({ id: record.id, active: true })}
-            >
-              启用
-            </Button>
-          )}
-          <Popconfirm
-            title="确定删除此 Provider？"
-            description="删除后数据不可恢复"
-            okText="删除"
-            okButtonProps={{ danger: true }}
-            cancelText="取消"
-            onConfirm={() => deleteMutation.mutate(record.id)}
-          >
-            <Button danger size="small" icon={<DeleteOutlined />}>删除</Button>
-          </Popconfirm>
-        </Space>
-      ),
-    },
-  ]
 
   return (
     <>
       <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => setOpen(true)}>
-          添加 Provider
+        <Button type="primary" icon={<PlusOutlined />} onClick={() => { setEditing(null); form.resetFields(); setOpen(true) }}>
+          新建模型
         </Button>
       </div>
-
-      {Object.entries(testResults).map(([id, result]) => {
-        const provider = (data || []).find((p: any) => p.id === id)
-        return (
-          <Alert
-            key={id}
-            type={result.ok ? 'success' : 'error'}
-            message={`${provider?.name ?? id}：${result.message}`}
-            closable
-            onClose={() => setTestResults(prev => { const n = { ...prev }; delete n[id]; return n })}
-            style={{ marginBottom: 8 }}
-          />
-        )
-      })}
-
-      <Table dataSource={data || []} columns={columns} rowKey="id" loading={isLoading} />
-
-      <Modal
-        title="添加模型 Provider"
-        open={open}
-        onCancel={() => { setOpen(false); form.resetFields(); setSelectedProvider('') }}
-        onOk={() => form.submit()}
-        confirmLoading={createMutation.isPending}
-      >
-        <Form form={form} onFinish={createMutation.mutate} layout="vertical">
-          <Form.Item name="provider" label="提供商类型" rules={[{ required: true, message: '请选择提供商' }]}>
-            <Select
-              options={PROVIDER_OPTIONS}
-              onChange={v => { setSelectedProvider(v); form.setFieldValue('base_url', undefined) }}
-            />
-          </Form.Item>
-
-          {/* 快捷预填：仅 openai_compatible 时显示 */}
-          {selectedProvider === 'openai_compatible' && (
-            <>
-              <div style={{ marginBottom: 8 }}>
-                <span style={{ fontSize: 12, color: '#888', marginRight: 8 }}>快速填入：</span>
-                {Object.entries(COMPATIBLE_PRESETS).map(([key, p]) => (
-                  <Tag
-                    key={key}
-                    color="cyan"
-                    style={{ cursor: 'pointer', marginBottom: 4 }}
-                    onClick={() => applyPreset(key)}
-                  >
-                    {p.label}
-                  </Tag>
-                ))}
-              </div>
-              <Divider style={{ margin: '8px 0' }} />
-            </>
-          )}
-
-          <Form.Item name="name" label="唯一标识" rules={[{ required: true, message: '请填写唯一标识' }]}>
-            <Input placeholder="e.g. my_deepseek" />
-          </Form.Item>
-          <Form.Item
-            name="base_url"
-            label="Base URL"
-            rules={selectedProvider === 'openai_compatible' ? [{ required: true, message: 'OpenAI Compatible 必须填写 Base URL' }] : []}
-          >
-            <Input placeholder={
-              selectedProvider === 'openai_compatible' ? 'https://api.deepseek.com/v1'
-              : selectedProvider === 'ollama' ? 'http://localhost:11434'
-              : selectedProvider === 'azure_openai' ? 'https://<resource>.openai.azure.com'
-              : '留空使用官方默认'
-            } />
-          </Form.Item>
-          <Form.Item name="api_key" label="API Key">
-            <Input.Password placeholder="sk-..." />
-          </Form.Item>
+      {testResult && (
+        <Alert
+          closable
+          style={{ marginBottom: 12 }}
+          type={testResult.ok ? 'success' : 'error'}
+          message={`${testResult.ok ? '连接可用' : '连接失败'} · ${testResult.latency_ms} ms${testResult.provider_error_code ? ` · ${testResult.provider_error_code}` : ''}`}
+          onClose={() => setTestResult(undefined)}
+        />
+      )}
+      <Table
+        rowKey="id"
+        loading={models.isLoading}
+        dataSource={models.data || []}
+        columns={[
+          { title: 'Key', dataIndex: 'key' },
+          { title: 'Provider', dataIndex: 'provider', render: value => <Tag color="blue">{value}</Tag> },
+          { title: '模型', dataIndex: 'model_name' },
+          { title: 'Endpoint', dataIndex: 'endpoint', ellipsis: true, render: value => value || '官方默认' },
+          { title: '凭证', dataIndex: 'credential_configured', render: value => <Tag color={value ? 'success' : 'default'}>{value ? '已配置引用' : '未配置'}</Tag> },
+          { title: '版本', dataIndex: 'version' },
+          { title: '启用', dataIndex: 'enabled', render: (enabled, model: Model) => <Switch checked={enabled} onChange={value => toggle.mutate({ model, enabled: value })} /> },
+          { title: '操作', render: (_, model: Model) => <Space><Button size="small" icon={<EditOutlined />} onClick={() => edit(model)}>编辑</Button><Button size="small" icon={<ApiOutlined />} onClick={() => testConnection(model)}>测试</Button></Space> },
+        ]}
+      />
+      <Modal title={editing ? '编辑模型' : '新建模型'} open={open} onCancel={() => setOpen(false)} onOk={() => form.submit()} confirmLoading={save.isPending} width={680}>
+        <Form form={form} layout="vertical" onFinish={save.mutate} initialValues={{ enabled: true }}>
+          <Space style={{ display: 'flex' }} align="start">
+            <Form.Item name="key" label="唯一 Key" rules={[{ required: true }]}><Input disabled={!!editing} /></Form.Item>
+            <Form.Item name="provider" label="Provider" rules={[{ required: true }]}><Select disabled={!!editing} options={providers} style={{ width: 180 }} /></Form.Item>
+            <Form.Item name="model_name" label="模型名称" rules={[{ required: true }]}><Input disabled={!!editing} /></Form.Item>
+          </Space>
+          <Form.Item name="endpoint" label="Endpoint"><Input placeholder="留空使用官方默认" /></Form.Item>
+          <Form.Item name="credential_ref" label="凭证引用"><Input.Password placeholder="env://OPENAI_API_KEY（不保存明文凭证）" /></Form.Item>
+          <Form.Item name="default_parameters" label="默认参数 JSON" rules={[{ validator: async (_, value) => { try { parseObject(value) } catch { throw new Error('请输入有效 JSON') } } }]}><Input.TextArea rows={4} /></Form.Item>
+          <Form.Item name="capabilities" label="能力 JSON" rules={[{ validator: async (_, value) => { try { parseObject(value) } catch { throw new Error('请输入有效 JSON') } } }]}><Input.TextArea rows={4} /></Form.Item>
+          <Form.Item name="enabled" label="启用" valuePropName="checked"><Switch /></Form.Item>
         </Form>
       </Modal>
     </>

@@ -1,107 +1,120 @@
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Table, Button, Form, Input, Select, Modal, Tag, message, Space, Popconfirm } from 'antd'
-import { PlusOutlined, EditOutlined, DeleteOutlined } from '@ant-design/icons'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Button, Form, Input, message, Modal, Select, Space, Table, Tag } from 'antd'
+import { PlusOutlined } from '@ant-design/icons'
 import { useState } from 'react'
-import { adminApi } from '../../api/admin'
+
+import { adminApi, type PlatformAccount } from '@/api/admin'
+
+
+const roleOptions = [
+  { value: 'user', label: 'User' },
+  { value: 'builder', label: 'Builder' },
+  { value: 'admin', label: 'Admin' },
+]
+
 
 export default function UsersTab() {
-  const qc = useQueryClient()
+  const queryClient = useQueryClient()
   const [createOpen, setCreateOpen] = useState(false)
-  const [editUser, setEditUser] = useState<any>(null)
+  const [editAccount, setEditAccount] = useState<PlatformAccount | null>(null)
   const [createForm] = Form.useForm()
   const [editForm] = Form.useForm()
-
-  const { data: users, isLoading } = useQuery({
-    queryKey: ['admin', 'users'],
-    queryFn: adminApi.listUsers,
+  const { data, isLoading } = useQuery({
+    queryKey: ['admin', 'accounts'],
+    queryFn: adminApi.listAccounts,
   })
 
+  const refresh = () => queryClient.invalidateQueries({ queryKey: ['admin', 'accounts'] })
   const createMutation = useMutation({
-    mutationFn: adminApi.createUser,
-    onSuccess: () => {
-      message.success('用户已创建')
-      qc.invalidateQueries({ queryKey: ['admin', 'users'] })
+    mutationFn: adminApi.createAccount,
+    onSuccess: async () => {
+      message.success('平台账号已创建')
+      await refresh()
       setCreateOpen(false)
       createForm.resetFields()
     },
-    onError: () => message.error('创建失败'),
+    onError: () => message.error('创建失败，请检查 userId、邮箱或权限'),
+  })
+  const rolesMutation = useMutation({
+    mutationFn: ({ account, roles }: { account: PlatformAccount; roles: string[] }) => adminApi.updateRoles(account, roles),
+  })
+  const statusMutation = useMutation({
+    mutationFn: ({ account, status }: { account: PlatformAccount; status: 'active' | 'disabled' }) => adminApi.updateStatus(account, status),
   })
 
-  const updateMutation = useMutation({
-    mutationFn: ({ id, data }: { id: string; data: any }) => adminApi.updateUser(id, data),
-    onSuccess: () => {
-      message.success('已更新')
-      qc.invalidateQueries({ queryKey: ['admin', 'users'] })
-      setEditUser(null)
-    },
-  })
-
-  const deleteMutation = useMutation({
-    mutationFn: adminApi.deleteUser,
-    onSuccess: () => { message.success('已删除'); qc.invalidateQueries({ queryKey: ['admin', 'users'] }) },
-  })
+  const submitEdit = async (values: { roles: string[]; status: 'active' | 'disabled' }) => {
+    if (!editAccount) return
+    try {
+      let current = editAccount
+      if ([...values.roles].sort().join(',') !== [...current.roles].sort().join(',')) {
+        current = await rolesMutation.mutateAsync({ account: current, roles: values.roles })
+      }
+      if (values.status !== current.status) {
+        current = await statusMutation.mutateAsync({ account: current, status: values.status })
+      }
+      message.success('账号已更新；角色或状态变化会使旧 Token 失效')
+      await refresh()
+      setEditAccount(null)
+    } catch {
+      message.error('更新失败，可能存在版本冲突，请刷新后重试')
+      await refresh()
+    }
+  }
 
   const columns = [
-    { title: '邮箱', dataIndex: 'email', key: 'email' },
-    { title: '用户名', dataIndex: 'username', key: 'username' },
-    { title: '角色', dataIndex: 'role', key: 'role', render: (v: string) => <Tag color={v === 'admin' ? 'red' : 'blue'}>{v}</Tag> },
-    { title: '状态', dataIndex: 'is_active', key: 'is_active', render: (v: boolean) => <Tag color={v ? 'success' : 'default'}>{v ? '正常' : '禁用'}</Tag> },
+    { title: 'userId', dataIndex: 'user_id', key: 'user_id' },
+    { title: '邮箱', dataIndex: 'email', key: 'email', render: (value: string | null) => value || '—' },
+    { title: '显示名称', dataIndex: 'display_name', key: 'display_name' },
+    {
+      title: '角色', dataIndex: 'roles', key: 'roles',
+      render: (roles: string[]) => <Space size={4}>{roles.map(role => <Tag key={role} color={role === 'admin' ? 'red' : role === 'builder' ? 'gold' : 'blue'}>{role}</Tag>)}</Space>,
+    },
+    {
+      title: '状态', dataIndex: 'status', key: 'status',
+      render: (status: string) => <Tag color={status === 'active' ? 'success' : 'default'}>{status}</Tag>,
+    },
+    { title: '版本', dataIndex: 'version', key: 'version', width: 80 },
     {
       title: '操作', key: 'actions',
-      render: (_: any, r: any) => (
-        <Space>
-          <Button
-            size="small"
-            icon={<EditOutlined />}
-            onClick={() => { setEditUser(r); editForm.setFieldsValue({ username: r.username, role: r.role, is_active: r.is_active }) }}
-          >编辑</Button>
-          <Popconfirm title="确认删除此用户？" onConfirm={() => deleteMutation.mutate(r.id)}>
-            <Button size="small" danger icon={<DeleteOutlined />} />
-          </Popconfirm>
-        </Space>
+      render: (_: unknown, account: PlatformAccount) => (
+        <Button size="small" onClick={() => {
+          setEditAccount(account)
+          editForm.setFieldsValue({ roles: account.roles, status: account.status })
+        }}>角色 / 状态</Button>
       ),
     },
   ]
 
   return (
     <>
-      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>新建用户</Button>
+      <div className="mb-3 flex justify-end">
+        <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>新建账号</Button>
       </div>
-      <Table dataSource={users || []} columns={columns} rowKey="id" loading={isLoading} />
+      <Table dataSource={data?.items ?? []} columns={columns} rowKey="id" loading={isLoading} />
 
-      <Modal title="新建用户" open={createOpen} onCancel={() => setCreateOpen(false)} onOk={() => createForm.submit()} confirmLoading={createMutation.isPending}>
-        <Form form={createForm} onFinish={createMutation.mutate} layout="vertical">
+      <Modal title="新建平台账号" open={createOpen} onCancel={() => setCreateOpen(false)}
+        onOk={() => createForm.submit()} confirmLoading={createMutation.isPending}>
+        <Form form={createForm} onFinish={createMutation.mutate} layout="vertical"
+          initialValues={{ roles: ['user'] }}>
+          <Form.Item name="user_id" label="企业 canonical userId（留空自动生成）"><Input /></Form.Item>
           <Form.Item name="email" label="邮箱" rules={[{ required: true, type: 'email' }]}><Input /></Form.Item>
-          <Form.Item name="username" label="用户名" rules={[{ required: true }]}><Input /></Form.Item>
-          <Form.Item name="password" label="密码" rules={[{ required: true }]}><Input.Password /></Form.Item>
-          <Form.Item name="role" label="角色" initialValue="user">
-            <Select options={[{ value: 'user', label: '普通用户' }, { value: 'admin', label: '管理员' }]} />
+          <Form.Item name="display_name" label="显示名称" rules={[{ required: true }]}><Input /></Form.Item>
+          <Form.Item name="password" label="初始密码" rules={[{ required: true, min: 8 }]}><Input.Password /></Form.Item>
+          <Form.Item name="roles" label="平台角色" rules={[{ required: true }]}>
+            <Select mode="multiple" options={roleOptions} />
           </Form.Item>
         </Form>
       </Modal>
 
-      <Modal
-        title="编辑用户"
-        open={!!editUser}
-        onCancel={() => setEditUser(null)}
-        onOk={() => editForm.submit()}
-        confirmLoading={updateMutation.isPending}
-      >
-        <Form
-          form={editForm}
-          onFinish={(v) => updateMutation.mutate({ id: editUser.id, data: v })}
-          layout="vertical"
-        >
-          <Form.Item name="username" label="用户名"><Input /></Form.Item>
-          <Form.Item name="role" label="角色">
-            <Select options={[{ value: 'user', label: '普通用户' }, { value: 'admin', label: '管理员' }]} />
+      <Modal title={`编辑账号：${editAccount?.display_name ?? ''}`} open={!!editAccount}
+        onCancel={() => setEditAccount(null)} onOk={() => editForm.submit()}
+        confirmLoading={rolesMutation.isPending || statusMutation.isPending}>
+        <Form form={editForm} onFinish={submitEdit} layout="vertical">
+          <Form.Item name="roles" label="平台角色" rules={[{ required: true }]}>
+            <Select mode="multiple" options={roleOptions} />
           </Form.Item>
-          <Form.Item name="is_active" label="状态">
-            <Select options={[{ value: true, label: '正常' }, { value: false, label: '禁用' }]} />
-          </Form.Item>
-          <Form.Item name="password" label="重置密码（留空不修改）">
-            <Input.Password />
+          <Form.Item name="status" label="账号状态" rules={[{ required: true }]}>
+            <Select options={[{ value: 'active', label: 'Active' }, { value: 'disabled', label: 'Disabled' }]} />
           </Form.Item>
         </Form>
       </Modal>

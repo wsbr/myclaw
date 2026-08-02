@@ -4,11 +4,10 @@ pytest-asyncio==0.24.0
 pytest-cov==6.0.0
 pytest-timeout==2.3.1
 pytest-xdist==3.6.1
-nest-asyncio==1.6.0
+aiosqlite==0.20.0
 pytest-playwright==0.6.2
 playwright==1.49.1
 httpx==0.28.1
-websockets==14.1
 anyio==4.7.0
 
 # Re-use backend deps for in-process tests

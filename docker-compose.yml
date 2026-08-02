@@ -9,22 +9,40 @@ services:
       - "8000:8000"
     env_file: .env
     environment:
+      - MYCLAW_ENVIRONMENT=production
       - DATABASE_URL=${DATABASE_URL}
+      - DATABASE_POOL_SIZE=${DATABASE_POOL_SIZE:-10}
+      - DATABASE_MAX_OVERFLOW=${DATABASE_MAX_OVERFLOW:-20}
       - REDIS_URL=${REDIS_URL}
       - SECRET_KEY=${SECRET_KEY}
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
-      - CELERY_BROKER_URL=${CELERY_BROKER_URL}
-      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND}
       - DEBUG=${DEBUG:-false}
       - CORS_ORIGINS=${CORS_ORIGINS}
       - INIT_ADMIN_EMAIL=${INIT_ADMIN_EMAIL}
       - INIT_ADMIN_PASSWORD=${INIT_ADMIN_PASSWORD}
+      - RATE_LIMIT_ENABLED=${RATE_LIMIT_ENABLED:-true}
+      - RATE_LIMIT_REQUESTS=${RATE_LIMIT_REQUESTS:-600}
+      - RATE_LIMIT_UNAUTHENTICATED_REQUESTS=${RATE_LIMIT_UNAUTHENTICATED_REQUESTS:-60}
+      - RATE_LIMIT_WINDOW_SECONDS=${RATE_LIMIT_WINDOW_SECONDS:-60}
+      - MYCLAW_MODEL_API_KEY=${MYCLAW_MODEL_API_KEY:-}
+      - OTEL_SERVICE_NAME=myclaw-api
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      - OTEL_EXPORTER_OTLP_HEADERS=${OTEL_EXPORTER_OTLP_HEADERS:-}
+      - MYCLAW_RELEASE=${MYCLAW_RELEASE:-development}
     depends_on:
       mysql:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
     restart: unless-stopped
+    volumes:
+      - myclaw_data:/var/lib/myclaw
 
   frontend:
     build:
@@ -36,45 +54,117 @@ services:
       - "80:80"
     restart: unless-stopped
 
-  worker:
+  runtime-worker:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=4
+    command: python -m app.workers.runtime_worker_v1
     env_file: .env
     environment:
+      - MYCLAW_ENVIRONMENT=production
       - DATABASE_URL=${DATABASE_URL}
+      - DATABASE_POOL_SIZE=${DATABASE_POOL_SIZE:-10}
+      - DATABASE_MAX_OVERFLOW=${DATABASE_MAX_OVERFLOW:-20}
       - REDIS_URL=${REDIS_URL}
       - SECRET_KEY=${SECRET_KEY}
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
-      - CELERY_BROKER_URL=${CELERY_BROKER_URL}
-      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND}
+      - RUNTIME_WORKER_POLL_SECONDS=${RUNTIME_WORKER_POLL_SECONDS:-0.5}
+      - RUNTIME_OUTBOX_CLAIM_LEASE_SECONDS=${RUNTIME_OUTBOX_CLAIM_LEASE_SECONDS:-30}
+      - RUNTIME_RUNNER_LEASE_SECONDS=${RUNTIME_RUNNER_LEASE_SECONDS:-30}
+      - RUNTIME_RUNNER_HEARTBEAT_SECONDS=${RUNTIME_RUNNER_HEARTBEAT_SECONDS:-10}
+      - MYCLAW_MODEL_API_KEY=${MYCLAW_MODEL_API_KEY:-}
+      - OTEL_SERVICE_NAME=myclaw-runtime-worker
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      - OTEL_EXPORTER_OTLP_HEADERS=${OTEL_EXPORTER_OTLP_HEADERS:-}
+      - MYCLAW_RELEASE=${MYCLAW_RELEASE:-development}
     depends_on:
-      mysql:
+      api:
         condition: service_healthy
-      redis:
+    restart: unless-stopped
+    volumes:
+      - myclaw_data:/var/lib/myclaw
+
+  delivery-worker:
+    profiles: ["channel"]
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: python -m app.workers.channel_delivery_worker
+    env_file: .env
+    environment:
+      - MYCLAW_ENVIRONMENT=production
+      - DATABASE_URL=${DATABASE_URL}
+      - DATABASE_POOL_SIZE=${DATABASE_POOL_SIZE:-10}
+      - DATABASE_MAX_OVERFLOW=${DATABASE_MAX_OVERFLOW:-20}
+      - REDIS_URL=${REDIS_URL}
+      - SECRET_KEY=${SECRET_KEY}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - OTEL_SERVICE_NAME=myclaw-delivery-worker
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      - OTEL_EXPORTER_OTLP_HEADERS=${OTEL_EXPORTER_OTLP_HEADERS:-}
+      - MYCLAW_RELEASE=${MYCLAW_RELEASE:-development}
+    depends_on:
+      api:
         condition: service_healthy
     restart: unless-stopped
 
-  beat:
+  sandbox-worker:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    command: celery -A app.workers.celery_app beat --loglevel=info
+    command: python -m app.workers.sandbox_worker
     env_file: .env
     environment:
+      - MYCLAW_ENVIRONMENT=production
       - DATABASE_URL=${DATABASE_URL}
+      - DATABASE_POOL_SIZE=${DATABASE_POOL_SIZE:-10}
+      - DATABASE_MAX_OVERFLOW=${DATABASE_MAX_OVERFLOW:-20}
       - REDIS_URL=${REDIS_URL}
       - SECRET_KEY=${SECRET_KEY}
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
-      - CELERY_BROKER_URL=${CELERY_BROKER_URL}
-      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND}
+      - SANDBOX_WORKER_POLL_SECONDS=${SANDBOX_WORKER_POLL_SECONDS:-0.5}
+      - SANDBOX_OUTBOX_CLAIM_LEASE_SECONDS=${SANDBOX_OUTBOX_CLAIM_LEASE_SECONDS:-30}
+      - SANDBOX_ATTEMPT_STALE_SECONDS=${SANDBOX_ATTEMPT_STALE_SECONDS:-60}
+      - OTEL_SERVICE_NAME=myclaw-sandbox-worker
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      - OTEL_EXPORTER_OTLP_HEADERS=${OTEL_EXPORTER_OTLP_HEADERS:-}
+      - MYCLAW_RELEASE=${MYCLAW_RELEASE:-development}
     depends_on:
-      - redis
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    volumes:
+      - myclaw_data:/var/lib/myclaw
+
+  maintenance-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: python -m app.workers.maintenance_worker
+    env_file: .env
+    environment:
+      - MYCLAW_ENVIRONMENT=production
+      - DATABASE_URL=${DATABASE_URL}
+      - DATABASE_POOL_SIZE=${DATABASE_POOL_SIZE:-4}
+      - DATABASE_MAX_OVERFLOW=${DATABASE_MAX_OVERFLOW:-4}
+      - REDIS_URL=${REDIS_URL}
+      - SECRET_KEY=${SECRET_KEY}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - MAINTENANCE_POLL_SECONDS=${MAINTENANCE_POLL_SECONDS:-3600}
+      - MAINTENANCE_BATCH_SIZE=${MAINTENANCE_BATCH_SIZE:-500}
+      - OUTBOX_COMPLETED_RETENTION_DAYS=${OUTBOX_COMPLETED_RETENTION_DAYS:-30}
+      - OUTBOX_DEAD_RETENTION_DAYS=${OUTBOX_DEAD_RETENTION_DAYS:-180}
+      - CHECKPOINT_RETENTION_DAYS=${CHECKPOINT_RETENTION_DAYS:-30}
+      - TRACE_RETENTION_DAYS=${TRACE_RETENTION_DAYS:-30}
+      - DELIVERY_ATTEMPT_RETENTION_DAYS=${DELIVERY_ATTEMPT_RETENTION_DAYS:-90}
+    depends_on:
+      api:
+        condition: service_healthy
     restart: unless-stopped
 
   mysql:
     image: mysql:8.0
+    command: --log-bin-trust-function-creators=1
     environment:
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
       MYSQL_DATABASE: ${MYSQL_DATABASE}
@@ -105,6 +195,18 @@ services:
       retries: 10
     restart: unless-stopped
 
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.153.0
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    profiles: ["observability"]
+    volumes:
+      - ./deploy/otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "4318:4318"
+      - "13133:13133"
+    restart: unless-stopped
+
 volumes:
   mysql_data:
   redis_data:
+  myclaw_data:

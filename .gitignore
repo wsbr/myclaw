@@ -10,6 +10,8 @@ __pycache__/
 .venv/
 venv/
 .pytest_cache/
+.coverage
+.coverage.*
 .mypy_cache/
 
 # Node
@@ -34,3 +36,6 @@ test/e2e/ui/.seed-data.json
 # Docker volumes (if created locally)
 mysql_data/
 redis_data/
+
+# Generated acceptance evidence (CI uploads the same report set as artifacts)
+test/test-results/
