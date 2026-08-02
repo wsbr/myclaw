@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from sqlalchemy import BigInteger, CheckConstraint, Computed, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    BigInteger, CheckConstraint, Computed, ForeignKey, Index, Integer,
+    String, Text, UniqueConstraint, case, column, literal,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -34,7 +37,10 @@ class HistorySummary(Base, TimestampMixin, VersionMixin):
     scope_discriminator: Mapped[str] = mapped_column(
         String(191),
         Computed(
-            "CASE WHEN scope_type = 'chat' THEN 'chat' ELSE CONCAT('group_node:', group_node_id) END",
+            case(
+                (column("scope_type") == literal("chat"), literal("chat")),
+                else_=literal("group_node:") + column("group_node_id"),
+            ),
             persisted=True,
         ),
     )
