@@ -48,8 +48,7 @@ require_runner() {
 }
 
 wait_for_mysql() {
-  local container_id
-  container_id="$(compose ps -q mysql-test)"
+  local container_id="$1"
   test -n "$container_id"
   for _ in $(seq 1 60); do
     if [ "$(docker inspect --format '{{.State.Health.Status}}' "$container_id" 2>/dev/null || true)" = "healthy" ]; then
@@ -89,25 +88,27 @@ run_frontend_gate() {
 
 run_migration_gate() {
   local backend_image="myclaw-backend-ci:${COMMIT_SHA:0:12}"
+  local mysql_container="${COMPOSE_PROJECT_NAME}-migration-mysql"
+  local database_url="mysql+aiomysql://myclaw:mypassword@${mysql_container}:3306/myclaw_test"
   echo "==> Empty MySQL migration and single-head verification"
   cleanup_stack
   docker build \
     --label "org.opencontainers.image.revision=$COMMIT_SHA" \
     --tag "$backend_image" \
     "$ROOT/backend"
-  compose up -d mysql-test
-  wait_for_mysql
+  compose run -d --no-deps --name "$mysql_container" mysql-test >/dev/null
+  wait_for_mysql "$mysql_container"
   docker run --rm \
     --network "${COMPOSE_PROJECT_NAME}_default" \
-    --env DATABASE_URL=mysql+aiomysql://myclaw:mypassword@mysql-test:3306/myclaw_test \
+    --env DATABASE_URL="$database_url" \
     "$backend_image" alembic upgrade head
   docker run --rm \
     --network "${COMPOSE_PROJECT_NAME}_default" \
-    --env DATABASE_URL=mysql+aiomysql://myclaw:mypassword@mysql-test:3306/myclaw_test \
+    --env DATABASE_URL="$database_url" \
     "$backend_image" alembic current | tee "$RESULTS_ROOT/migration-current.txt"
   docker run --rm \
     --network "${COMPOSE_PROJECT_NAME}_default" \
-    --env DATABASE_URL=mysql+aiomysql://myclaw:mypassword@mysql-test:3306/myclaw_test \
+    --env DATABASE_URL="$database_url" \
     "$backend_image" alembic heads | tee "$RESULTS_ROOT/migration-heads.txt"
   test "$(grep -cve '^[[:space:]]*$' "$RESULTS_ROOT/migration-heads.txt")" = "1"
   cleanup_stack
