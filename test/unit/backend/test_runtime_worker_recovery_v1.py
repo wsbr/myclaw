@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy.exc import OperationalError
@@ -10,7 +12,9 @@ from app.api.runs import cancel_run
 from app.deps import CurrentAccount
 from app.models.common import utcnow
 from app.models.foundation import ExecutionEvent, OutboxCommand, PlatformAccount
-from app.models.runtime_v1 import DurableRunner, Message, Run, RunnerCheckpoint, WorkItem
+from app.models.runtime_v1 import (
+    AgentInvocation, DurableRunner, Message, Run, RunnerCheckpoint, ToolInvocation, WorkItem,
+)
 from app.schemas.runtime_v1 import RunCancelRequest
 from app.workers.runtime_worker_v1 import RunnerFence, RuntimeWorker
 from unit.backend.runtime_worker_testkit import create_runtime_world
@@ -264,3 +268,76 @@ async def test_non_transient_settlement_error_is_not_retried(monkeypatch):
     with pytest.raises(OperationalError):
         await worker._settle_success(fence, "result")
     assert attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_plan_coordination_settles_after_child_without_resuming_owner_model(monkeypatch):
+    """A frozen Plan delegation shell must not invoke the Owner again after its child settles."""
+    import app.workers.runtime_worker_v1 as worker_module
+
+    run = Run(
+        id="run", session_id="session", user_id="user", mode="plan", execution_kind="normal",
+        lifecycle="waiting", wait_reason="waiting_agent", entry_agent_id="owner", version=3,
+    )
+    target_runner = DurableRunner(
+        id="target-runner", work_item_id="target-work", run_id="run", session_id="session",
+        agent_id="child", agent_version_id="child-version", execution_epoch=1, status="running",
+        principal_snapshot={}, assembly_snapshot={}, prompt_manifest={}, input_snapshot={}, version=1,
+    )
+    target_work = WorkItem(
+        id="target-work", run_id="run", session_id="session", user_id="user", mode="plan",
+        owner_agent_id="child", agent_version_id="child-version", plan_node_id="plan-node",
+        goal="Execute frozen node", status="running", active_runner_id="target-runner",
+        execution_epoch=1, attempt_no=1, version=1,
+    )
+    caller_runner = DurableRunner(
+        id="caller-runner", work_item_id="caller-work", run_id="run", session_id="session",
+        agent_id="owner", agent_version_id="owner-version", execution_epoch=1, status="succeeded",
+        principal_snapshot={}, assembly_snapshot={}, prompt_manifest={},
+        input_snapshot={"plan_id": "plan", "plan_coordination_for_node_id": "plan-node"}, version=2,
+    )
+    caller_work = WorkItem(
+        id="caller-work", run_id="run", session_id="session", user_id="user", mode="plan",
+        owner_agent_id="owner", agent_version_id="owner-version", goal="Coordinate frozen node",
+        status="waiting_agent", execution_epoch=1, attempt_no=1, version=2,
+    )
+    tool = ToolInvocation(
+        id="tool", runner_id="caller-runner", work_item_id="caller-work", run_id="run",
+        session_id="session", platform_tool_id="invoke-agent-tool", tool_key="invoke_agent",
+        execution_mode="inline", status="waiting_resource", arguments={}, arguments_hash="a" * 64,
+        business_idempotency_key="call", principal_hash="b" * 64, version=1,
+    )
+    invocation = AgentInvocation(
+        id="invocation", caller_work_item_id="caller-work", caller_runner_id="caller-runner",
+        target_work_item_id="target-work", target_agent_id="child",
+        target_agent_version_id="child-version", mode="plan", request_text="Execute frozen node",
+        context_snapshot={"tool_invocation_id": "tool", "plan_node_id": "plan-node"},
+        status="running", batch_key="caller-runner", idempotency_key="call", version=1,
+    )
+    plan = SimpleNamespace(id="plan")
+    db = SimpleNamespace(
+        scalar=AsyncMock(side_effect=[tool, plan, None, caller_work]),
+        get=AsyncMock(return_value=caller_runner),
+        flush=AsyncMock(),
+    )
+    event_writer = SimpleNamespace(
+        append=AsyncMock(side_effect=[
+            SimpleNamespace(id="child-settled"),
+            SimpleNamespace(id="node-settled"),
+            SimpleNamespace(id="coord-settled"),
+        ]),
+    )
+    monkeypatch.setattr(worker_module, "ExecutionEventWriter", lambda _db: event_writer)
+    worker = RuntimeWorker("plan-coordination-test")
+    schedule = AsyncMock()
+    monkeypatch.setattr(worker, "_schedule_ready_plan_nodes", schedule)
+
+    await worker._settle_agent_target(
+        db, target_runner, target_work, run, invocation, content="Child result",
+    )
+
+    assert caller_work.status == "succeeded"
+    assert caller_work.execution_epoch == 1 and caller_work.active_runner_id is None
+    assert caller_work.result_data == {"batch_key": "caller-runner", "plan_node_id": "plan-node"}
+    assert run.lifecycle == "running" and run.wait_reason is None
+    assert schedule.await_count == 2

@@ -104,9 +104,25 @@ def test_browser_chat_plan_group_and_admin_surfaces(
     )
     page.get_by_role("button", name="确认并冻结", exact=True).click()
     page.get_by_role("tab", name="Timeline", exact=True).click()
-    expect(page.get_by_text("GroupRun completed", exact=True)).to_be_visible(
-        timeout=int(phase_api.run_timeout * 2 * 1000),
-    )
+    group_completed = page.get_by_text("GroupRun completed", exact=True)
+    group_deadline = time.monotonic() + phase_api.run_timeout * 2
+    confirmations_approved = 0
+    while time.monotonic() < group_deadline:
+        if group_completed.is_visible():
+            break
+        approve = page.get_by_role("button", name="批准", exact=True)
+        if approve.count() and approve.first.is_visible():
+            with page.expect_response(
+                lambda response: "/api/v1/tool-confirmations/" in response.url
+                and response.request.method == "POST",
+                timeout=15_000,
+            ) as decision:
+                approve.first.click()
+            assert decision.value.ok, decision.value.text()
+            confirmations_approved += 1
+        page.wait_for_timeout(500)
+    expect(group_completed).to_be_visible(timeout=1_000)
+    assert confirmations_approved <= 4, "GroupRun exceeded the bounded Tool confirmation budget"
 
     assert not browser_errors
     record_property("chromium_ui_chat_plan_group_admin", "passed")

@@ -358,6 +358,29 @@ export default function SessionPage() {
 
         <section className="flex-1 overflow-y-auto px-5 py-6">
           <div className="mx-auto max-w-3xl">
+            {toolActions.map(action => (
+              <Card key={action.id} size="small" title={<Space><Tag color="warning">需要确认</Tag><span>{action.tool_key}</span></Space>} className="mb-4 border-amber-300">
+                <p className="mb-2 text-sm text-muted-foreground">Agent 请求执行以下精确参数。批准只对本次参数哈希有效。</p>
+                <pre className="mb-3 max-h-48 overflow-auto rounded bg-muted p-3 text-xs">{JSON.stringify(action.arguments, null, 2)}</pre>
+                <Space>
+                  <Button type="primary" loading={decide.isPending} onClick={() => decide.mutate({ action, decision: 'approve' })}>批准</Button>
+                  <Button danger loading={decide.isPending} onClick={() => decide.mutate({ action, decision: 'reject' })}>拒绝</Button>
+                </Space>
+              </Card>
+            ))}
+            {clarificationActions.map(action => (
+              <Card key={action.id} size="small" title={<Space><Tag color="blue">需要补充信息</Tag><span>Agent 提问</span></Space>} className="mb-4 border-blue-300">
+                <p className="mb-3 whitespace-pre-wrap text-sm">{action.question}</p>
+                <Input.TextArea value={clarificationAnswers[action.id] || ''}
+                  onChange={event => setClarificationAnswers(value => ({ ...value, [action.id]: event.target.value }))}
+                  autoSize={{ minRows: 2, maxRows: 6 }} placeholder="输入回答；只会恢复提出该问题的 Work Item" />
+                <Button className="mt-3" type="primary" loading={answerClarification.isPending}
+                  disabled={!clarificationAnswers[action.id]?.trim()}
+                  onClick={() => answerClarification.mutate({ action, answer: clarificationAnswers[action.id].trim() })}>
+                  提交回答
+                </Button>
+              </Card>
+            ))}
             {mode === 'plan' && <PlanPanel plan={activePlan} workItems={planWorkItems} busy={planBusy}
               onSave={async value => { await savePlan.mutateAsync(value) }}
               onRevise={async value => { await revisePlan.mutateAsync(value) }}
@@ -383,29 +406,6 @@ export default function SessionPage() {
                   {item.content}
                 </div>
               </div>
-            ))}
-            {toolActions.map(action => (
-              <Card key={action.id} size="small" title={<Space><Tag color="warning">需要确认</Tag><span>{action.tool_key}</span></Space>} className="mb-4 border-amber-300">
-                <p className="mb-2 text-sm text-muted-foreground">Agent 请求执行以下精确参数。批准只对本次参数哈希有效。</p>
-                <pre className="mb-3 max-h-48 overflow-auto rounded bg-muted p-3 text-xs">{JSON.stringify(action.arguments, null, 2)}</pre>
-                <Space>
-                  <Button type="primary" loading={decide.isPending} onClick={() => decide.mutate({ action, decision: 'approve' })}>批准</Button>
-                  <Button danger loading={decide.isPending} onClick={() => decide.mutate({ action, decision: 'reject' })}>拒绝</Button>
-                </Space>
-              </Card>
-            ))}
-            {clarificationActions.map(action => (
-              <Card key={action.id} size="small" title={<Space><Tag color="blue">需要补充信息</Tag><span>Agent 提问</span></Space>} className="mb-4 border-blue-300">
-                <p className="mb-3 whitespace-pre-wrap text-sm">{action.question}</p>
-                <Input.TextArea value={clarificationAnswers[action.id] || ''}
-                  onChange={event => setClarificationAnswers(value => ({ ...value, [action.id]: event.target.value }))}
-                  autoSize={{ minRows: 2, maxRows: 6 }} placeholder="输入回答；只会恢复提出该问题的 Work Item" />
-                <Button className="mt-3" type="primary" loading={answerClarification.isPending}
-                  disabled={!clarificationAnswers[action.id]?.trim()}
-                  onClick={() => answerClarification.mutate({ action, answer: clarificationAnswers[action.id].trim() })}>
-                  提交回答
-                </Button>
-              </Card>
             ))}
             {isRunning && <div className="mb-4 flex justify-start"><div className="max-w-[82%] whitespace-pre-wrap rounded-2xl rounded-bl-md bg-muted px-4 py-3">{liveText || <><Spin size="small" /> <span className="ml-2 text-sm text-muted-foreground">Agent 正在后台处理…</span></>}</div></div>}
             </>}

@@ -2119,6 +2119,7 @@ class RuntimeWorker:
             payload={"target_agent_id": invocation.target_agent_id, "status": invocation.status},
             correlation_id=run.id,
         )
+        plan = None
         if run.mode == "plan" and work.plan_node_id:
             plan = await db.scalar(select(PlanExecution).where(
                 PlanExecution.run_id == run.id
@@ -2162,6 +2163,49 @@ class RuntimeWorker:
         if caller_work is None or caller_work.status != "waiting_agent" or run.lifecycle == "cancelled":
             return
         caller_runner = await db.get(DurableRunner, invocation.caller_runner_id)
+        if caller_runner is None:
+            raise RuntimeError("AgentInvocation lost its caller Runner")
+        coordination_node_id = caller_runner.input_snapshot.get("plan_coordination_for_node_id")
+        if run.mode == "plan" and coordination_node_id:
+            # A Plan coordination Runner exists only to dispatch the exact frozen
+            # node to its declared Agent. Once that child batch settles, resuming
+            # the Owner model would invite a duplicate invoke_agent call and add
+            # unbounded LLM rounds to an otherwise completed node.
+            caller_work.status = "succeeded"
+            caller_work.active_runner_id = None
+            caller_work.result_summary = "Frozen Plan node delegation settled"
+            caller_work.result_data = {
+                "batch_key": invocation.batch_key,
+                "plan_node_id": coordination_node_id,
+            }
+            caller_work.error_code = None
+            caller_work.error_detail = None
+            caller_work.retryable = False
+            caller_work.version += 1
+            run.lifecycle = "running"
+            run.wait_reason = None
+            run.version += 1
+            await db.flush()
+            coordination_settled = await events.append(
+                session_id=run.session_id, run_id=run.id, event_type="plan.coordination_settled",
+                event_dedupe_key=(
+                    f"transition:plan_coordination:{caller_work.id}:agent_batch:{invocation.batch_key}:settled"
+                ),
+                actor_type="service", actor_id="agent-invocation-gateway", entity_type="work_item",
+                entity_id=caller_work.id, entity_version=caller_work.version, visibility="user",
+                summary="Plan Owner delegation settled with the child Agent result",
+                payload={"plan_node_id": coordination_node_id, "batch_key": invocation.batch_key},
+                correlation_id=run.id, caused_by_event_id=settled.id,
+            )
+            if plan is None:
+                plan = await db.scalar(select(PlanExecution).where(
+                    PlanExecution.id == caller_runner.input_snapshot.get("plan_id"),
+                    PlanExecution.run_id == run.id,
+                ).with_for_update())
+            if plan is None:
+                raise RuntimeError("Plan coordination lost its frozen Plan")
+            await self._schedule_ready_plan_nodes(db, plan, run, coordination_settled.id)
+            return
         caller_work.execution_epoch += 1
         caller_work.attempt_no += 1
         caller_work.status = "queued"
