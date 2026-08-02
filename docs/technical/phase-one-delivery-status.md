@@ -7,12 +7,15 @@
 | 缺口 | 处置 | 验证方式 |
 | --- | --- | --- |
 | CI 引用已删除的旧 Integration/UI 路径，且仓库托管平台不是正式执行环境 | 删除 GitHub/Gitee 专用流水线，提供厂商无关的 Docker Runner 与统一入口，拆分为 Unit/关键 branch coverage、Frontend frozen build、空库 Migration、双 Runtime Worker Mock Full-stack 和手工 Secret 驱动的 Real-model Gate | `test/scripts/run_ci_gates.sh`、`deploy/ci/runner/`；报告统一写入 `test/test-results/`，由后续自建编排器归档 |
+| 容器化自建 Runner 无法通过自身 `localhost` 访问 Docker 宿主发布端口 | Runner 使用 host network，使 API、Chromium 和 Compose 统一使用 `http://localhost` 安全上下文；自定义 HTTPS 地址由统一入口变量传递到健康检查、Frontend build arg 和 CORS | 自建 Runner 内执行 Mock/real API 与 Chromium；不支持 host network 时直接在宿主机安装 Runner |
 | 旧 Task/Celery/MCP Runtime 与双模型残留 | 删除旧路由、模型、服务、Worker、前端入口和测试；Database Outbox 成为唯一可靠调度源 | 运行目录 `rg` 审计；历史迁移和明确标注的设计历史不算运行引用 |
 | Migration 分叉风险 | 保留线性历史迁移并以 0021 删除旧产品表，0022 增加 OTel parent context | 空 MySQL 8 从 0001 升至 0022；`alembic heads` 必须只有一行 |
 | Trace 只有数据库投影 | 增加 OTel SDK/OTLP，导出 `runner_execution`、`model_generation`，AgentInvocation 创建真实 Span Link | Docker Collector 日志 + 数据库 Trace Link 双重断言 |
 | 并发领取、租约和迟到结果缺少直接证明 | 增加双 Worker claim、claim/epoch fencing、checkpoint 恢复、重复投递、取消竞态、迟到结果和 terminal-event 唯一测试 | `test_runtime_worker_recovery_v1.py` 与全栈 Worker restart 场景 |
 | 并行 Plan 在 MySQL 死锁时被误判业务失败 | 统一 Runtime durable transition 锁顺序；只对 MySQL 1205/1213 做四次有界重试 | 1205/1213/非瞬态单测；双 Worker Plan 必须仍以 `succeeded` 结算 |
 | 真实模型在 Plan 子 Agent 完成后重复委派直至超时 | 子 Agent batch 终态后直接结算专用协调 WorkItem 并重新扫描冻结图，不恢复 Owner 模型；普通 Chat/Group AgentInvocation 仍恢复调用方 | execution epoch 不增长、无 replacement Runner 的定向单测；真实模型 Plan 必须在时限内 `succeeded` |
+| 真实模型把 Group Work Item 的“execute”自然语言误判为 `execute` Tool 授权 | Group Work Item prompt 明确把 JSON 标记为任务数据，并要求只有任务数据明确要求精确 Tool 时才调用 | 真实模型 GroupRun 必须完成，不得因隐式 Tool Confirmation 耗尽执行步数 |
+| 被委派 Agent 会从装配目录中擅自调用 `execute`/`search_group_history`，使 Plan 等待确认或 Group 反复委派 | AgentInvocation 采用能力级白名单：只有委派文本包含独立的 `You must call <exact_tool>` 契约时才向模型暴露并在 dispatch 边界接受该 Tool | 正反授权单测；真实 Plan/Group 的 AgentInvocation 必须直接完成，显式授权 Tool 仍可调用 |
 | Group Formation 与 API 权限/幂等分支不足 | 增加结构错误聚合、可见性/发布状态、版本冻结、部分失败、owner unavailable、幂等 mismatch/replay 测试 | 关键模块 branch coverage Gate |
 | Frontend 构建不确定且使用开发预览服务器 | 固定 pnpm 10.15.0 与 lockfile，Docker 内 `--frozen-lockfile`，Nginx 提供静态 SPA 和 `/healthz` | Frontend build Job + production image build + Docker healthcheck |
 | 无入口限流 | Redis 固定窗口；认证主体/IP 先 HMAC，不保存原始值；Redis 故障显式降级而不破坏数据库权威路径 | `test_rate_limit.py`；429 header 与降级 header 行为 |
@@ -24,6 +27,7 @@
 | 已回答 Clarification 在无状态模型恢复时可能被重复请求 | 同一 WorkItem 恢复时保留已回答问答上下文，并停止再次装配 `request_clarification`，防止重复进入用户等待 | Clarification 权限/恢复单测；真实模型 API 与 Chromium 仍须完成等待、回答和最终结算 |
 | pytest-playwright 默认清理 `test-results/`，导致多 Gate JUnit 互相覆盖 | Playwright trace/screenshot/video 独立写入 `test/playwright-results/`，JUnit、coverage 与迁移证据继续保留在 `test/test-results/` | 固定 SHA 顺序运行 unit、Mock、real 后三份 JUnit 必须同时存在，evidence collector 校验 SHA 与结果 |
 | OpenAI-compatible Endpoint 可能在零输出时返回瞬时 timeout | 仅当尚未收到任何 text/tool payload 且错误属于 timeout、连接、限流或服务端瞬时错误时重试一次；已产生 delta 后绝不重放 | 单测分别验证零输出重试成功与已有 delta 时不重试；真实模型全栈仍要求无失败完成 |
+| `HistorySummary` 生成列模型声明写死 MySQL `CONCAT()`，旧版 SQLite 单测环境无法建表 | ORM 元数据改用 SQLAlchemy 方言表达式，SQLite 编译为 `||`、MySQL 编译为 `concat()`；历史 MySQL Migration 保持不变 | 全量 SQLite 单测建库 + 空 MySQL 8 Migration Gate |
 
 ## 七个场景映射
 
@@ -39,7 +43,13 @@
 
 ## 覆盖率与 CI Gate
 
-CI 对 Runtime Worker、Group Formation、Agents API、Groups API 启用 branch coverage，综合下限为 30%。本轮固定提交基线为 107 项单测全部通过：Runtime Worker 40%、Group Formation 100%、Agents API 42%、Groups API 30%，综合 40.72%。覆盖率只用于防回退；场景断言、错误语义和真实模型 Gate 不得因覆盖率而放宽。
+CI 对 Runtime Worker、Group Formation、Agents API、Groups API 启用 branch coverage，综合下限为 30%。当前候选基线为 115 项单测全部通过：Runtime Worker 40%、Group Formation 100%、Agents API 42%、Groups API 30%；Cobertura 汇总 line coverage 43.84%、branch coverage 30.00%，pytest-cov 综合显示 40.63%。覆盖率只用于防回退；场景断言、错误语义和真实模型 Gate 不得因覆盖率而放宽。
+
+## 当前候选门禁状态
+
+本机使用仓库内自建 Runner 镜像和统一入口执行的候选结果为：Unit 115/115、Mock Docker Full-stack 4/4、真实模型 Docker Full-stack 4/4，Frontend frozen production build 与空 MySQL 0001→0022 single-head Migration 均通过。真实 JUnit 同时记录七个场景和 Chromium UI property 为 `passed`。精确 Commit SHA、耗时、报告哈希和 tracked worktree 状态只以当次生成的 `test/test-results/phase-one-evidence.json` 为准，不在本文硬编码，避免文档提交后把旧 SHA 冒充新证据。
+
+以上是本机候选验证，不是自建编排器的正式 Run。当前 manifest 的 `ci_run_url` 必须保持 `null`；在自建 CI/CD 实际执行、归档同一 SHA 的报告并产生可访问 Run 链接前，正式证据契约仍未完全满足。
 
 ## 正式证据契约
 

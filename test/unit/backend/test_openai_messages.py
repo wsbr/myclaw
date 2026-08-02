@@ -90,6 +90,7 @@ async def test_stream_forwards_frozen_temperature_and_output_limit():
             return chunks()
 
     model = OpenAILLM("unused-test-key")
+    await model.client.close()
     model.client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
     assert [chunk async for chunk in model.stream(
         [{"role": "user", "content": "return json"}], None,
@@ -123,6 +124,7 @@ async def test_stream_retries_one_transient_failure_only_before_output(monkeypat
 
     monkeypatch.setattr("app.core.model_hub.openai.asyncio.sleep", no_sleep)
     model = OpenAILLM("unused-test-key")
+    await model.client.close()
     model.client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
     chunks = [chunk async for chunk in model.stream(
         [{"role": "user", "content": "return json"}], None, {"model_id": "model"},
@@ -150,6 +152,7 @@ async def test_stream_never_retries_after_a_delta():
             return chunks()
 
     model = OpenAILLM("unused-test-key")
+    await model.client.close()
     model.client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
     received = []
     with pytest.raises(RuntimeError, match="timed out"):
