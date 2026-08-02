@@ -2,6 +2,7 @@
 
 import pytest
 from datetime import timedelta
+from types import SimpleNamespace
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -56,6 +57,76 @@ def test_delegated_tool_authorization_requires_exact_capability_phrase(
     request_text, tool_name, expected,
 ):
     assert RuntimeWorker._delegated_tool_is_authorized(request_text, tool_name) is expected
+
+
+@pytest.mark.parametrize(
+    ("task_text", "tool_name", "expected"),
+    [
+        ("You must call execute once.", "execute", True),
+        ("First call write_file, then call publish_artifact.", "write_file", True),
+        ("First call write_file, then call publish_artifact.", "publish_artifact", True),
+        ("Do not call any Tool.", "execute", False),
+        ("Do not call execute.", "execute", False),
+        ("Never call `execute` for this task.", "execute", False),
+        ("slow runner restart acceptance", "execute", False),
+        ("execute_extra is a different capability", "execute", False),
+        ("SEARCH_GROUP_HISTORY is merely named", "search_group_history", False),
+        ("Call SEARCH_GROUP_HISTORY for evidence", "search_group_history", True),
+    ],
+)
+def test_top_level_tool_authorization_requires_exact_tool_key(
+    task_text, tool_name, expected,
+):
+    assert RuntimeWorker._task_explicitly_names_tool(task_text, tool_name) is expected
+
+
+class _ToolAuthorizationDB:
+    def __init__(self, work):
+        self.work = work
+
+    async def get(self, model, key):
+        return self.work if model is WorkItem and key == self.work.id else None
+
+    async def scalar(self, _statement):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_resumed_chat_uses_immutable_work_goal_for_tool_capabilities():
+    worker = RuntimeWorker("authorization-test")
+    run = SimpleNamespace(execution_kind="normal", mode="chat")
+    work = SimpleNamespace(
+        id="work", parent_work_item_id=None, group_run_id=None, plan_node_id=None,
+        goal=("Publish acceptance artifact: first call write_file, then call "
+              "publish_artifact."),
+    )
+    resumed = SimpleNamespace(
+        work_item_id=work.id,
+        input_snapshot={"resumed_from_confirmation_id": "confirmation"},
+        principal_snapshot={},
+    )
+    db = _ToolAuthorizationDB(work)
+
+    assert await worker._runtime_tool_is_authorized(db, run, resumed, "write_file")
+    assert await worker._runtime_tool_is_authorized(db, run, resumed, "publish_artifact")
+    assert not await worker._runtime_tool_is_authorized(db, run, resumed, "execute")
+
+
+@pytest.mark.asyncio
+async def test_unrequested_chat_tool_is_not_authorized_after_runner_recovery():
+    worker = RuntimeWorker("authorization-test")
+    run = SimpleNamespace(execution_kind="normal", mode="chat")
+    work = SimpleNamespace(
+        id="work", parent_work_item_id=None, group_run_id=None, plan_node_id=None,
+        goal="slow runner restart acceptance",
+    )
+    recovered = SimpleNamespace(
+        work_item_id=work.id, input_snapshot={}, principal_snapshot={},
+    )
+
+    assert not await worker._runtime_tool_is_authorized(
+        _ToolAuthorizationDB(work), run, recovered, "execute",
+    )
 
 
 @pytest.mark.asyncio

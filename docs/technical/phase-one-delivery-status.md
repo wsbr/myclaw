@@ -16,6 +16,7 @@
 | 真实模型在 Plan 子 Agent 完成后重复委派直至超时 | 子 Agent batch 终态后直接结算专用协调 WorkItem 并重新扫描冻结图，不恢复 Owner 模型；普通 Chat/Group AgentInvocation 仍恢复调用方 | execution epoch 不增长、无 replacement Runner 的定向单测；真实模型 Plan 必须在时限内 `succeeded` |
 | 真实模型把 Group Work Item 的“execute”自然语言误判为 `execute` Tool 授权 | Group Work Item prompt 明确把 JSON 标记为任务数据，并要求只有任务数据明确要求精确 Tool 时才调用 | 真实模型 GroupRun 必须完成，不得因隐式 Tool Confirmation 耗尽执行步数 |
 | 被委派 Agent 会从装配目录中擅自调用 `execute`/`search_group_history`，使 Plan 等待确认或 Group 反复委派 | AgentInvocation 采用能力级白名单：只有委派文本包含独立的 `You must call <exact_tool>` 契约时才向模型暴露并在 dispatch 边界接受该 Tool | 正反授权单测；真实 Plan/Group 的 AgentInvocation 必须直接完成，显式授权 Tool 仍可调用 |
+| 真实模型可能在普通 Chat/Worker 恢复场景主动调用用户未要求的 Tool，导致意外 Confirmation 和永久等待 | 所有 normal Runner 在模型装配和 dispatch 两个边界执行最小 Tool 能力过滤；普通 Chat 只接受用户任务中肯定式 `call <exact_tool>`，Group/Plan 子任务与 AgentInvocation 使用更严格的独立授权契约；替换 Runner 从不可变 WorkItem goal 恢复原始授权 | 肯定、否定、相似 Tool key 与恢复 Runner 单测；真实模型 Worker restart 场景不得产生非预期 Tool Confirmation |
 | Group Formation 与 API 权限/幂等分支不足 | 增加结构错误聚合、可见性/发布状态、版本冻结、部分失败、owner unavailable、幂等 mismatch/replay 测试 | 关键模块 branch coverage Gate |
 | Frontend 构建不确定且使用开发预览服务器 | 固定 pnpm 10.15.0 与 lockfile，Docker 内 `--frozen-lockfile`，Nginx 提供静态 SPA 和 `/healthz` | Frontend build Job + production image build + Docker healthcheck |
 | 无入口限流 | Redis 固定窗口；认证主体/IP 先 HMAC，不保存原始值；Redis 故障显式降级而不破坏数据库权威路径 | `test_rate_limit.py`；429 header 与降级 header 行为 |
@@ -43,11 +44,11 @@
 
 ## 覆盖率与 CI Gate
 
-CI 对 Runtime Worker、Group Formation、Agents API、Groups API 启用 branch coverage，综合下限为 30%。当前候选基线为 115 项单测全部通过：Runtime Worker 40%、Group Formation 100%、Agents API 42%、Groups API 30%；Cobertura 汇总 line coverage 43.84%、branch coverage 30.00%，pytest-cov 综合显示 40.63%。覆盖率只用于防回退；场景断言、错误语义和真实模型 Gate 不得因覆盖率而放宽。
+CI 对 Runtime Worker、Group Formation、Agents API、Groups API 启用 branch coverage，综合下限为 30%。当前候选基线为 127 项单测全部通过：Runtime Worker 41%、Group Formation 100%、Agents API 42%、Groups API 30%；Cobertura 汇总 line coverage 44.40%、branch coverage 30.92%，pytest-cov 综合显示 41.25%。覆盖率只用于防回退；场景断言、错误语义和真实模型 Gate 不得因覆盖率而放宽。
 
 ## 当前候选门禁状态
 
-本机使用仓库内自建 Runner 镜像和统一入口执行的候选结果为：Unit 115/115、Mock Docker Full-stack 4/4、真实模型 Docker Full-stack 4/4，Frontend frozen production build 与空 MySQL 0001→0022 single-head Migration 均通过。真实 JUnit 同时记录七个场景和 Chromium UI property 为 `passed`。精确 Commit SHA、耗时、报告哈希和 tracked worktree 状态只以当次生成的 `test/test-results/phase-one-evidence.json` 为准，不在本文硬编码，避免文档提交后把旧 SHA 冒充新证据。
+本机使用仓库内自建 Runner 镜像和统一入口执行的最近完整候选结果为：Unit、Mock Docker Full-stack、真实模型 Docker Full-stack、Frontend frozen production build 与空 MySQL 0001→0022 single-head Migration 均通过。每次代码或文档改动后都必须在新 Commit SHA 上重跑全部门禁；精确 Commit SHA、用例数、耗时、七场景/Chromium property、报告哈希和 tracked worktree 状态只以当次生成的 `test/test-results/phase-one-evidence.json` 为准，不在本文硬编码，避免文档提交后把旧 SHA 冒充新证据。
 
 以上是本机候选验证，不是自建编排器的正式 Run。当前 manifest 的 `ci_run_url` 必须保持 `null`；在自建 CI/CD 实际执行、归档同一 SHA 的报告并产生可访问 Run 链接前，正式证据契约仍未完全满足。
 

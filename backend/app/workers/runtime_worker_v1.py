@@ -809,12 +809,10 @@ class RuntimeWorker:
                         "description": clarification_tool.description,
                         "input_schema": clarification_tool.input_schema,
                     })
-            if runner.input_snapshot.get("agent_invocation_id"):
-                request_text = str(runner.input_snapshot.get("request_text") or "")
-                tools = [
-                    tool for tool in tools
-                    if self._delegated_tool_is_authorized(request_text, tool["name"])
-                ]
+            tools = [
+                tool for tool in tools
+                if await self._runtime_tool_is_authorized(db, run, runner, tool["name"])
+            ]
             skill_catalog = []
             skill_rows = list((await db.execute(
                 select(AgentVersionSkill, RegisteredSkill)
@@ -1207,6 +1205,27 @@ class RuntimeWorker:
             )
 
     @staticmethod
+    def _task_explicitly_names_tool(task_text: str, tool_name: str) -> bool:
+        """Match an affirmative ``call <tool-key>`` capability in user task text."""
+        if not task_text or not tool_name:
+            return False
+        tool = re.escape(tool_name)
+        call_pattern = re.compile(
+            rf"(?<!\w)call\s+[`'\"]?{tool}[`'\"]?(?![A-Za-z0-9_])",
+            flags=re.IGNORECASE,
+        )
+        for match in call_pattern.finditer(task_text):
+            line_prefix = task_text[task_text.rfind("\n", 0, match.start()) + 1:match.start()]
+            if re.search(
+                r"(?:do\s+not|don't|never|must\s+not)(?:\s+\w+){0,2}\s*$",
+                line_prefix,
+                flags=re.IGNORECASE,
+            ):
+                continue
+            return True
+        return False
+
+    @staticmethod
     def _delegated_tool_is_authorized(request_text: str, tool_name: str) -> bool:
         """Require an unambiguous per-Tool capability in a delegated request.
 
@@ -1222,6 +1241,47 @@ class RuntimeWorker:
             rf"[`'\"]?{tool}[`'\"]?(?=\s|[,.;:!?]|$)"
         )
         return re.search(pattern, request_text, flags=re.IGNORECASE | re.MULTILINE) is not None
+
+    async def _runtime_tool_is_authorized(
+        self, db, run: Run, runner: DurableRunner, tool_name: str,
+    ) -> bool:
+        """Apply least-privilege Tool capabilities to every normal Runner."""
+        snapshot = runner.input_snapshot or {}
+        work = await db.get(WorkItem, runner.work_item_id)
+        if run.execution_kind != "normal":
+            return False
+        if snapshot.get("plan_settlement") or snapshot.get("group_settlement"):
+            return False
+        if snapshot.get("plan_coordination_for_node_id"):
+            return tool_name == "invoke_agent"
+        invocation = None
+        if work is not None and work.parent_work_item_id:
+            invocation = await db.scalar(select(AgentInvocation).where(
+                AgentInvocation.target_work_item_id == work.id,
+            ))
+        if snapshot.get("agent_invocation_id") or invocation is not None:
+            return self._delegated_tool_is_authorized(
+                str(snapshot.get("request_text") or (work.goal if work else "")), tool_name,
+            )
+        if snapshot.get("group_run_id") or (work is not None and work.group_run_id):
+            task_text = "\n".join(str(value or "") for value in (
+                snapshot.get("goal") or (work.goal if work else ""),
+                snapshot.get("acceptance_criteria"),
+            ))
+            return self._delegated_tool_is_authorized(task_text, tool_name)
+        plan_node_id = snapshot.get("plan_node_id") or (work.plan_node_id if work else None)
+        if plan_node_id:
+            node = await db.get(PlanWorkItemNode, plan_node_id)
+            task_text = "\n".join(str(value or "") for value in (
+                node.goal if node else (work.goal if work else ""),
+                node.acceptance_criteria if node else "",
+            ))
+            return self._delegated_tool_is_authorized(task_text, tool_name)
+        if run.mode == "chat" and not runner.principal_snapshot.get("delegation_chain"):
+            task_text = str(snapshot.get("content") or snapshot.get("request_text")
+                            or (work.goal if work else ""))
+            return self._task_explicitly_names_tool(task_text, tool_name)
+        return False
 
     @staticmethod
     def _can_request_clarification(
@@ -1255,17 +1315,13 @@ class RuntimeWorker:
             if (runner is None or work.active_runner_id != runner.id
                     or run.lifecycle in {"settling", "completed", "cancelled"}):
                 raise RuntimeError("runner fencing conflict before Tool dispatch")
-            if runner.input_snapshot.get("agent_invocation_id"):
-                request_text = str(runner.input_snapshot.get("request_text") or "")
-                unauthorized = [
-                    call.name for call in tool_calls
-                    if not self._delegated_tool_is_authorized(request_text, call.name)
-                ]
-                if unauthorized:
-                    names = ", ".join(sorted(set(unauthorized)))
-                    raise RuntimeError(
-                        f"delegated request did not explicitly authorize Tool: {names}"
-                    )
+            unauthorized = [
+                call.name for call in tool_calls
+                if not await self._runtime_tool_is_authorized(db, run, runner, call.name)
+            ]
+            if unauthorized:
+                names = ", ".join(sorted(set(unauthorized)))
+                raise RuntimeError(f"current task did not explicitly authorize Tool: {names}")
             clarification_calls = [call for call in tool_calls if call.name == "request_clarification"]
             if clarification_calls:
                 if len(tool_calls) != 1:
