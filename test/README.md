@@ -70,7 +70,7 @@ export MYCLAW_REAL_LLM_MODEL=example-model
 unset MYCLAW_REAL_LLM_API_KEY
 ```
 
-真实模式只把 `env://MYCLAW_REAL_LLM_API_KEY` 保存为 Model Credential Ref。密钥不得写入 `.env.test`、Model Registry、测试快照、日志或 Trace。CI 的 `real-model-acceptance` 仅通过手工触发，并从 `MYCLAW_REAL_LLM_API_KEY` GitHub Secret 注入。
+真实模式只把 `env://MYCLAW_REAL_LLM_API_KEY` 保存为 Model Credential Ref。密钥不得写入 `.env.test`、Model Registry、测试快照、日志或 Trace。自建 CI 的真实模型 Gate 只能作为受保护的手工门禁触发，并从编排器的密文 Secret 注入 `MYCLAW_REAL_LLM_API_KEY`。
 
 它会构建并启动以下隔离服务：
 

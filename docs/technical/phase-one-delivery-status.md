@@ -6,7 +6,7 @@
 
 | 缺口 | 处置 | 验证方式 |
 | --- | --- | --- |
-| CI 引用已删除的旧 Integration/UI 路径 | 拆分为 Unit/关键 branch coverage、Frontend frozen build、空库 Migration、双 Runtime Worker Mock Full-stack 和手工 Secret 驱动的 Real-model Gate | `.github/workflows/test.yml`；每个 Job 上传 JUnit/coverage/诊断 Artifact |
+| CI 引用已删除的旧 Integration/UI 路径，且仓库托管平台不是正式执行环境 | 删除 GitHub/Gitee 专用流水线，提供厂商无关的 Docker Runner 与统一入口，拆分为 Unit/关键 branch coverage、Frontend frozen build、空库 Migration、双 Runtime Worker Mock Full-stack 和手工 Secret 驱动的 Real-model Gate | `test/scripts/run_ci_gates.sh`、`deploy/ci/runner/`；报告统一写入 `test/test-results/`，由后续自建编排器归档 |
 | 旧 Task/Celery/MCP Runtime 与双模型残留 | 删除旧路由、模型、服务、Worker、前端入口和测试；Database Outbox 成为唯一可靠调度源 | 运行目录 `rg` 审计；历史迁移和明确标注的设计历史不算运行引用 |
 | Migration 分叉风险 | 保留线性历史迁移并以 0021 删除旧产品表，0022 增加 OTel parent context | 空 MySQL 8 从 0001 升至 0022；`alembic heads` 必须只有一行 |
 | Trace 只有数据库投影 | 增加 OTel SDK/OTLP，导出 `runner_execution`、`model_generation`，AgentInvocation 创建真实 Span Link | Docker Collector 日志 + 数据库 Trace Link 双重断言 |
@@ -43,7 +43,7 @@ CI 对 Runtime Worker、Group Formation、Agents API、Groups API 启用 branch 
 
 ## 正式证据契约
 
-正式发布必须在固定且无 tracked 修改的 Commit SHA 上重新运行全部门禁。JUnit 和 coverage 写入 `test/test-results/`，该目录不提交并由 CI 作为 Artifact 上传。`test/scripts/collect_acceptance_evidence.py` 从报告生成脱敏 JSON manifest，至少包含：
+正式发布必须在固定且无 tracked 修改的 Commit SHA 上重新运行全部门禁。JUnit 和 coverage 写入 `test/test-results/`，该目录不提交；当前由本机保留，后续自建 CI 必须作为 Artifact 归档。`test/scripts/collect_acceptance_evidence.py` 从报告生成脱敏 JSON manifest，至少包含：
 
 - Commit SHA、UTC 生成时间、tracked worktree 状态；
 - 测试命令、JUnit 用例数/失败数/耗时和报告 SHA-256；
@@ -52,7 +52,7 @@ CI 对 Runtime Worker、Group Formation、Agents API、Groups API 启用 branch 
 - CI Run 链接；
 - 固定说明“Credential 只由环境/Secret 注入，值未采集”。
 
-没有 CI Run 链接、真实模型 JUnit、七场景 property 或者 `tracked_worktree_dirty=false` 的 manifest 不能作为正式交付证据。失败日志可以保存，但必须先做凭证模式扫描；禁止保存 API Key、Authorization header、Prompt 中的 Secret 或数据库明文。
+没有 CI Run 链接、真实模型 JUnit、七场景 property 或者 `tracked_worktree_dirty=false` 的 manifest 不能作为正式交付证据。当前明确不启用仓库托管平台 CI，故在自建 CI/CD 实际运行并产生 Run 链接前，此项必须保持为公开缺口，不能伪造或用本地路径替代。失败日志可以保存，但必须先做凭证模式扫描；禁止保存 API Key、Authorization header、Prompt 中的 Secret 或数据库明文。
 
 ## 保留风险
 

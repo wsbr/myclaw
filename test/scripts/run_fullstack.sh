@@ -21,13 +21,14 @@ if [ "${MYCLAW_LLM_MODE:-mock}" = "real" ]; then
   : "${MYCLAW_REAL_LLM_MODEL:?MYCLAW_REAL_LLM_MODEL is required for real-model acceptance}"
 fi
 
-if [ ! -x "$ROOT/.venv/bin/pytest" ]; then
-  echo "Missing test/.venv; create it and install test/requirements.txt first."
+pytest_bin="${MYCLAW_TEST_PYTEST:-$ROOT/.venv/bin/pytest}"
+if [ ! -x "$pytest_bin" ]; then
+  echo "Missing pytest executable at $pytest_bin; install test/requirements.txt or set MYCLAW_TEST_PYTEST."
   exit 1
 fi
 
 echo "==> Full-stack acceptance (real API, workers, database, sandbox and frontend)..."
-"$ROOT/.venv/bin/pytest" e2e/fullstack/ -m fullstack -v --tb=short "$@"
+"$pytest_bin" e2e/fullstack/ -m fullstack -v --tb=short "$@"
 
 echo ""
 echo "All full-stack tests passed."
