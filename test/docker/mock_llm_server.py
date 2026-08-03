@@ -98,14 +98,14 @@ def _requested_artifact_tool(messages: list[ChatMessage], tools: list[dict] | No
     tool_results = " ".join(m.content or "" for m in messages if m.role == "tool")
     if not tool_results and "write_file" in names:
         return "write_file", {
-            "path": "acceptance-artifact.txt",
+            "path": "验收报告 2026.txt",
             "content": "artifact-e2e",
             "mode": "create",
         }
-    if "acceptance-artifact.txt" in tool_results and '"artifact"' not in tool_results and "publish_artifact" in names:
+    if "验收报告 2026.txt" in tool_results and '"artifact"' not in tool_results and "publish_artifact" in names:
         return "publish_artifact", {
-            "path": "acceptance-artifact.txt",
-            "name": "acceptance-artifact.txt",
+            "path": "验收报告 2026.txt",
+            "name": "验收报告 2026.txt",
             "mime_type": "text/plain",
             "publish_to_group": False,
         }

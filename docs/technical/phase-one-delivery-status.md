@@ -29,6 +29,7 @@
 | pytest-playwright 默认清理 `test-results/`，导致多 Gate JUnit 互相覆盖 | Playwright trace/screenshot/video 独立写入 `test/playwright-results/`，JUnit、coverage 与迁移证据继续保留在 `test/test-results/` | 固定 SHA 顺序运行 unit、Mock、real 后三份 JUnit 必须同时存在，evidence collector 校验 SHA 与结果 |
 | OpenAI-compatible Endpoint 可能在零输出时返回瞬时 timeout | 仅当尚未收到任何 text/tool payload 且错误属于 timeout、连接、限流或服务端瞬时错误时重试一次；已产生 delta 后绝不重放 | 单测分别验证零输出重试成功与已有 delta 时不重试；真实模型全栈仍要求无失败完成 |
 | `HistorySummary` 生成列模型声明写死 MySQL `CONCAT()`，旧版 SQLite 单测环境无法建表 | ORM 元数据改用 SQLAlchemy 方言表达式，SQLite 编译为 `||`、MySQL 编译为 `concat()`；历史 MySQL Migration 保持不变 | 全量 SQLite 单测建库 + 空 MySQL 8 Migration Gate |
+| 真实业务 UAT 暴露带 Skill 草稿测试触发 sealed 关系约束、中文 Artifact 下载 500、Group 多词检索漏报、前端健康误报和上游 incomplete chunked read | 关系行先 flush 后 seal；Artifact 使用 RFC 5987/6266 `filename*`；Group 查询按空白词项 AND 匹配；健康探测固定 IPv4 loopback；零输出流中断受限重试一次 | 等价不可变触发器单测、中文下载/检索/流中断单测、真实 MySQL Mock 全栈和容器 health、固定 SHA 真实模型全栈 |
 
 ## 七个场景映射
 
@@ -44,7 +45,7 @@
 
 ## 覆盖率与 CI Gate
 
-CI 对 Runtime Worker、Group Formation、Agents API、Groups API 启用 branch coverage，综合下限为 30%。当前候选基线为 127 项单测全部通过：Runtime Worker 41%、Group Formation 100%、Agents API 42%、Groups API 30%；Cobertura 汇总 line coverage 44.40%、branch coverage 30.92%，pytest-cov 综合显示 41.25%。覆盖率只用于防回退；场景断言、错误语义和真实模型 Gate 不得因覆盖率而放宽。
+CI 对 Runtime Worker、Group Formation、Agents API、Groups API 启用 branch coverage，综合下限为 30%。当前候选基线为 131 项单测全部通过：Runtime Worker 41%、Group Formation 100%、Agents API 42%、Groups API 30%；Cobertura 汇总 line coverage 44.40%、branch coverage 30.92%，pytest-cov 综合显示 41.25%。覆盖率只用于防回退；场景断言、错误语义和真实模型 Gate 不得因覆盖率而放宽。
 
 ## 当前候选门禁状态
 

@@ -335,6 +335,11 @@ async def create_draft_test_snapshot(
     db.add(snapshot)
     await db.flush()
     await _replace_selection(db, snapshot.id, selection)
+    # Relationship triggers reject writes after the parent version is sealed.
+    # Flush the copied Tool/Skill/Binding rows before setting immutable_at;
+    # otherwise SQLAlchemy may order the parent UPDATE before child INSERTs in
+    # the final flush.
+    await db.flush()
     snapshot.content_hash = _content_hash(snapshot, selection)
     snapshot.immutable_at = utcnow()
     await db.flush()

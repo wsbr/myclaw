@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 
 from sqlalchemy import and_, exists, func, or_, select
 
@@ -66,6 +67,12 @@ class SearchGroupHistoryTool(BaseTool):
         query = args.get("query")
         if not isinstance(query, str) or not query.strip() or len(query) > 1000:
             return ToolResult(success=False, error="query must be 1-1000 characters")
+        # Treat whitespace-separated words as AND terms. Requiring the entire
+        # query to be one contiguous substring makes Chinese queries such as
+        # "华东仓 取消率" miss "华东仓订单取消率" even though both terms exist.
+        query_terms = tuple(dict.fromkeys(
+            term.casefold() for term in re.split(r"\s+", query.strip()) if term
+        ))
         limit = args.get("limit", 20)
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
             return ToolResult(success=False, error="limit must be between 1 and 100")
@@ -96,6 +103,11 @@ class SearchGroupHistoryTool(BaseTool):
                 ExecutionEventRecipient.recipient_id == context.group_node_id,
             )),
         )
+        search_conditions = [or_(
+            func.lower(ExecutionEvent.summary).contains(term),
+            and_(Message.id.is_not(None), func.lower(Message.content).contains(term)),
+            and_(Artifact.id.is_not(None), func.lower(Artifact.name).contains(term)),
+        ) for term in query_terms]
         statement = select(ExecutionEvent, Message, Artifact).outerjoin(
             Message,
             and_(ExecutionEvent.entity_type == "message", Message.id == ExecutionEvent.entity_id),
@@ -108,11 +120,7 @@ class SearchGroupHistoryTool(BaseTool):
             ExecutionEvent.sequence > after,
             ExecutionEvent.sequence <= upper,
             or_(ExecutionEvent.visibility == "group", direct_to_node),
-            or_(
-                func.lower(ExecutionEvent.summary).contains(query.strip().lower()),
-                and_(Message.id.is_not(None), func.lower(Message.content).contains(query.strip().lower())),
-                and_(Artifact.id.is_not(None), func.lower(Artifact.name).contains(query.strip().lower())),
-            ),
+            *search_conditions,
         )
         agent_ids = args.get("agent_ids")
         if agent_ids is not None:

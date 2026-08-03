@@ -134,6 +134,42 @@ async def test_stream_retries_one_transient_failure_only_before_output(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_stream_retries_incomplete_chunked_read_before_output(monkeypatch):
+    calls = 0
+
+    class Completions:
+        async def create(self, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError(
+                    "peer closed connection without sending complete message body "
+                    "(incomplete chunked read)"
+                )
+
+            async def chunks():
+                yield SimpleNamespace(
+                    usage=None,
+                    choices=[SimpleNamespace(delta=SimpleNamespace(content="recovered", tool_calls=None))],
+                )
+
+            return chunks()
+
+    async def no_sleep(_delay):
+        return None
+
+    monkeypatch.setattr("app.core.model_hub.openai.asyncio.sleep", no_sleep)
+    model = OpenAILLM("unused-test-key")
+    await model.client.close()
+    model.client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+    chunks = [chunk async for chunk in model.stream(
+        [{"role": "user", "content": "return json"}], None, {"model_id": "model"},
+    )]
+    assert calls == 2
+    assert [chunk.content for chunk in chunks] == ["recovered"]
+
+
+@pytest.mark.asyncio
 async def test_stream_never_retries_after_a_delta():
     calls = 0
 

@@ -94,7 +94,7 @@ async def test_group_history_returns_group_and_own_direct_only():
         db.add_all([
             UserIdentity(user_id="u1", status="active"),
             UserSession(id=session_id, user_id="u1", entry_agent_id=agent_id,
-                status="active", origin_type="web", next_event_sequence=4),
+                status="active", origin_type="web", next_event_sequence=5),
             GroupSession(id=group_id, parent_session_id=session_id, user_id="u1",
                 entry_agent_id=agent_id, status="open", goal="G"),
             GroupAgentNode(id=node_id, group_session_id=group_id, agent_id=agent_id,
@@ -111,6 +111,11 @@ async def test_group_history_returns_group_and_own_direct_only():
                 sequence=3, event_type="direct.note", event_dedupe_key="direct-other",
                 actor_type="agent", actor_id=agent_id, entity_type="note", entity_id=uuid7(),
                 visibility="direct", summary="other needle", payload={}, correlation_id=group_id),
+            ExecutionEvent(id=uuid7(), session_id=session_id, group_session_id=group_id,
+                sequence=4, event_type="shared.metric", event_dedupe_key="shared-chinese",
+                actor_type="agent", actor_id=agent_id, entity_type="note", entity_id=uuid7(),
+                visibility="group", summary="华东仓订单取消率由3%升至11%", payload={},
+                correlation_id=group_id),
         ])
         events = list(db.new)
         mine = next(row for row in events if isinstance(row, ExecutionEvent) and row.sequence == 2)
@@ -127,4 +132,10 @@ async def test_group_history_returns_group_and_own_direct_only():
         result = await SearchGroupHistoryTool().execute({"query": "needle"}, context, db=db)
     assert result.success is True
     assert [hit["sequence"] for hit in result.data["hits"]] == [1, 2]
+    async with factory() as db:
+        chinese = await SearchGroupHistoryTool().execute(
+            {"query": "华东仓 取消率"}, context, db=db,
+        )
+    assert chinese.success is True
+    assert [hit["sequence"] for hit in chinese.data["hits"]] == [4]
     await engine.dispose()

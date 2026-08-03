@@ -5,6 +5,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.config import settings
+from app.api.artifacts import _download_content_disposition
 from app.core.tool_registry.base import RuntimeContext
 from app.core.tool_registry.registry import ToolRegistry
 from app.database import Base
@@ -20,6 +21,25 @@ from app.models.runtime_v1 import (
 from app.services.workspace_lock_service import acquire_workspace_lock, release_workspace_lock
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.mark.parametrize(
+    ("filename", "expected_fallback", "expected_extended"),
+    [
+        ("report.txt", 'filename="report.txt"', "filename*=UTF-8''report.txt"),
+        ("售后 判责报告.md", 'filename="artifact.md"',
+         "filename*=UTF-8''%E5%94%AE%E5%90%8E%20%E5%88%A4%E8%B4%A3%E6%8A%A5%E5%91%8A.md"),
+        ('季度"报告".csv', 'filename="artifact.csv"',
+         "filename*=UTF-8''%E5%AD%A3%E5%BA%A6%22%E6%8A%A5%E5%91%8A%22.csv"),
+    ],
+)
+def test_download_content_disposition_supports_unicode(
+    filename, expected_fallback, expected_extended,
+):
+    header = _download_content_disposition(filename)
+    header.encode("latin-1")
+    assert expected_fallback in header
+    assert expected_extended in header
 
 
 @pytest.mark.asyncio

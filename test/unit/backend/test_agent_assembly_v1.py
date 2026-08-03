@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.database import Base
@@ -66,6 +66,19 @@ async def assembly_db():
     ]
     async with engine.begin() as connection:
         await connection.run_sync(lambda sync: Base.metadata.create_all(sync, tables=tables))
+        # Mirror the MySQL sealed-relation guard so flush ordering is covered
+        # by the fast SQLite suite as well.
+        await connection.execute(text("""
+            CREATE TRIGGER test_agent_version_skill_sealed_insert
+            BEFORE INSERT ON agent_version_skill
+            WHEN EXISTS (
+                SELECT 1 FROM agent_version
+                WHERE id = NEW.agent_version_id AND immutable_at IS NOT NULL
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'sealed agent assembly is immutable');
+            END
+        """))
     factory = async_sessionmaker(engine, expire_on_commit=False)
     account_id = uuid7()
     model_id = uuid7()
@@ -100,6 +113,13 @@ async def test_publish_copies_and_seals_while_preserving_draft(assembly_db):
     async with factory.begin() as db:
         policies = await _policy_ids(db)
         sandbox_id = await db.scalar(select(SandboxProfile.id).where(SandboxProfile.profile_key == "local"))
+        skill_id = uuid7()
+        db.add(RegisteredSkill(
+            id=skill_id, logical_name="acceptance.skill", name="Acceptance Skill",
+            description="Draft snapshot regression", owner_account_id=account_id,
+            status="active", current_published_version_id=uuid7(),
+        ))
+        await db.flush()
         agent, draft = await create_agent(db, owner_account_id=account_id, created_by_account_id=account_id, name="Finance", description="Finance specialist")
         draft_id = draft.id
         draft = await update_agent_draft(
@@ -116,6 +136,7 @@ async def test_publish_copies_and_seals_while_preserving_draft(assembly_db):
                 "memory_recall_policy_id": policies["memory_recall.none"],
                 "group_enabled": True,
             },
+            selection=AssemblySelection(skill_ids=(skill_id,)),
         )
         test_snapshot = await create_draft_test_snapshot(
             db, agent_id=agent.id, expected_draft_revision=2,
@@ -123,6 +144,9 @@ async def test_publish_copies_and_seals_while_preserving_draft(assembly_db):
         )
         assert test_snapshot.publication_status == "draft_test_snapshot"
         assert test_snapshot.immutable_at is not None
+        assert await db.scalar(select(AgentVersionSkill.skill_id).where(
+            AgentVersionSkill.agent_version_id == test_snapshot.id,
+        )) == skill_id
         assert draft.draft_revision == 2
         published = await publish_agent(db, agent_id=agent.id, expected_draft_revision=2, actor_account_id=account_id, idempotency_record_id="publish-1")
         assert published.version_no == 1

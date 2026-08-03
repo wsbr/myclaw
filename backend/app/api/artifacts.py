@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path, PurePosixPath
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -24,6 +25,23 @@ from app.services.workspace_lock_service import (
 )
 
 router = APIRouter(tags=["artifacts"])
+
+
+def _download_content_disposition(filename: str) -> str:
+    """Build an RFC 6266 header with an ASCII fallback and UTF-8 filename*."""
+    safe_name = filename.replace("\r", "").replace("\n", "")
+    fallback = "".join(
+        character for character in safe_name
+        if character.isascii() and (character.isalnum() or character in {" ", ".", "_", "-"})
+    ).strip()
+    if not fallback or fallback.startswith("."):
+        suffix = "".join(
+            character for character in Path(safe_name).suffix
+            if character.isascii() and (character.isalnum() or character in {".", "_", "-"})
+        )
+        fallback = f"artifact{suffix}"
+    encoded = quote(safe_name, safe="!#$&+-.^_`|~")
+    return f'attachment; filename="{fallback}"; filename*=UTF-8\'\'{encoded}'
 
 
 def _artifact_path(artifact: Artifact) -> Path:
@@ -190,7 +208,7 @@ async def download_artifact(
     headers = {
         "ETag": f'"{artifact.checksum}"', "Accept-Ranges": "bytes",
         "Content-Length": str(max(0, end - start + 1)),
-        "Content-Disposition": f'attachment; filename="{artifact.name.replace(chr(34), "")}"',
+        "Content-Disposition": _download_content_disposition(artifact.name),
     }
     if response_status == 206:
         headers["Content-Range"] = f"bytes {start}-{end}/{artifact.size_bytes}"

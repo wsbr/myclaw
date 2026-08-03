@@ -129,6 +129,18 @@ def test_phase_one_acceptance(
     ).json()
     assert version["publication_status"] == "published" and version["content_hash"]
 
+    # A draft with the published Skill selection can be copied and sealed for
+    # an isolated draft-test Run without violating immutable relation guards.
+    draft_test = api.request(
+        "POST", f"/api/v1/agents/{finance}/draft/test-runs", idem=True,
+        json={
+            "content": "Reply briefly for the Skill-backed draft test; do not call any Tool.",
+            "expected_draft_revision": detail["draft"]["draft_revision"],
+        },
+    ).json()
+    assert draft_test["run"]["execution_kind"] == "draft_test"
+    assert api.wait_run(draft_test["run"]["id"])["outcome"] == "succeeded"
+
     # The published entry Agent is callable through its scoped Agent API Key.
     key_record = api.request(
         "POST", f"/api/v1/agents/{finance}/api-keys", idem=True,
@@ -222,7 +234,7 @@ def test_phase_one_acceptance(
     # A file becomes downloadable only after the model explicitly writes and publishes it.
     artifact_chat = _chat(
         api, chat_session["id"],
-        "Publish acceptance artifact: first call write_file to create acceptance-artifact.txt "
+        "Publish acceptance artifact: first call write_file to create 验收报告 2026.txt "
         "with exact content artifact-e2e, then call publish_artifact for that path as text/plain. "
         "Do not use execute and do not stop before both Tool calls succeed.",
     )
@@ -236,9 +248,12 @@ def test_phase_one_acceptance(
     artifacts = api.request(
         "GET", f"/api/v1/sessions/{chat_session['id']}/artifacts", params={"status": "published"},
     ).json()["items"]
-    artifact = next(item for item in artifacts if item["name"] == "acceptance-artifact.txt")
+    artifact = next(item for item in artifacts if item["name"] == "验收报告 2026.txt")
     download = api.request("GET", f"/api/v1/artifacts/{artifact['id']}/download")
     assert download.content == b"artifact-e2e"
+    disposition = download.headers["content-disposition"]
+    assert 'filename="2026.txt"' in disposition
+    assert "filename*=UTF-8''%E9%AA%8C%E6%94%B6%E6%8A%A5%E5%91%8A%202026.txt" in disposition
     record_property("scene_2_chat_sse_tools_recovery_artifact", "passed")
 
     # 6. Tool governance applies safely to queued invocations and to new calls immediately.

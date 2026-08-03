@@ -54,6 +54,11 @@
 - [第一阶段交付状态与验收证据](technical/phase-one-delivery-status.md)
 - [第一阶段生产运行手册](operations/phase-one-runbook.md)
 
+## 验收报告
+
+- [一期真实业务 UAT 报告（2026-08-03）](acceptance/phase-one-uat-2026-08-03.md)
+- [验收文档与证据索引](acceptance/README.md)
+
 ## 维护规则
 
 - 一个术语只在其所属模块完整定义；其他文档只做摘要并链接。

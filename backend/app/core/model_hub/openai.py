@@ -54,7 +54,8 @@ def _is_retryable_zero_output_error(error: Exception) -> bool:
     message = str(error).lower()
     return any(marker in message for marker in (
         "request timed out", "timeout", "timed out", "temporarily unavailable",
-        "connection reset", "connection error",
+        "connection reset", "connection error", "peer closed connection",
+        "incomplete chunked read",
     ))
 
 
