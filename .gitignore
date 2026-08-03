@@ -2,6 +2,9 @@
 .env
 .env.local
 .env.*.local
+deploy/uat/.env
+deploy/uat/.env.tmp
+deploy/uat/backups/
 
 # Python
 __pycache__/

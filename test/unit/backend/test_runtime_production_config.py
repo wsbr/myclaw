@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -71,6 +73,26 @@ def test_safe_production_settings_are_accepted():
     )
     assert settings.database_pool_size == 24
     assert settings.runtime_runner_lease_seconds == 45
+
+
+def test_uat_compose_uses_protected_persistent_volumes_and_secret_injection():
+    repository = Path(__file__).resolve().parents[3]
+    compose = (repository / "deploy/docker-compose.uat.yml").read_text()
+    example = (repository / "deploy/uat/.env.example").read_text()
+
+    assert "tmpfs:" not in compose
+    for volume_name in (
+        "myclaw-uat-mysql-data",
+        "myclaw-uat-redis-data",
+        "myclaw-uat-app-data",
+    ):
+        assert f"name: {volume_name}" in compose
+    assert compose.count("external: true") == 3
+    assert "MYCLAW_REAL_LLM_API_KEY: ${MYCLAW_REAL_LLM_API_KEY}" in compose
+    assert compose.count("MYCLAW_REAL_LLM_API_KEY: ${MYCLAW_REAL_LLM_API_KEY}") == 2
+    assert "--no-tablespaces" in (repository / "deploy/uat/backup.sh").read_text()
+    assert "MYCLAW_REAL_LLM_API_KEY=\n" in example
+    assert "env://MYCLAW_REAL_LLM_API_KEY" in example
 
 
 @pytest.mark.parametrize(

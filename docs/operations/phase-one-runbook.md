@@ -2,6 +2,8 @@
 
 本手册只覆盖[第一阶段交付边界](../modules/phase-one-scope.md)内的单机 Docker Compose 拓扑。Kubernetes、多可用区、外部 MQ 与独立 Artifact Store 不在本阶段范围内。
 
+本地产品验收使用 [UAT Compose](../../deploy/docker-compose.uat.yml) 和 [UAT 操作说明](../../deploy/uat/README.md)。它使用固定外部命名卷持久化 MySQL、Redis 和 Workspace/Artifact 数据。`test/docker-compose.test.yml` 只允许用于 CI/自动化测试，其 MySQL `tmpfs` 不得承载产品验收数据。
+
 ## 发布前门禁
 
 1. 固定待发布 Commit SHA，确认工作树为空，并记录 `git rev-parse HEAD`。
