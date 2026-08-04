@@ -197,7 +197,10 @@ async def get_runner_trace(
     await _owned_run(db, runner.run_id, current)
     trace = await db.scalar(select(RunnerTrace).where(RunnerTrace.runner_id == runner.id))
     if trace is None:
-        return {"status": "not_available", "runner_id": runner.id, "trace": None, "spans": [], "links": []}
+        return {
+            "status": "not_available", "runner_id": runner.id, "trace": None,
+            "harness": _safe_harness_diagnostics(runner), "spans": [], "links": [],
+        }
     spans = list(await db.scalars(
         select(ObservabilitySpan)
         .where(ObservabilitySpan.runner_trace_id == trace.id)
@@ -212,6 +215,7 @@ async def get_runner_trace(
     return {
         "status": "available",
         "runner_id": runner.id,
+        "harness": _safe_harness_diagnostics(runner),
         "trace": {
             "trace_id": trace.trace_id,
             "status": trace.status,
@@ -242,6 +246,37 @@ async def get_runner_trace(
             "entity_type": link.entity_type,
             "entity_id": link.entity_id,
         } for link in links],
+    }
+
+
+def _safe_harness_diagnostics(runner: DurableRunner) -> dict:
+    """Expose only non-sensitive Harness contract/capability metadata."""
+    assembly = runner.assembly_snapshot or {}
+    manifest = runner.prompt_manifest or {}
+    capabilities = manifest.get("capabilities") or {}
+    response_contract = manifest.get("response_contract") or {}
+    completion_contract = manifest.get("completion_contract") or {}
+    return {
+        "agent_version_id": assembly.get("agent_version_id"),
+        "model_id": assembly.get("model_id"),
+        "model_parameter_version": assembly.get("model_parameter_version"),
+        "assembled_tool_keys": list(capabilities.get("assembled_tool_keys") or []),
+        "effective_tool_keys": list(capabilities.get("effective_tool_keys") or []),
+        "harness_tool_keys": list(capabilities.get("harness_tool_keys") or []),
+        "response_contract": response_contract.get("key"),
+        "structured_output": response_contract.get("structured_output"),
+        "repair_no": response_contract.get("repair_no", 0),
+        "completion_contract": {
+            "key": completion_contract.get("key"),
+            "status": completion_contract.get("status"),
+            "reason_code": completion_contract.get("reason_code"),
+            "settlement_mode": completion_contract.get("settlement_mode"),
+            "required_tool_keys": list(completion_contract.get("required_tool_keys") or []),
+            "satisfied_tool_keys": list(completion_contract.get("satisfied_tool_keys") or []),
+            "pending_tool_keys": list(completion_contract.get("pending_tool_keys") or []),
+            "unavailable_tool_keys": list(completion_contract.get("unavailable_tool_keys") or []),
+            "repair_no": completion_contract.get("repair_no", 0),
+        },
     }
 
 
@@ -368,12 +403,23 @@ async def retry_work_item(
     item.error_detail = None
     item.retryable = False
     item.version += 1
+    source_runner = await db.scalar(select(DurableRunner).where(
+        DurableRunner.work_item_id == item.id,
+    ).order_by(DurableRunner.execution_epoch.desc(), DurableRunner.created_at.desc()).limit(1))
+    if source_runner is None:
+        raise HTTPException(status_code=409, detail={"code": "retry_source_runner_unavailable"})
     runner = DurableRunner(
         id=uuid7(), work_item_id=item.id, run_id=run.id, session_id=run.session_id,
-        agent_id=item.owner_agent_id, agent_version_id=item.agent_version_id,
+        agent_id=source_runner.agent_id, agent_version_id=source_runner.agent_version_id,
         execution_epoch=item.execution_epoch, status="queued",
-        principal_snapshot={}, assembly_snapshot={"agent_version_id": item.agent_version_id},
-        prompt_manifest={}, input_snapshot={"retry_of_work_item": item.id},
+        principal_snapshot=dict(source_runner.principal_snapshot),
+        assembly_snapshot=dict(source_runner.assembly_snapshot),
+        prompt_manifest=dict(source_runner.prompt_manifest),
+        input_snapshot={
+            **dict(source_runner.input_snapshot),
+            "retry_of_work_item": item.id,
+            "retry_of_runner_id": source_runner.id,
+        },
     )
     await persist_replacement_runner(db, item, runner)
     event = await ExecutionEventWriter(db).append(

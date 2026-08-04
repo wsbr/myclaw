@@ -78,6 +78,7 @@ def test_safe_production_settings_are_accepted():
 def test_uat_compose_uses_protected_persistent_volumes_and_secret_injection():
     repository = Path(__file__).resolve().parents[3]
     compose = (repository / "deploy/docker-compose.uat.yml").read_text()
+    collector = (repository / "deploy/otel-collector.yaml").read_text()
     example = (repository / "deploy/uat/.env.example").read_text()
 
     assert "tmpfs:" not in compose
@@ -93,6 +94,14 @@ def test_uat_compose_uses_protected_persistent_volumes_and_secret_injection():
     assert "--no-tablespaces" in (repository / "deploy/uat/backup.sh").read_text()
     assert "MYCLAW_REAL_LLM_API_KEY=\n" in example
     assert "env://MYCLAW_REAL_LLM_API_KEY" in example
+    assert "install -d -m 0750 -o 10001 -g 10001 /var/lib/myclaw/otel" in compose
+    assert "condition: service_completed_successfully" in compose
+    assert "cap_drop: [ALL]" in compose
+    assert "cap_add: [CHOWN, FOWNER]" in compose
+    assert "no-new-privileges:true" in compose
+    assert "chown -R" not in compose
+    assert "path: /var/lib/myclaw/otel/uat-otel-traces.jsonl" in collector
+    assert "exporters: [debug, file]" in collector
 
 
 @pytest.mark.parametrize(

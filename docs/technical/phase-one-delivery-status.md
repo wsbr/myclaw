@@ -30,6 +30,7 @@
 | OpenAI-compatible Endpoint 可能在零输出时返回瞬时 timeout | 仅当尚未收到任何 text/tool payload 且错误属于 timeout、连接、限流或服务端瞬时错误时重试一次；已产生 delta 后绝不重放 | 单测分别验证零输出重试成功与已有 delta 时不重试；真实模型全栈仍要求无失败完成 |
 | `HistorySummary` 生成列模型声明写死 MySQL `CONCAT()`，旧版 SQLite 单测环境无法建表 | ORM 元数据改用 SQLAlchemy 方言表达式，SQLite 编译为 `||`、MySQL 编译为 `concat()`；历史 MySQL Migration 保持不变 | 全量 SQLite 单测建库 + 空 MySQL 8 Migration Gate |
 | 真实业务 UAT 暴露带 Skill 草稿测试触发 sealed 关系约束、中文 Artifact 下载 500、Group 多词检索漏报、前端健康误报和上游 incomplete chunked read | 关系行先 flush 后 seal；Artifact 使用 RFC 5987/6266 `filename*`；Group 查询按空白词项 AND 匹配；健康探测固定 IPv4 loopback；零输出流中断受限重试一次 | 等价不可变触发器单测、中文下载/检索/流中断单测、真实 MySQL Mock 全栈和容器 health、固定 SHA 真实模型全栈 |
+| 自然 Chat/Group 无法触发装配能力，Plan/Group 结构失败，模型文本与真实副作用无法对账 | 机器态 Capability Envelope、结构化 Response Contract、Harness Completion Contract、Effect Ledger、单次有界修复和安全 plain-text fallback | 133 单元、Mock 全栈 API/UI、真实 `qwen3.5-plus` 电商退款审计 Chat/Plan/Group 综合 Gate；详见 Harness 修复候选报告 |
 
 ## 七个场景映射
 
@@ -49,7 +50,7 @@ CI 对 Runtime Worker、Group Formation、Agents API、Groups API 启用 branch 
 
 ## 当前候选门禁状态
 
-本机使用仓库内自建 Runner 镜像和统一入口执行的最近完整候选结果为：Unit、Mock Docker Full-stack、真实模型 Docker Full-stack、Frontend frozen production build 与空 MySQL 0001→0022 single-head Migration 均通过。每次代码或文档改动后都必须在新 Commit SHA 上重跑全部门禁；精确 Commit SHA、用例数、耗时、七场景/Chromium property、报告哈希和 tracked worktree 状态只以当次生成的 `test/test-results/phase-one-evidence.json` 为准，不在本文硬编码，避免文档提交后把旧 SHA 冒充新证据。
+本机使用仓库内自建 Runner 镜像和统一入口执行的最近完整候选结果为：Unit、Mock Docker Full-stack、真实模型 Docker Full-stack、Frontend frozen production build 与空 MySQL 0001→0022 single-head Migration 均通过。Harness 第一批修复另有一组 `uncommitted` 候选报告，见[修复实现与候选验收报告](../acceptance/phase-one-harness-remediation-2026-08-03.md)；它用于工程收口，不能替代下述正式证据契约。每次代码或文档改动后都必须在新 Commit SHA 上重跑全部门禁；精确 Commit SHA、用例数、耗时、七场景/Chromium property、报告哈希和 tracked worktree 状态只以当次生成的 `test/test-results/phase-one-evidence.json` 为准，不在本文硬编码，避免文档提交后把旧 SHA 冒充新证据。
 
 以上是本机候选验证，不是自建编排器的正式 Run。当前 manifest 的 `ci_run_url` 必须保持 `null`；在自建 CI/CD 实际执行、归档同一 SHA 的报告并产生可访问 Run 链接前，正式证据契约仍未完全满足。
 

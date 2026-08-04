@@ -219,15 +219,23 @@ async def decide_tool_confirmation(
     work.attempt_no += 1
     work.status = "queued"
     work.version += 1
+    source_runner = await db.get(DurableRunner, invocation.runner_id)
+    if source_runner is None or source_runner.work_item_id != work.id:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "confirmation_source_runner_unavailable"},
+        )
     runner = DurableRunner(
         id=uuid7(), work_item_id=work.id, run_id=run.id, session_id=run.session_id,
-        agent_id=work.owner_agent_id, agent_version_id=work.agent_version_id,
+        agent_id=source_runner.agent_id, agent_version_id=source_runner.agent_version_id,
         execution_epoch=work.execution_epoch, status="queued",
-        principal_snapshot={"user_id": run.user_id, "session_id": run.session_id,
-                            "entry_agent_id": run.entry_agent_id, "current_agent_id": work.owner_agent_id,
-                            "mode": run.mode, "delegation_chain": []},
-        assembly_snapshot={"agent_version_id": work.agent_version_id}, prompt_manifest={},
-        input_snapshot={"resumed_from_confirmation_id": confirmation.id},
+        principal_snapshot=dict(source_runner.principal_snapshot),
+        assembly_snapshot=dict(source_runner.assembly_snapshot),
+        prompt_manifest=dict(source_runner.prompt_manifest),
+        input_snapshot={
+            **dict(source_runner.input_snapshot),
+            "resumed_from_confirmation_id": confirmation.id,
+        },
     )
     run.lifecycle = "running"
     run.wait_reason = None

@@ -84,6 +84,10 @@ class OpenAILLM(BaseLLM):
         )
         if tools:
             kwargs["tools"] = to_openai_tools(tools, strict=self.tool_strict)
+            if params.get("tool_choice"):
+                kwargs["tool_choice"] = params["tool_choice"]
+        if params.get("response_format"):
+            kwargs["response_format"] = params["response_format"]
 
         resp = await self.client.chat.completions.create(**kwargs)
         choice = resp.choices[0]
@@ -117,6 +121,10 @@ class OpenAILLM(BaseLLM):
         )
         if tools:
             kwargs["tools"] = to_openai_tools(tools, strict=self.tool_strict)
+            if params.get("tool_choice"):
+                kwargs["tool_choice"] = params["tool_choice"]
+        if params.get("response_format"):
+            kwargs["response_format"] = params["response_format"]
 
         # OpenAI 流式工具调用是按 index 分片到达的（id/name 只在首个分片出现，
         # arguments 是需要跨多个 chunk 拼接的 JSON 字符串片段），流结束后统一解析。

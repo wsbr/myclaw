@@ -47,14 +47,14 @@ def test_browser_chat_plan_group_and_admin_surfaces(
         expect(page.get_by_role("heading", name=heading, exact=True)).to_be_visible(timeout=10_000)
 
     page.get_by_role("button", name="Agents", exact=True).click()
-    agent_name = f"Finance {assembled_world['suffix']}"
+    agent_name = f"退款审计负责人 {assembled_world['suffix']}"
     agent_card = page.locator("div.bg-card").filter(has_text=agent_name)
     expect(agent_card).to_have_count(1)
     agent_card.get_by_role("button", name="对话", exact=True).click()
     expect(page.get_by_text(agent_name, exact=True)).to_be_visible()
 
     composer = page.get_by_placeholder("输入消息；Enter 发送，Shift+Enter 换行", exact=True)
-    ui_message = "Reply briefly for UI browser acceptance; do not call any Tool."
+    ui_message = "请用一句话确认已收到第二季度退款异常复盘任务，本次只需回复确认。"
     composer.fill(ui_message)
     page.get_by_role("button", name=re.compile("发送$")).click()
     expect(page).to_have_url(re.compile(r"/agents/[0-9a-f-]{36}/chat/[0-9a-f-]{36}$"), timeout=15_000)
@@ -83,7 +83,7 @@ def test_browser_chat_plan_group_and_admin_surfaces(
 
     page.get_by_role("button", name="Plan", exact=True).click()
     page.get_by_placeholder("描述需要规划的长任务目标", exact=True).fill(
-        "UI Plan acceptance with direct text responses; do not call any Tool"
+        "制定第二季度退款异常复盘计划，分别核对退款运营口径和订单风险，最后形成管理层摘要"
     )
     page.get_by_role("button", name=re.compile("生成 Plan$")).click()
     expect(page.get_by_text("awaiting_confirmation", exact=True)).to_be_visible(
@@ -96,7 +96,7 @@ def test_browser_chat_plan_group_and_admin_surfaces(
 
     page.get_by_role("button", name="Group", exact=True).click()
     page.get_by_placeholder("输入 Group Formation 目标、后续 GroupRun 或定向补充", exact=True).fill(
-        "UI Group acceptance with direct text responses; do not call any Tool"
+        "组建退款异常联合复核组，明确审计负责人、退款运营和订单风控的职责并交叉验证结论"
     )
     page.get_by_role("button", name=re.compile("生成 Group Formation$")).click()
     expect(page.get_by_text("awaiting_confirmation", exact=True)).to_be_visible(
@@ -129,7 +129,7 @@ def test_browser_chat_plan_group_and_admin_surfaces(
         )
         submit_answer = page.get_by_role("button", name=re.compile(r"提\s*交\s*回\s*答"))
         if clarification.count() and clarification.first.is_visible():
-            clarification.first.fill("Continue with a concise direct response and do not call any Tool.")
+            clarification.first.fill("采用 2026 年第二季度口径，六月数据作为月度切片单列。")
             with page.expect_response(
                 lambda response: "/api/v1/clarifications/" in response.url
                 and response.url.endswith("/answer")

@@ -106,7 +106,11 @@ Span 可以记录：
 - 经过脱敏的输入输出摘要；
 - Artifact 和领域实体引用。
 
+Runner 诊断还必须区分 `assembled_tool_keys`、实际 `effective_tool_keys` 与 Harness 控制 Tool，并记录 Response Contract、结构化输出模式、Completion Contract、repair 次数、满足/待满足效果和 settlement mode。诊断字段用于解释执行，不能反向决定业务状态。
+
 Observability 数据允许批量、异步导出和独立保留，可能比业务状态晚出现。它不是可靠通知源；即使后期采样或导出失败，也不能影响 ExecutionEvent、Checkpoint 或 Run。
+
+UAT/生产不能只启用 debug exporter。至少一个出口必须有可验证的持久化或可查询后端、明确保留期和真实写入烟测；部署健康检查不能用“Collector 进程已启动”替代“Trace 已成功写出”。
 
 第一阶段可以 100% 采集，但不得记录平台密钥、凭证、模型私有推理或未经控制的敏感全文。模型 Token 流可以实时展示，但不逐 Token 持久化为 ExecutionEvent。
 

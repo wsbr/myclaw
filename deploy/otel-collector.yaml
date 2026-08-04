@@ -13,6 +13,13 @@ processors:
 exporters:
   debug:
     verbosity: basic
+  file:
+    path: /var/lib/myclaw/otel/uat-otel-traces.jsonl
+    format: json
+    rotation:
+      max_megabytes: 32
+      max_days: 30
+      max_backups: 10
 
 extensions:
   health_check:
@@ -24,4 +31,4 @@ service:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, batch]
-      exporters: [debug]
+      exporters: [debug, file]

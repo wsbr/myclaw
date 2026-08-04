@@ -17,7 +17,7 @@ capabilities
 enabled
 ```
 
-`credential_ref` 指向安全存储中的凭证，不能把明文凭证注入 Agent 配置或 Prompt。`default_parameters` 由平台管理员为该模型维护，包括 temperature、top_p、max_tokens 等 Provider 参数。`capabilities` 用于平台兼容性判断和展示。
+`credential_ref` 指向安全存储中的凭证，不能把明文凭证注入 Agent 配置或 Prompt。`default_parameters` 由平台管理员为该模型维护，包括 temperature、top_p、max_tokens 等 Provider 参数。`capabilities` 用于平台兼容性判断和展示，至少明确 `streaming`、`native_tool_calling`、`structured_output` 和 `usage_in_stream`；`structured_output` 只能是 `json_schema`、`json_object` 或 `none`。
 
 ## Agent 选择
 
@@ -34,6 +34,10 @@ enabled
 ## 运行与失败
 
 Runner 启动时解析模型并记录实际 Provider、模型版本标识和平台参数版本。若模型不存在、停用、凭证不可用或 Provider 调用失败，平台明确报告失败。
+
+Plan Proposal 和 Group Formation 必须根据注册能力选择 Provider 原生结构化协议，并在服务端继续执行 Schema 与图约束校验。普通 Prompt 中写“只返回 JSON”不能替代 `response_format`。Provider 兼容路径和已知限制必须显式记录；例如不支持 `tool_choice=required` 时不能谎报支持，也不能通过切换模型掩盖。
+
+传输重试只允许发生在尚未收到任何 payload、尚未提交业务副作用且仍有预算时。收到部分文本或 Tool Call 分片后不得盲目整轮重放。
 
 Runtime 不切换到默认模型，也不在请求级 fallback 到其他模型。若未来需要高可用路由，应作为 Model Registry 内部、可观察且不改变 Agent 语义的独立设计重新讨论，不能暗中实现。
 

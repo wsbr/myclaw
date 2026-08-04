@@ -101,6 +101,58 @@ async def test_stream_forwards_frozen_temperature_and_output_limit():
 
 
 @pytest.mark.asyncio
+async def test_stream_forwards_declared_structured_response_format():
+    captured = {}
+
+    class Completions:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+
+            async def chunks():
+                yield SimpleNamespace(usage=None, choices=[])
+
+            return chunks()
+
+    model = OpenAILLM("unused-test-key")
+    await model.client.close()
+    model.client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+    response_format = {"type": "json_object"}
+    assert [chunk async for chunk in model.stream(
+        [{"role": "user", "content": "return json"}], None,
+        {"model_id": "model", "response_format": response_format},
+    )] == []
+    assert captured["response_format"] == response_format
+
+
+@pytest.mark.asyncio
+async def test_stream_forwards_required_tool_choice_for_harness_envelope():
+    captured = {}
+
+    class Completions:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+
+            async def chunks():
+                yield SimpleNamespace(usage=None, choices=[])
+
+            return chunks()
+
+    model = OpenAILLM("unused-test-key")
+    await model.client.close()
+    model.client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+    tools = [{
+        "name": "finalize_response", "description": "Finalize",
+        "input_schema": {"type": "object", "properties": {}},
+    }]
+    assert [chunk async for chunk in model.stream(
+        [{"role": "user", "content": "finish"}], tools,
+        {"model_id": "model", "tool_choice": "required"},
+    )] == []
+    assert captured["tool_choice"] == "required"
+    assert captured["tools"][0]["function"]["name"] == "finalize_response"
+
+
+@pytest.mark.asyncio
 async def test_stream_retries_one_transient_failure_only_before_output(monkeypatch):
     calls = 0
 

@@ -41,13 +41,18 @@ version
 
 ## Agent 装配规则
 
-Agent 页面仅选择 Tool key，不允许 Agent 级参数覆盖。Agent 的有效 Tool 集合严格等于 `tool_keys[]` 在 Runner 启动时解析出的启用 Tool：
+Agent 页面仅选择 Tool key，不允许 Agent 级参数覆盖。必须区分装配集合和某一 Model Turn 的有效集合：
 
 ```text
-effective_tools = resolve_enabled(agent.tool_keys)
+assembled_tools = resolve(agent_version.tool_keys)
+effective_tools = assembled_tools
+                  ∩ enabled_registry_tools
+                  ∩ execution_principal_permissions
+                  ∩ current_mode_and_phase_scope
+                  ∩ frozen_plan_or_group_scope
 ```
 
-Runtime 不依据 Skill 内容、模型能力、Group 设置或历史使用自动添加 Tool。
+Runtime 不依据用户消息措辞、Skill 内容、模型文本、Group 开关或历史使用自动添加 Tool。自然语言不需要包含内部 Tool key；相同机器状态下，改写、翻译或标点变化不能改变有效权限。
 
 当显式选择的 Tool 不存在或被停用时，Runner 应明确失败或按平台定义拒绝启动，不能静默删除 Tool 后继续造成能力漂移。
 
@@ -59,6 +64,8 @@ Runtime 不依据 Skill 内容、模型能力、Group 设置或历史使用自�
 - 输入符合 Schema；
 - 平台级配置可用；
 - 调用满足该 Tool 自身的运行时约束。
+
+Harness 可以额外暴露不进入 Platform Tool Registry 的控制 Tool，例如用于提交封闭完成信封的 `finalize_response`。控制 Tool 不能访问业务系统、不能扩大 AgentVersion 权限，并且必须在 Runner 诊断中与业务 Tool 分开记录。
 
 `invoke_agent` 还必须执行 Agent 可发现范围和 Group 参与者集合校验，详见 [Agent 协作](agent-collaboration.md)。
 

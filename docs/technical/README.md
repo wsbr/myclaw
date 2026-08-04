@@ -12,6 +12,7 @@
 | [事务、一致性与并发](consistency-concurrency.md) | 原子写入、幂等、租约、fencing、sequence、Workspace 锁和竞态 |
 | [执行事件、平台审计与可见性](events-audit-visibility.md) | 两类事件边界、事件 dedupe、visibility、统一投影、脱敏与审计访问 |
 | [Runtime 详细流程](runtime-flows.md) | Chat、Plan、Group、Prompt、模型循环、等待、恢复与结算 |
+| [三模式 Agent Harness 稳定性优化方案](agent-harness-stability-plan.md) | UAT 系统性失效分析、Harness V2、模型调用稳定性、三模式迁移与发布门禁 |
 | [Context、History 与 Memory](context-history-memory.md) | 首批 Policy 接口、默认参数、摘要、投影、记忆和 Trace |
 | [Platform Tool 与 Skill](tools-skills.md) | Registry、Invocation、内置 Tool 契约、Skill 包和共享同步 |
 | [API 与 SSE](api-sse.md) | HTTP 资源、错误、幂等、分页、权限、冲突和断线续读 |

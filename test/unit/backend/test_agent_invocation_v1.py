@@ -1,6 +1,8 @@
 """Durable invoke_agent dispatch, wait, and caller resume tests."""
 
 import pytest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -14,10 +16,54 @@ from app.models.registry import PlatformTool, RegisteredModel
 from app.models.runtime_v1 import (
     AgentInvocation, DurableRunner, Run, RunnerCheckpoint, ToolInvocation, WorkItem,
 )
-from app.services.agent_invocation_service import dispatch_agent_invocation
+from app.services.agent_invocation_service import AgentInvocationRejected, dispatch_agent_invocation
 from app.workers.runtime_worker_v1 import RunnerFence, RuntimeWorker
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.mark.asyncio
+async def test_structured_group_invocation_rejects_graph_external_target():
+    """Security fixture: validate an already-structured malicious model action."""
+    caller_agent_id = uuid7()
+    external_agent_id = uuid7()
+    group_id = uuid7()
+    group_run = SimpleNamespace(id=uuid7(), group_session_id=group_id)
+    caller_node = SimpleNamespace(id=uuid7(), group_session_id=group_id)
+    external_agent = SimpleNamespace(id=external_agent_id)
+
+    async def get(model, key):
+        if model is AgentBlueprint and key == external_agent_id:
+            return external_agent
+        from app.models.group_v1 import GroupAgentNode
+        if model is GroupAgentNode and key == caller_node.id:
+            return caller_node
+        return None
+
+    db = SimpleNamespace(
+        get=AsyncMock(side_effect=get),
+        scalar=AsyncMock(side_effect=[group_run, None]),
+    )
+    run = SimpleNamespace(id=uuid7(), mode="group", user_id="user")
+    runner = SimpleNamespace(
+        id=uuid7(), agent_id=caller_agent_id, agent_version_id=uuid7(),
+        principal_snapshot={"delegation_chain": [], "group_node_id": caller_node.id},
+    )
+    tool_invocation = SimpleNamespace(business_idempotency_key="malicious-call")
+    work = SimpleNamespace(id=uuid7())
+
+    with pytest.raises(AgentInvocationRejected, match="outside the frozen Group participant set"):
+        await dispatch_agent_invocation(
+            db,
+            tool_invocation=tool_invocation,
+            caller_runner=runner,
+            caller_work=work,
+            run=run,
+            arguments={
+                "agent_id": external_agent_id,
+                "task": "attempt to cross the frozen participant boundary",
+            },
+        )
 
 
 @pytest.mark.asyncio

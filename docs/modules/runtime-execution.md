@@ -130,11 +130,15 @@ Runtime 只调用 Runner 快照中的模型和 Tool：
 4. Tool 需要确认时创建 required action 并结束 Runner；
 5. Inline Tool 返回后当前 Runner 可以继续；
 6. Durable Async Tool 受理后结束 Runner，结果到达后创建新 Runner；
-7. 直到产生语义结果或触发平台限制。
+7. 最终响应按当前模式/阶段的 Response Contract 校验；
+8. Harness 将模型声明的必要效果与持久 Tool/Agent/Clarification/Artifact 记录对账；
+9. 只有 Completion Contract 满足或触发明确失败/部分成功边界后才结算。
 
 `read_file`、`execute` 和 `invoke_agent` 都必须显式存在于 Tool 快照。
 
 所有 Tool 调用先持久化 ToolInvocation。平台只在同一 Invocation、相同参数和幂等键内重试瞬时技术失败。外部副作用结果无法确认时返回 `outcome_unknown`，不能盲目重放。
+
+模型文本不能作为副作用证据，也不能被解析成一个新的业务 Tool 调用。对外可观察效果只由 Effect Ledger 中的权威对象证明。结构或完成合同失败默认最多修复一次；已经完成的一次性效果在修复 Runner 中必须隐藏或拒绝重复执行。只有 Ledger 非空、全部必要效果已满足且没有 pending/unavailable 时，Provider 的最终普通文本才可作为兼容结算结果。
 
 访问 Session Workspace 时使用整体读写锁，详见 [Sandbox 与 Artifact](sandbox-artifact.md)。
 

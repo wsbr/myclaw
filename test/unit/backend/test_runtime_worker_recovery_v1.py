@@ -372,12 +372,17 @@ async def test_invalid_structured_proposal_gets_one_fenced_repair_attempt(monkey
 
     assert await worker._schedule_structured_proposal_retry(
         SimpleNamespace(), runner, work, run, ValueError("not JSON"),
+        invalid_output="not-json-output",
     ) is True
     replacement = persist.await_args.args[2]
-    assert runner.status == "failed" and runner.error_code == "invalid_structured_output"
+    assert runner.status == "failed" and runner.error_code == "model_structured_output_invalid"
     assert work.status == "queued" and work.execution_epoch == 2 and work.attempt_no == 2
     assert replacement.execution_epoch == 2
     assert replacement.input_snapshot["structured_retry_no"] == 1
+    context = replacement.input_snapshot["structured_retry_context"]
+    assert context["category"] == "business_validation"
+    assert context["previous_output_digest"]
+    assert "not-json-output" not in str(context)
     assert run.lifecycle == "running" and run.wait_reason is None
     assert await worker._schedule_structured_proposal_retry(
         SimpleNamespace(), replacement, work, run, ValueError("still invalid"),

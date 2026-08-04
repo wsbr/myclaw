@@ -4,8 +4,12 @@
 
 ## 一期验收
 
-- [一期真实业务 UAT 报告（2026-08-03）](phase-one-uat-2026-08-03.md)
-- [证据索引](evidence/index.md)
+- [首次测试基线：一期真实业务 UAT 报告（2026-08-03）](phase-one-uat-2026-08-03.md)
+- [修复后持久 UAT 复验报告（2026-08-03）](phase-one-uat-revalidation-2026-08-03.md)
+- [Harness 修复实现与候选验收报告（2026-08-03）](phase-one-harness-remediation-2026-08-03.md)
+- [首次测试基线证据索引](evidence/index.md)
+- [修复后持久 UAT 复验证据索引](evidence/uat-revalidation-2026-08-03/index.md)
+- [Harness 修复候选证据索引](evidence/harness-remediation-2026-08-03/index.md)
 - [零售证据分析 Skill 源文件](assets/retail-evidence-analysis/SKILL.md)
 
 ## 目录约定
@@ -16,4 +20,4 @@
 
 ## 现场状态
 
-本次验收按要求保留隔离测试栈、Agent、会话、Artifact 和测试数据。缺陷修复复验期间重建了应用容器，但没有清理 MySQL 数据卷或删除验收对象。复核完成后应轮换本次使用的模型密钥。
+首次测试基线使用 `8081/8001` 隔离栈；修复后复验使用 `8181/8101` 持久 UAT 栈。Harness 修复候选另在隔离全栈中完成 Mock 与真实模型门禁，并将同一工作树重建到持久 UAT 做数据、配置和观测复核。历史现场、Agent、会话、Plan、Group、Artifact 和测试数据均保留，没有清理数据卷或删除验收对象。复核完成后应轮换本次使用的模型密钥。

@@ -16,7 +16,11 @@ from sqlalchemy import or_, select
 from sqlalchemy.exc import OperationalError
 
 from app.core.model_hub.registry import ModelHub
-from app.core.model_hub.base import LLMResponse, TokenUsage
+from app.core.model_hub.base import LLMResponse, TokenUsage, ToolCall
+from app.core.model_hub.response_contracts import (
+    CONVERSATION_COMPLETION_SCHEMA,
+    structured_response_format,
+)
 from app.core.telemetry import shutdown_telemetry
 from app.core.tool_registry.base import RuntimeContext
 from app.core.tool_registry.registry import ToolRegistry
@@ -67,6 +71,114 @@ from app.services.context_service import assemble_standard_context
 
 
 logger = logging.getLogger(__name__)
+
+
+COMPLETION_EFFECT_TOOL_KEYS = frozenset({
+    "execute",
+    "invoke_agent",
+    "publish_artifact",
+    "read_file",
+    "request_clarification",
+    "search_group_history",
+    "write_file",
+})
+COMPLETION_REASON_CODES = frozenset({
+    "no_observable_effect",
+    "clarification_required",
+    "delegated_review_required",
+    "group_evidence_required",
+    "sandbox_execution_required",
+    "file_delivery_required",
+    "existing_file_required",
+    "multiple_effects_required",
+})
+COMPLETION_FINALIZE_TOOL_KEY = "finalize_response"
+NON_REPEATABLE_COMPLETION_EFFECT_KEYS = frozenset({
+    "execute",
+    "publish_artifact",
+    "request_clarification",
+    "search_group_history",
+    "write_file",
+})
+COMPLETION_FINALIZE_TOOL = {
+    "name": COMPLETION_FINALIZE_TOOL_KEY,
+    "description": (
+        "Submit the final user-facing response only when no required business Tool effect remains. "
+        "Declare every observable Tool effect explicitly required by the whole current request, "
+        "including effects already completed; exclude optional or explicitly negated effects."
+    ),
+    "input_schema": CONVERSATION_COMPLETION_SCHEMA,
+}
+
+
+class HarnessRuntimeError(RuntimeError):
+    """Runtime failure carrying the stable cross-layer error code."""
+
+    def __init__(self, message: str, *, error_code: str):
+        super().__init__(message)
+        self.error_code = error_code
+
+
+def _structured_validation_context(error: Exception, output: str) -> dict:
+    """Build a bounded, non-sensitive repair description for a structured result."""
+    issues: list[dict] = []
+    if isinstance(error, json.JSONDecodeError):
+        category = "json_syntax"
+        issues.append({
+            "path": "/",
+            "code": "invalid_json",
+            "line": error.lineno,
+            "column": error.colno,
+        })
+    elif isinstance(error, KeyError):
+        category = "missing_field"
+        issues.append({"path": f"/{str(error.args[0]).strip(chr(39))}", "code": "required"})
+    elif callable(getattr(error, "errors", None)):
+        category = "schema_validation"
+        for item in error.errors()[:12]:
+            path = "/" + "/".join(str(part) for part in item.get("loc", ()))
+            issues.append({"path": path, "code": str(item.get("type") or "invalid")})
+    else:
+        category = "business_validation"
+        issues.append({"path": "/", "code": type(error).__name__})
+    return {
+        "error_code": "model_structured_output_invalid",
+        "category": category,
+        "errors": issues,
+        "previous_output_digest": hashlib.sha256(output.encode()).hexdigest(),
+    }
+
+
+def _parse_completion_turn(output: str) -> dict:
+    """Validate a final ModelTurn independently of provider-side JSON Schema support."""
+    value = output.strip()
+    if value.startswith("```"):
+        value = value.split("\n", 1)[1].rsplit("```", 1)[0]
+    payload = json.loads(value)
+    if not isinstance(payload, dict) or set(payload) != {
+        "message", "required_tool_keys", "reason_code",
+    }:
+        raise ValueError(
+            "completion turn must contain only message, required_tool_keys, and reason_code"
+        )
+    if not isinstance(payload["message"], str):
+        raise ValueError("completion message must be a string")
+    keys = payload["required_tool_keys"]
+    if not isinstance(keys, list) or any(not isinstance(key, str) for key in keys):
+        raise ValueError("required_tool_keys must be an array of strings")
+    if len(keys) != len(set(keys)):
+        raise ValueError("required_tool_keys must be unique")
+    unknown = set(keys) - COMPLETION_EFFECT_TOOL_KEYS
+    if unknown:
+        raise ValueError(f"unknown completion effect keys: {sorted(unknown)}")
+    reason_code = payload["reason_code"]
+    if reason_code not in COMPLETION_REASON_CODES:
+        raise ValueError("unknown completion intent reason_code")
+    return {
+        "message": payload["message"],
+        "required_tool_keys": keys,
+        "reason_code": reason_code,
+    }
 
 
 def _retryable_mysql_transaction_error(error: Exception) -> bool:
@@ -553,8 +665,129 @@ class RuntimeWorker:
                     session_factory=AsyncSessionLocal,
                 )
                 if not response.tool_calls:
-                    await self._settle_success(fence, response.content)
+                    declared_clarification = self._declared_clarification_from_content(
+                        response.content,
+                    )
+                    if (
+                        declared_clarification is not None
+                        and await self._business_tool_was_exposed(
+                            fence, "request_clarification",
+                        )
+                    ):
+                        wait_reason = await self._accept_tool_calls(
+                            fence, [declared_clarification],
+                        )
+                        if wait_reason != "clarification":
+                            raise HarnessRuntimeError(
+                                "declared clarification did not enter the durable user-wait state",
+                                error_code="model_completion_contract_unmet",
+                            )
+                        break
+                    final_content, completion_retry = await self._validate_completion_turn(
+                        fence, response_content=response.content,
+                    )
+                    if completion_retry:
+                        now = utcnow()
+                        await record_runner_span(
+                            fence.runner_id, name="completion_validation",
+                            span_kind="model_contract", started_at=now, ended_at=now,
+                            status="error", error_code="model_completion_contract_unmet",
+                            attributes={"retry_scheduled": True},
+                            session_factory=AsyncSessionLocal,
+                        )
+                        continue
+                    settlement = await self._settle_success(fence, final_content)
+                    if settlement == "structured_retry":
+                        execution_failed = True
+                        now = utcnow()
+                        await record_runner_span(
+                            fence.runner_id, name="response_validation", span_kind="model_contract",
+                            started_at=now, ended_at=now, status="error",
+                            error_code="model_structured_output_invalid",
+                            attributes={"retry_scheduled": True},
+                            session_factory=AsyncSessionLocal,
+                        )
                     break
+                finalize_calls = [
+                    call for call in response.tool_calls
+                    if call.name == COMPLETION_FINALIZE_TOOL_KEY
+                ]
+                if finalize_calls:
+                    if len(response.tool_calls) != 1:
+                        raise HarnessRuntimeError(
+                            "finalize_response must be the only call in a model step",
+                            error_code="model_completion_contract_invalid",
+                        )
+                    if not await self._harness_tool_was_exposed(
+                        fence, COMPLETION_FINALIZE_TOOL_KEY,
+                    ):
+                        raise HarnessRuntimeError(
+                            "the model called a Harness control Tool that was not exposed in this turn",
+                            error_code="model_harness_tool_not_exposed",
+                        )
+                    declared_clarification = self._declared_clarification_call(
+                        finalize_calls[0],
+                    )
+                    if (
+                        declared_clarification is not None
+                        and await self._business_tool_was_exposed(
+                            fence, "request_clarification",
+                        )
+                    ):
+                        wait_reason = await self._accept_tool_calls(
+                            fence, [declared_clarification],
+                        )
+                        if wait_reason != "clarification":
+                            raise HarnessRuntimeError(
+                                "declared clarification did not enter the durable user-wait state",
+                                error_code="model_completion_contract_unmet",
+                            )
+                        break
+                    final_content, completion_retry = await self._validate_completion_turn(
+                        fence,
+                        response_content=json.dumps(
+                            finalize_calls[0].arguments,
+                            ensure_ascii=False, separators=(",", ":"),
+                        ),
+                    )
+                    if completion_retry:
+                        now = utcnow()
+                        await record_runner_span(
+                            fence.runner_id, name="completion_validation",
+                            span_kind="model_contract", started_at=now, ended_at=now,
+                            status="error", error_code="model_completion_contract_unmet",
+                            attributes={"retry_scheduled": True},
+                            session_factory=AsyncSessionLocal,
+                        )
+                        continue
+                    await self._publish_live_model_delta(fence, final_content)
+                    await self._settle_success(fence, final_content)
+                    break
+                repeated_effects = await self._repeated_satisfied_effect_tool_keys(
+                    fence, response.tool_calls,
+                )
+                if repeated_effects:
+                    _, completion_retry = await self._validate_completion_turn(
+                        fence,
+                        response_content=json.dumps(
+                            {"rejected_repeated_effect_tool_keys": repeated_effects},
+                            ensure_ascii=False, separators=(",", ":"),
+                        ),
+                        rejection_code="model_completion_effect_repeated",
+                    )
+                    if completion_retry:
+                        now = utcnow()
+                        await record_runner_span(
+                            fence.runner_id, name="completion_validation",
+                            span_kind="model_contract", started_at=now, ended_at=now,
+                            status="error", error_code="model_completion_effect_repeated",
+                            attributes={
+                                "retry_scheduled": True,
+                                "repeated_tool_keys": repeated_effects,
+                            },
+                            session_factory=AsyncSessionLocal,
+                        )
+                        continue
                 wait_reason = await self._accept_tool_calls(fence, response.tool_calls)
                 if wait_reason == "tool_confirmation":
                     await self._settle_waiting_for_confirmation(fence)
@@ -567,11 +800,12 @@ class RuntimeWorker:
                 raise RuntimeError("maximum Tool rounds exceeded")
         except Exception as error:
             execution_failed = True
+            error_code = getattr(error, "error_code", "runner_execution_failed")
             try:
                 await record_runner_span(
                     fence.runner_id, name="runner_error", span_kind="runtime",
                     started_at=execution_started_at, ended_at=utcnow(), status="error",
-                    error_code="runner_execution_failed", session_factory=AsyncSessionLocal,
+                    error_code=error_code, session_factory=AsyncSessionLocal,
                 )
             except Exception:
                 logger.exception("failed to record runner error span", extra={"runner_id": fence.runner_id})
@@ -619,6 +853,370 @@ class RuntimeWorker:
             except asyncio.TimeoutError:
                 if not await self.heartbeat(fence):
                     return
+
+    async def _publish_live_model_delta(self, fence: RunnerFence, content: str) -> None:
+        """Publish a finalized envelope message to the existing live SSE channel."""
+        redis_client = None
+        try:
+            import redis.asyncio as aioredis
+            redis_client = aioredis.from_url(settings.redis_url, decode_responses=True)
+            await redis_client.publish(
+                f"myclaw:session:{fence.session_id}:live",
+                json.dumps({
+                    "event_type": "model.delta",
+                    "session_id": fence.session_id,
+                    "run_id": fence.run_id,
+                    "runner_id": fence.runner_id,
+                    "delta": content,
+                }, ensure_ascii=False, separators=(",", ":")),
+            )
+        except Exception:
+            logger.warning(
+                "failed to publish finalized model delta",
+                extra={"runner_id": fence.runner_id},
+            )
+        finally:
+            if redis_client is not None:
+                await redis_client.aclose()
+
+    async def _harness_tool_was_exposed(self, fence: RunnerFence, tool_key: str) -> bool:
+        async with AsyncSessionLocal() as db:
+            runner = await db.get(DurableRunner, fence.runner_id)
+            if (
+                runner is None
+                or runner.status != "running"
+                or runner.execution_epoch != fence.execution_epoch
+                or runner.lease_token != fence.lease_token
+            ):
+                return False
+            capabilities = (runner.prompt_manifest or {}).get("capabilities") or {}
+            return tool_key in set(capabilities.get("harness_tool_keys") or [])
+
+    async def _business_tool_was_exposed(self, fence: RunnerFence, tool_key: str) -> bool:
+        async with AsyncSessionLocal() as db:
+            runner = await db.get(DurableRunner, fence.runner_id)
+            if (
+                runner is None
+                or runner.status != "running"
+                or runner.execution_epoch != fence.execution_epoch
+                or runner.lease_token != fence.lease_token
+            ):
+                return False
+            capabilities = (runner.prompt_manifest or {}).get("capabilities") or {}
+            return tool_key in set(capabilities.get("effective_tool_keys") or [])
+
+    @staticmethod
+    def _completion_contract_task(run: Run, runner: DurableRunner) -> dict | None:
+        """Return a top-level business request eligible for semantic effect planning.
+
+        Eligibility is derived only from durable execution topology.  Natural
+        language is model input here, never an authorization decision.
+        """
+        snapshot = runner.input_snapshot or {}
+        if run.execution_kind != "normal":
+            return None
+        if (
+            snapshot.get("plan_settlement")
+            or snapshot.get("group_settlement")
+            or snapshot.get("plan_id")
+            or snapshot.get("plan_coordination_for_node_id")
+            or snapshot.get("agent_invocation_id")
+            or runner.principal_snapshot.get("delegation_chain")
+        ):
+            return None
+        if run.mode == "chat" and snapshot.get("content"):
+            return {
+                "goal": str(snapshot["content"]),
+                "acceptance_criteria": "Respond to the user request",
+            }
+        if (
+            run.mode == "group"
+            and snapshot.get("group_run_id")
+            and snapshot.get("goal")
+            and snapshot.get("acceptance_criteria") == "Respond to the user request"
+        ):
+            return {
+                "goal": str(snapshot["goal"]),
+                "acceptance_criteria": str(snapshot["acceptance_criteria"]),
+            }
+        return None
+
+    async def _completion_effect_state(
+        self, db, runner: DurableRunner, *, contract_override: dict | None = None,
+    ) -> dict:
+        contract = dict(
+            contract_override
+            if contract_override is not None
+            else (runner.input_snapshot or {}).get("completion_contract") or {}
+        )
+        required = list(contract.get("required_tool_keys") or [])
+        succeeded = set(await db.scalars(select(ToolInvocation.tool_key).where(
+            ToolInvocation.work_item_id == runner.work_item_id,
+            ToolInvocation.status == "succeeded",
+        )))
+        if "request_clarification" in required:
+            clarification = await db.scalar(select(Clarification.id).where(
+                Clarification.work_item_id == runner.work_item_id,
+                Clarification.status.in_(("open", "answered")),
+            ).limit(1))
+            if clarification is not None:
+                succeeded.add("request_clarification")
+        satisfied = [key for key in required if key in succeeded]
+        pending = [key for key in required if key not in succeeded]
+        initially_available = set(contract.get("available_tool_keys") or [])
+        unavailable = [key for key in pending if key not in initially_available]
+        return {
+            "required_tool_keys": required,
+            "satisfied_tool_keys": satisfied,
+            "pending_tool_keys": pending,
+            "unavailable_tool_keys": unavailable,
+        }
+
+    @staticmethod
+    def _completion_manifest(contract: dict, state: dict) -> dict:
+        return {
+            "key": contract.get("key"),
+            "status": contract.get("status"),
+            "source": contract.get("source"),
+            "reason_code": contract.get("reason_code"),
+            "settlement_mode": contract.get("settlement_mode"),
+            **state,
+            "repair_no": int(contract.get("repair_no") or 0),
+        }
+
+    async def _validate_completion_turn(
+        self, fence: RunnerFence, *, response_content: str,
+        rejection_code: str | None = None,
+    ) -> tuple[str, bool]:
+        """Validate the final ModelTurn, returning (user_message, retry_scheduled)."""
+        async with AsyncSessionLocal.begin() as db:
+            await db.scalar(select(UserSession).where(
+                UserSession.id == fence.session_id
+            ).with_for_update())
+            run = await db.scalar(select(Run).where(Run.id == fence.run_id).with_for_update())
+            work = await db.scalar(select(WorkItem).where(
+                WorkItem.id == fence.work_item_id
+            ).with_for_update())
+            runner = await db.scalar(select(DurableRunner).where(
+                DurableRunner.id == fence.runner_id,
+                DurableRunner.status == "running",
+                DurableRunner.execution_epoch == fence.execution_epoch,
+                DurableRunner.lease_token == fence.lease_token,
+            ).with_for_update())
+            if runner is None or work.active_runner_id != runner.id:
+                raise RuntimeError("runner fencing conflict before completion validation")
+            contract = dict((runner.input_snapshot or {}).get("completion_contract") or {})
+            if contract.get("status") != "enforced":
+                return response_content, False
+            validation_error: Exception | None = None
+            if rejection_code is not None:
+                validation_error = ValueError(rejection_code)
+                turn = None
+            else:
+                try:
+                    turn = _parse_completion_turn(response_content)
+                    required = list(contract.get("required_tool_keys") or [])
+                    for key in turn["required_tool_keys"]:
+                        if key not in required:
+                            required.append(key)
+                    contract.update({
+                        "required_tool_keys": required,
+                        "reason_code": turn["reason_code"],
+                    })
+                except Exception as error:
+                    validation_error = error
+                    turn = None
+            state = await self._completion_effect_state(
+                db, runner, contract_override=contract,
+            )
+            if turn is not None and not state["pending_tool_keys"]:
+                runner.input_snapshot = {
+                    **dict(runner.input_snapshot or {}),
+                    "completion_contract": dict(contract),
+                }
+                manifest = dict(runner.prompt_manifest or {})
+                manifest["completion_contract"] = self._completion_manifest(contract, state)
+                runner.prompt_manifest = manifest
+                return turn["message"], False
+            if (
+                turn is None
+                and rejection_code is None
+                and self._plain_completion_after_satisfied_effects_is_safe(
+                    contract, state, response_content,
+                )
+            ):
+                contract["settlement_mode"] = "provider_plain_text_after_satisfied_effects"
+                runner.input_snapshot = {
+                    **dict(runner.input_snapshot or {}),
+                    "completion_contract": dict(contract),
+                }
+                manifest = dict(runner.prompt_manifest or {})
+                manifest["completion_contract"] = self._completion_manifest(contract, state)
+                runner.prompt_manifest = manifest
+                await ExecutionEventWriter(db).append(
+                    session_id=run.session_id, run_id=run.id,
+                    event_type="model.completion_text_fallback_accepted",
+                    event_dedupe_key=f"runner:{runner.id}:completion_text_fallback",
+                    actor_type="service", actor_id=self.worker_id, entity_type="runner",
+                    entity_id=runner.id, entity_version=runner.version, visibility="private",
+                    private_owner=("runner", runner.id),
+                    summary="Provider plain-text completion accepted after all effects settled",
+                    payload={
+                        "required_tool_keys": state["required_tool_keys"],
+                        "response_digest": hashlib.sha256(response_content.encode()).hexdigest(),
+                    }, correlation_id=run.id,
+                )
+                return response_content.strip(), False
+            if state["unavailable_tool_keys"]:
+                raise HarnessRuntimeError(
+                    "the business request requires a capability absent from the fixed Agent assembly: "
+                    + ", ".join(state["unavailable_tool_keys"]),
+                    error_code="model_required_capability_unavailable",
+                )
+            repair_no = int(contract.get("repair_no") or 0)
+            if repair_no >= 1:
+                if validation_error is not None:
+                    raise HarnessRuntimeError(
+                        "the final model turn violated the structured conversation contract after bounded repair",
+                        error_code=rejection_code or "model_completion_contract_invalid",
+                    )
+                raise HarnessRuntimeError(
+                    "the model returned a final answer without completing required observable effects: "
+                    + ", ".join(state["pending_tool_keys"]),
+                    error_code="model_completion_contract_unmet",
+                )
+            contract.update({
+                "repair_no": repair_no + 1,
+                "last_pending_tool_keys": state["pending_tool_keys"],
+                "rejected_response_digest": hashlib.sha256(response_content.encode()).hexdigest(),
+                "validation_error_code": (
+                    rejection_code
+                    or (type(validation_error).__name__ if validation_error is not None else None)
+                ),
+            })
+            runner.input_snapshot = {
+                **dict(runner.input_snapshot or {}),
+                "completion_contract": dict(contract),
+            }
+            manifest = dict(runner.prompt_manifest or {})
+            manifest["completion_contract"] = self._completion_manifest(contract, state)
+            runner.prompt_manifest = manifest
+            await ExecutionEventWriter(db).append(
+                session_id=run.session_id, run_id=run.id,
+                event_type="model.completion_repair_scheduled",
+                event_dedupe_key=f"runner:{runner.id}:completion_repair:{repair_no + 1}",
+                actor_type="service", actor_id=self.worker_id, entity_type="runner",
+                entity_id=runner.id, entity_version=runner.version, visibility="private",
+                private_owner=("runner", runner.id), summary="Completion contract repair scheduled",
+                payload={
+                    "repair_no": repair_no + 1,
+                    "pending_tool_keys": state["pending_tool_keys"],
+                    "response_digest": contract["rejected_response_digest"],
+                    "validation_error_code": contract["validation_error_code"],
+                }, correlation_id=run.id,
+            )
+            return response_content, True
+
+    @staticmethod
+    def _plain_completion_after_satisfied_effects_is_safe(
+        contract: dict, state: dict, response_content: str,
+    ) -> bool:
+        """Allow provider text only after a non-empty durable effect ledger settles.
+
+        A write without a published Artifact is deliberately non-terminal.  This
+        fallback never invents an effect and never applies to a text-only turn.
+        """
+        required = set(state.get("required_tool_keys") or [])
+        satisfied = set(state.get("satisfied_tool_keys") or [])
+        if (
+            contract.get("status") != "enforced"
+            or not response_content.strip()
+            or not required
+            or bool(state.get("pending_tool_keys"))
+            or bool(state.get("unavailable_tool_keys"))
+            or not required <= satisfied
+        ):
+            return False
+        if "write_file" in required and "publish_artifact" not in satisfied:
+            return False
+        return True
+
+    @staticmethod
+    def _declared_clarification_call(finalize_call: ToolCall) -> ToolCall | None:
+        """Materialize the one safe control effect from a strict declaration.
+
+        A clarification declaration already contains the exact user-facing
+        question and creates only a durable user wait.  External execution,
+        file mutation and Agent delegation always require their native business
+        Tool calls and are never synthesized by the Harness.
+        """
+        try:
+            turn = _parse_completion_turn(json.dumps(
+                finalize_call.arguments, ensure_ascii=False, separators=(",", ":"),
+            ))
+        except ValueError:
+            return None
+        if turn["required_tool_keys"] != ["request_clarification"]:
+            return None
+        digest = hashlib.sha256(
+            f"{finalize_call.id}:{turn['message']}".encode()
+        ).hexdigest()[:24]
+        return ToolCall(
+            id=f"harness_clarification_{digest}",
+            name="request_clarification",
+            arguments={"question": turn["message"]},
+        )
+
+    @staticmethod
+    def _declared_clarification_from_content(response_content: str) -> ToolCall | None:
+        try:
+            turn = _parse_completion_turn(response_content)
+        except ValueError:
+            return None
+        digest = hashlib.sha256(response_content.encode()).hexdigest()[:24]
+        return RuntimeWorker._declared_clarification_call(ToolCall(
+            id=f"plain_completion_{digest}",
+            name=COMPLETION_FINALIZE_TOOL_KEY,
+            arguments=turn,
+        ))
+
+    @staticmethod
+    def _classify_repeated_satisfied_effect_tool_keys(
+        prompt_manifest: dict, tool_calls,
+    ) -> list[str]:
+        """Return only calls that would repeat a completed one-shot effect.
+
+        A hallucinated unknown/unauthorized Tool is never repaired here; it is
+        still rejected by the normal capability policy.  This path exists only
+        to convert an already-proven effect into one bounded finalization repair
+        without executing the side effect twice.
+        """
+        completion = (prompt_manifest or {}).get("completion_contract") or {}
+        capabilities = (prompt_manifest or {}).get("capabilities") or {}
+        if completion.get("status") != "enforced" or completion.get("pending_tool_keys"):
+            return []
+        names = {call.name for call in tool_calls}
+        satisfied = set(completion.get("satisfied_tool_keys") or [])
+        exposed = set(capabilities.get("effective_tool_keys") or [])
+        if (
+            names
+            and names <= NON_REPEATABLE_COMPLETION_EFFECT_KEYS
+            and names <= satisfied
+            and names.isdisjoint(exposed)
+        ):
+            return sorted(names)
+        return []
+
+    async def _repeated_satisfied_effect_tool_keys(
+        self, fence: RunnerFence, tool_calls,
+    ) -> list[str]:
+        async with AsyncSessionLocal() as db:
+            runner = await db.get(DurableRunner, fence.runner_id)
+            if runner is None:
+                return []
+            return self._classify_repeated_satisfied_effect_tool_keys(
+                dict(runner.prompt_manifest or {}), tool_calls,
+            )
 
     async def recover_one_expired_runner(self) -> bool:
         """Fence a lost worker and enqueue a new epoch from its safe checkpoint."""
@@ -763,6 +1361,7 @@ class RuntimeWorker:
                 AgentVersionTool.agent_version_id == version.id
             ).order_by(AgentVersionTool.sort_order)))
             tools = []
+            assembled_tool_keys: list[str] = []
             if tool_ids:
                 registered = list(await db.scalars(select(PlatformTool).where(
                     PlatformTool.id.in_(tool_ids), PlatformTool.enabled.is_(True)
@@ -770,14 +1369,12 @@ class RuntimeWorker:
                 by_id = {tool.id: tool for tool in registered}
                 if len(by_id) != len(tool_ids):
                     raise RuntimeError("an assembled Tool is unavailable")
+                assembled_tool_keys = [by_id[tool_id].tool_key for tool_id in tool_ids]
                 tools = [{
                     "name": by_id[tool_id].tool_key,
                     "description": by_id[tool_id].description,
                     "input_schema": by_id[tool_id].input_schema,
                 } for tool_id in tool_ids]
-                if (runner.principal_snapshot.get("delegation_chain")
-                        and runner.principal_snapshot.get("mode") in {"chat", "plan"}):
-                    tools = [tool for tool in tools if tool["name"] != "invoke_agent"]
                 existing_tool_snapshots = set(await db.scalars(select(RunnerToolSnapshot.platform_tool_id).where(
                     RunnerToolSnapshot.runner_id == runner.id
                 )))
@@ -789,30 +1386,40 @@ class RuntimeWorker:
                             implementation_version=tool.implementation_version,
                             config_version=tool.config_version, sort_order=order,
                         ))
-            can_request_clarification = self._can_request_clarification(run, runner)
-            if can_request_clarification:
+            has_answered_clarification = False
+            if self._can_request_clarification(run, runner):
                 answered_clarification_id = await db.scalar(select(Clarification.id).where(
                     Clarification.work_item_id == runner.work_item_id,
                     Clarification.status == "answered",
                 ).limit(1))
-                can_request_clarification = self._can_request_clarification(
-                    run, runner, has_answered=answered_clarification_id is not None,
-                )
-            if can_request_clarification:
-                clarification_tool = await db.scalar(select(PlatformTool).where(
-                    PlatformTool.tool_key == "request_clarification",
-                    PlatformTool.enabled.is_(True),
-                ))
-                if clarification_tool is not None:
-                    tools.append({
-                        "name": clarification_tool.tool_key,
-                        "description": clarification_tool.description,
-                        "input_schema": clarification_tool.input_schema,
-                    })
+                has_answered_clarification = answered_clarification_id is not None
             tools = [
                 tool for tool in tools
-                if await self._runtime_tool_is_authorized(db, run, runner, tool["name"])
+                if await self._runtime_tool_is_authorized(
+                    db, run, runner, tool["name"],
+                    has_answered_clarification=has_answered_clarification,
+                )
             ]
+            completion_contract = dict(
+                (runner.input_snapshot or {}).get("completion_contract") or {}
+            )
+            if not completion_contract and self._completion_contract_task(run, runner) is not None:
+                completion_capability = bool(
+                    (model.capabilities or {}).get("native_tool_calling")
+                )
+                completion_contract = {
+                    "key": "effect.completion.v1",
+                    "status": "enforced" if completion_capability else "unsupported",
+                    "source": "model_turn_envelope",
+                    "required_tool_keys": [],
+                    "available_tool_keys": [tool["name"] for tool in tools],
+                    "reason_code": None,
+                    "repair_no": 0,
+                }
+                runner.input_snapshot = {
+                    **dict(runner.input_snapshot or {}),
+                    "completion_contract": completion_contract,
+                }
             skill_catalog = []
             skill_rows = list((await db.execute(
                 select(AgentVersionSkill, RegisteredSkill)
@@ -889,6 +1496,36 @@ class RuntimeWorker:
             messages = history_messages + messages
             params = dict(model.default_parameters or {})
             params["model_id"] = model.model_name
+            response_contract = "conversation.v1"
+            structured_output_mode = None
+            if run.execution_kind == "proposal_generation":
+                response_contract = (
+                    "structured.plan_proposal.v1" if run.mode == "plan"
+                    else "structured.group_formation.v1"
+                )
+                structured_output_mode = str(
+                    (model.capabilities or {}).get("structured_output") or "none"
+                )
+                if structured_output_mode == "none":
+                    raise HarnessRuntimeError(
+                        "the registered model does not declare a structured output capability",
+                        error_code="model_structured_output_unsupported",
+                    )
+                try:
+                    params["response_format"] = structured_response_format(
+                        response_contract, structured_output_mode,
+                    )
+                except ValueError as error:
+                    raise HarnessRuntimeError(
+                        str(error), error_code="model_structured_output_unsupported",
+                    ) from None
+                # Structured contracts optimize for deterministic conformance;
+                # business creativity belongs in the proposal content, not its wire shape.
+                params["temperature"] = min(float(params.get("temperature", 0.2)), 0.2)
+            elif completion_contract.get("status") == "enforced":
+                response_contract = "tool_envelope.conversation_completion.v1"
+                structured_output_mode = "native_tool_calling"
+                params["temperature"] = min(float(params.get("temperature", 0.2)), 0.2)
             params["system"] = (
                 "You are a MyClaw Agent. Follow the fixed Agent instructions and only use explicitly provided tools.\n\n"
                 f"Agent: {version.name}\nDescription: {version.description}\nInstructions:\n{version.instructions}"
@@ -1042,12 +1679,79 @@ class RuntimeWorker:
                         callable_catalog, ensure_ascii=False, separators=(",", ":")
                     )
             if run.execution_kind == "proposal_generation" and runner.input_snapshot.get("structured_retry_no"):
+                repair_context = runner.input_snapshot.get("structured_retry_context") or {
+                    "error_code": "model_structured_output_invalid",
+                    "errors": [{"path": "/", "code": "invalid"}],
+                }
                 params["system"] += (
                     "\n\nThe previous proposal was rejected by the strict JSON schema validator. "
-                    "This is the single bounded repair attempt. Return exactly one non-empty JSON object: "
-                    "the first character must be { and the final character must be }. Do not include prose, "
-                    "analysis, comments, or markdown fences."
+                    "This is the single bounded repair attempt. Correct every machine-reported issue below "
+                    "while preserving the requested business goal. Return exactly one non-empty JSON object "
+                    "and no prose, analysis, comments, or markdown fences. Repair context:\n"
+                    + json.dumps(repair_context, ensure_ascii=False, separators=(",", ":"))
                 )
+            completion_state = await self._completion_effect_state(db, runner)
+            if completion_contract.get("status") == "enforced":
+                completed_once = (
+                    set(completion_state["satisfied_tool_keys"])
+                    & NON_REPEATABLE_COMPLETION_EFFECT_KEYS
+                )
+                tools = [tool for tool in tools if tool["name"] not in completed_once]
+                if (
+                    int(completion_contract.get("repair_no") or 0) > 0
+                    and completion_state["pending_tool_keys"]
+                ):
+                    pending = set(completion_state["pending_tool_keys"])
+                    tools = [tool for tool in tools if tool["name"] in pending]
+                elif int(completion_contract.get("repair_no") or 0) > 0:
+                    tools = [dict(COMPLETION_FINALIZE_TOOL)]
+                else:
+                    tools = [*tools, dict(COMPLETION_FINALIZE_TOOL)]
+                params["system"] += (
+                    "\n\nMachine-owned Completion Contract (authorization still belongs to the Runtime):\n"
+                    + json.dumps({
+                        "contract_key": completion_contract.get("key"),
+                        "required_effects": completion_state["required_tool_keys"],
+                        "satisfied_effects": completion_state["satisfied_tool_keys"],
+                        "pending_effects": completion_state["pending_tool_keys"],
+                        "repair_no": completion_contract.get("repair_no", 0),
+                    }, ensure_ascii=False, separators=(",", ":"))
+                    + "\nBefore producing a final response, identify every observable effect explicitly "
+                    "required by the current business request, regardless of language or wording. Never "
+                    "include an optional or explicitly negated effect. Semantic mappings: request_clarification "
+                    "means ask or confirm an ambiguity before continuing; invoke_agent means another named or "
+                    "role-based Agent must perform independent work; search_group_history means retrieve "
+                    "confirmed Group discussion evidence; execute means actually run code or a command; "
+                    "write_file means create or change a file; publish_artifact means make a file delivered or "
+                    "downloadable; read_file means actually read an existing file. If any required effect is "
+                    "not yet satisfied, use the corresponding exposed Tool now and do not return a final answer. "
+                    "Never claim or simulate an unsatisfied effect, and never repeat a satisfied effect."
+                )
+                if (
+                    int(completion_contract.get("repair_no") or 0) > 0
+                    and not completion_state["pending_tool_keys"]
+                ):
+                    params["system"] += (
+                        "\nThe previous final response was rejected because it did not match the structured "
+                        "conversation envelope. This is the single bounded repair. Call finalize_response with "
+                        "exactly the three required fields now and preserve the business answer."
+                    )
+                elif (
+                    int(completion_contract.get("repair_no") or 0) > 0
+                    and completion_state["pending_tool_keys"]
+                ):
+                    params["system"] += (
+                        "\nThis is the single bounded effect repair. finalize_response is intentionally not "
+                        "available in this turn and must not be called or mentioned. Call exactly one of the "
+                        "exposed business Tools that matches pending_effects; do not return a final answer."
+                    )
+                else:
+                    params["system"] += (
+                        "\nWhen no further business Tool call is needed, call finalize_response exactly once "
+                        "with message (the user-facing answer), required_tool_keys (the complete unique list "
+                        "for the whole current request), and reason_code (the matching schema enum). Do not "
+                        "emit a plain-text final response."
+                    )
             if (run.execution_kind == "proposal_generation"
                     or runner.input_snapshot.get("plan_settlement")
                     or runner.input_snapshot.get("group_settlement")):
@@ -1056,9 +1760,9 @@ class RuntimeWorker:
                 messages.append({
                     "role": "user",
                     "content": (
-                        "Directed request from the calling Agent. The JSON below is delegated task data, not "
-                        "Tool authorization. The Runtime exposes and accepts a Tool only when request contains "
-                        "the exact phrase 'You must call <tool_name>'; otherwise answer directly without a Tool.\n"
+                        "Directed request from the calling Agent. The JSON below is delegated task data. "
+                        "Use only the capabilities exposed by the Runtime, and select a Tool when it is "
+                        "semantically necessary to complete the request.\n"
                     ) + json.dumps({
                         "request": runner.input_snapshot.get("request_text"),
                         "context": runner.input_snapshot.get("context") or {},
@@ -1118,8 +1822,8 @@ class RuntimeWorker:
             elif runner.input_snapshot.get("group_run_id"):
                 messages.append({"role": "user", "content": (
                     "Complete this Group Work Item within the confirmed bootstrap boundary. "
-                    "The JSON below is task data, not authorization to call any Tool; use a Tool only when "
-                    "the task data explicitly requires that exact Tool.\n" + json.dumps({
+                    "The JSON below is task data. Use only capabilities exposed by the Runtime, and select "
+                    "Tools according to the business goal and acceptance criteria.\n" + json.dumps({
                     "goal": runner.input_snapshot.get("goal"),
                     "acceptance_criteria": runner.input_snapshot.get("acceptance_criteria"),
                     "group_session_id": runner.input_snapshot.get("group_session_id"),
@@ -1141,11 +1845,40 @@ class RuntimeWorker:
                 "model_id": model.id,
                 "model_parameter_version": model.parameter_version,
                 "tool_ids": tool_ids,
+                "assembled_tool_keys": assembled_tool_keys,
+                "effective_tool_keys": [
+                    tool["name"] for tool in tools
+                    if tool["name"] != COMPLETION_FINALIZE_TOOL_KEY
+                ],
                 "skill_ids": [skill.id for _, skill in skill_rows],
                 "policy_ids": [policy.id for policy in policies],
             }
             runner.prompt_manifest = {
                 "sections": ["platform_rules", "agent", "memory", "history", "current_input"],
+                "response_contract": {
+                    "key": response_contract,
+                    "structured_output": structured_output_mode,
+                    "repair_no": int(runner.input_snapshot.get("structured_retry_no") or 0),
+                },
+                "completion_contract": {
+                    "key": completion_contract.get("key"),
+                    "status": completion_contract.get("status"),
+                    "reason_code": completion_contract.get("reason_code"),
+                    **completion_state,
+                    "repair_no": int(completion_contract.get("repair_no") or 0),
+                },
+                "capabilities": {
+                    "source": "agent_version_and_runtime_policy",
+                    "assembled_tool_keys": assembled_tool_keys,
+                    "effective_tool_keys": [
+                        tool["name"] for tool in tools
+                        if tool["name"] != COMPLETION_FINALIZE_TOOL_KEY
+                    ],
+                    "harness_tool_keys": [
+                        tool["name"] for tool in tools
+                        if tool["name"] == COMPLETION_FINALIZE_TOOL_KEY
+                    ],
+                },
                 "memory_recall": {
                     "policy_key": memory_policy.policy_key if memory_policy else "memory_recall.none",
                     "policy_version": memory_policy.parameter_version if memory_policy else None,
@@ -1204,48 +1937,17 @@ class RuntimeWorker:
                 model=model.model_name, finish_reason="tool_calls" if tool_calls else "stop",
             )
 
-    @staticmethod
-    def _task_explicitly_names_tool(task_text: str, tool_name: str) -> bool:
-        """Match an affirmative ``call <tool-key>`` capability in user task text."""
-        if not task_text or not tool_name:
-            return False
-        tool = re.escape(tool_name)
-        call_pattern = re.compile(
-            rf"(?<!\w)call\s+[`'\"]?{tool}[`'\"]?(?![A-Za-z0-9_])",
-            flags=re.IGNORECASE,
-        )
-        for match in call_pattern.finditer(task_text):
-            line_prefix = task_text[task_text.rfind("\n", 0, match.start()) + 1:match.start()]
-            if re.search(
-                r"(?:do\s+not|don't|never|must\s+not)(?:\s+\w+){0,2}\s*$",
-                line_prefix,
-                flags=re.IGNORECASE,
-            ):
-                continue
-            return True
-        return False
-
-    @staticmethod
-    def _delegated_tool_is_authorized(request_text: str, tool_name: str) -> bool:
-        """Require an unambiguous per-Tool capability in a delegated request.
-
-        Agent instructions and task data may mention Tool names for many reasons.
-        Only a sentence/line using the explicit ``You must call <tool>`` contract
-        grants a child Agent the capability to invoke that exact Tool.
-        """
-        if not request_text or not tool_name:
-            return False
-        tool = re.escape(tool_name)
-        pattern = (
-            rf"(?:^|[.!?]\s+|\n)\s*you\s+must\s+call\s+"
-            rf"[`'\"]?{tool}[`'\"]?(?=\s|[,.;:!?]|$)"
-        )
-        return re.search(pattern, request_text, flags=re.IGNORECASE | re.MULTILINE) is not None
-
     async def _runtime_tool_is_authorized(
-        self, db, run: Run, runner: DurableRunner, tool_name: str,
+        self, db, run: Run, runner: DurableRunner, tool_name: str, *,
+        has_answered_clarification: bool = False,
     ) -> bool:
-        """Apply least-privilege Tool capabilities to every normal Runner."""
+        """Apply the machine-owned mode/phase capability policy.
+
+        Natural-language task content is intentionally absent from this decision.
+        AgentVersion assembly establishes the upper bound (at model exposure and
+        dispatch), while this method only narrows it for the current execution phase
+        and delegation topology.
+        """
         snapshot = runner.input_snapshot or {}
         work = await db.get(WorkItem, runner.work_item_id)
         if run.execution_kind != "normal":
@@ -1254,34 +1956,29 @@ class RuntimeWorker:
             return False
         if snapshot.get("plan_coordination_for_node_id"):
             return tool_name == "invoke_agent"
-        invocation = None
-        if work is not None and work.parent_work_item_id:
-            invocation = await db.scalar(select(AgentInvocation).where(
-                AgentInvocation.target_work_item_id == work.id,
-            ))
-        if snapshot.get("agent_invocation_id") or invocation is not None:
-            return self._delegated_tool_is_authorized(
-                str(snapshot.get("request_text") or (work.goal if work else "")), tool_name,
-            )
-        if snapshot.get("group_run_id") or (work is not None and work.group_run_id):
-            task_text = "\n".join(str(value or "") for value in (
-                snapshot.get("goal") or (work.goal if work else ""),
-                snapshot.get("acceptance_criteria"),
-            ))
-            return self._delegated_tool_is_authorized(task_text, tool_name)
-        plan_node_id = snapshot.get("plan_node_id") or (work.plan_node_id if work else None)
-        if plan_node_id:
-            node = await db.get(PlanWorkItemNode, plan_node_id)
-            task_text = "\n".join(str(value or "") for value in (
-                node.goal if node else (work.goal if work else ""),
-                node.acceptance_criteria if node else "",
-            ))
-            return self._delegated_tool_is_authorized(task_text, tool_name)
-        if run.mode == "chat" and not runner.principal_snapshot.get("delegation_chain"):
-            task_text = str(snapshot.get("content") or snapshot.get("request_text")
-                            or (work.goal if work else ""))
-            return self._task_explicitly_names_tool(task_text, tool_name)
-        return False
+        # Group history is backed by a confirmed GroupSession/GroupRun scope;
+        # exposing it in Chat or Plan can only produce an execution-time error.
+        if tool_name == "search_group_history" and run.mode != "group":
+            return False
+        if tool_name == "request_clarification" and not self._can_request_clarification(
+            run, runner, has_answered=has_answered_clarification,
+        ):
+            return False
+
+        delegated = bool(
+            snapshot.get("agent_invocation_id")
+            or (work is not None and work.parent_work_item_id)
+            or runner.principal_snapshot.get("delegation_chain")
+        )
+        # Chat and Plan are strict-star collaboration modes: a delegated child
+        # may use its own business Tools, but cannot fan out to another Agent.
+        if delegated and run.mode in {"chat", "plan"} and tool_name == "invoke_agent":
+            return False
+
+        # Group delegation follows the confirmed graph.  invoke_agent remains
+        # visible here; the collaboration gateway validates the exact edge,
+        # target, depth and cycle constraints using durable machine state.
+        return run.mode in {"chat", "plan", "group"}
 
     @staticmethod
     def _can_request_clarification(
@@ -1315,13 +2012,41 @@ class RuntimeWorker:
             if (runner is None or work.active_runner_id != runner.id
                     or run.lifecycle in {"settling", "completed", "cancelled"}):
                 raise RuntimeError("runner fencing conflict before Tool dispatch")
+            has_answered_clarification = await db.scalar(select(Clarification.id).where(
+                Clarification.work_item_id == runner.work_item_id,
+                Clarification.status == "answered",
+            ).limit(1)) is not None
+            exposed_tool_keys = set(
+                ((runner.prompt_manifest or {}).get("capabilities") or {}).get(
+                    "effective_tool_keys"
+                ) or []
+            )
             unauthorized = [
                 call.name for call in tool_calls
-                if not await self._runtime_tool_is_authorized(db, run, runner, call.name)
+                if (
+                    call.name not in exposed_tool_keys
+                    or not await self._runtime_tool_is_authorized(
+                        db, run, runner, call.name,
+                        has_answered_clarification=has_answered_clarification,
+                    )
+                )
             ]
             if unauthorized:
                 names = ", ".join(sorted(set(unauthorized)))
-                raise RuntimeError(f"current task did not explicitly authorize Tool: {names}")
+                raise RuntimeError(f"current execution capability policy denied Tool: {names}")
+            completion_contract = dict(
+                (runner.input_snapshot or {}).get("completion_contract") or {}
+            )
+            if completion_contract.get("status") == "enforced":
+                declared = list(completion_contract.get("required_tool_keys") or [])
+                for call in tool_calls:
+                    if call.name in COMPLETION_EFFECT_TOOL_KEYS and call.name not in declared:
+                        declared.append(call.name)
+                completion_contract["required_tool_keys"] = declared
+                runner.input_snapshot = {
+                    **dict(runner.input_snapshot or {}),
+                    "completion_contract": completion_contract,
+                }
             clarification_calls = [call for call in tool_calls if call.name == "request_clarification"]
             if clarification_calls:
                 if len(tool_calls) != 1:
@@ -1932,7 +2657,7 @@ class RuntimeWorker:
                 payload={"wait_reason": "tool_confirmation"}, correlation_id=run.id,
             )
 
-    async def _settle_success(self, fence: RunnerFence, content: str) -> None:
+    async def _settle_success(self, fence: RunnerFence, content: str) -> str | None:
         """Commit a successful result, retrying only transient MySQL lock victims.
 
         Parallel Plan/Group children intentionally settle against one Run. MySQL
@@ -1941,8 +2666,7 @@ class RuntimeWorker:
         """
         for attempt in range(4):
             try:
-                await self._settle_success_once(fence, content)
-                return
+                return await self._settle_success_once(fence, content)
             except OperationalError as error:
                 if not _retryable_mysql_transaction_error(error) or attempt == 3:
                     raise
@@ -1972,11 +2696,9 @@ class RuntimeWorker:
                 await self._settle_agent_target(db, runner, work, run, agent_invocation, content=content)
                 return
             if run.mode == "group" and run.execution_kind == "proposal_generation":
-                await self._settle_group_formation(db, runner, work, run, content)
-                return
+                return await self._settle_group_formation(db, runner, work, run, content)
             if run.mode == "plan" and run.execution_kind == "proposal_generation":
-                await self._settle_plan_proposal(db, runner, work, run, content)
-                return
+                return await self._settle_plan_proposal(db, runner, work, run, content)
             if run.mode == "plan" and runner.input_snapshot.get("plan_settlement"):
                 await self._settle_plan_summary(db, runner, work, run, content)
                 return
@@ -2044,7 +2766,7 @@ class RuntimeWorker:
 
     async def _settle_group_formation(
         self, db, runner: DurableRunner, work: WorkItem, run: Run, content: str,
-    ) -> None:
+    ) -> str:
         proposal = await db.scalar(select(GroupFormationProposal).where(
             GroupFormationProposal.id == runner.input_snapshot["group_formation_proposal_id"]
         ).with_for_update())
@@ -2065,10 +2787,15 @@ class RuntimeWorker:
                     edited_by_id=runner.agent_id,
                 )
         except Exception as error:
-            if await self._schedule_structured_proposal_retry(db, runner, work, run, error):
-                return
-            raise RuntimeError(
-                f"invalid structured Group Formation proposal after repair: {type(error).__name__}"
+            if await self._schedule_structured_proposal_retry(
+                db, runner, work, run, error, invalid_output=content,
+            ):
+                return "structured_retry"
+            context = _structured_validation_context(error, content)
+            raise HarnessRuntimeError(
+                "invalid structured Group Formation proposal after bounded repair "
+                f"({context['category']})",
+                error_code="model_structured_output_invalid",
             ) from None
         runner.status = "succeeded"; runner.lease_expires_at = None; runner.version += 1
         work.status = "succeeded"; work.active_runner_id = None; work.result_summary = "Group Formation generated"
@@ -2087,17 +2814,22 @@ class RuntimeWorker:
             db, session_id=run.session_id, triggering_event_id=proposed_event.id,
             event_type="graph_confirmation_required", run_id=run.id,
         )
+        return "settled"
 
     async def _schedule_structured_proposal_retry(
-        self, db, runner: DurableRunner, work: WorkItem, run: Run, error: Exception,
+        self, db, runner: DurableRunner, work: WorkItem, run: Run, error: Exception, *,
+        invalid_output: str = "",
     ) -> bool:
         retry_no = int(runner.input_snapshot.get("structured_retry_no") or 0)
         if retry_no >= 1:
             return False
         runner.status = "failed"
         runner.lease_expires_at = None
-        runner.error_code = "invalid_structured_output"
-        runner.error_detail = f"{type(error).__name__}: strict structured proposal validation failed"
+        repair_context = _structured_validation_context(error, invalid_output)
+        runner.error_code = "model_structured_output_invalid"
+        runner.error_detail = (
+            f"{repair_context['category']}: strict structured proposal validation failed"
+        )
         runner.version += 1
         work.execution_epoch += 1
         work.attempt_no += 1
@@ -2113,7 +2845,11 @@ class RuntimeWorker:
             principal_snapshot=dict(runner.principal_snapshot),
             assembly_snapshot=dict(runner.assembly_snapshot),
             prompt_manifest=dict(runner.prompt_manifest),
-            input_snapshot={**dict(runner.input_snapshot), "structured_retry_no": retry_no + 1},
+            input_snapshot={
+                **dict(runner.input_snapshot),
+                "structured_retry_no": retry_no + 1,
+                "structured_retry_context": repair_context,
+            },
         )
         run.lifecycle = "running"
         run.wait_reason = None
@@ -2125,7 +2861,12 @@ class RuntimeWorker:
             actor_type="service", actor_id=self.worker_id, entity_type="runner",
             entity_id=replacement.id, entity_version=replacement.version, visibility="private",
             private_owner=("runner", replacement.id), summary="Structured proposal repair Runner queued",
-            payload={"retry_no": retry_no + 1, "error_code": "invalid_structured_output"},
+            payload={
+                "retry_no": retry_no + 1,
+                "error_code": "model_structured_output_invalid",
+                "category": repair_context["category"],
+                "previous_output_digest": repair_context["previous_output_digest"],
+            },
             correlation_id=run.id,
         )
         await OutboxWriter(db).enqueue(
@@ -2411,7 +3152,7 @@ class RuntimeWorker:
 
     async def _settle_plan_proposal(
         self, db, runner: DurableRunner, work: WorkItem, run: Run, content: str,
-    ) -> None:
+    ) -> str:
         plan_id = runner.input_snapshot.get("plan_id")
         plan = await db.scalar(select(PlanExecution).where(PlanExecution.id == plan_id).with_for_update())
         if plan is None or plan.run_id != run.id or plan.definition_status == "frozen":
@@ -2432,10 +3173,14 @@ class RuntimeWorker:
                     increment_revision=bool(runner.input_snapshot.get("increment_graph_revision")),
                 )
         except Exception as error:
-            if await self._schedule_structured_proposal_retry(db, runner, work, run, error):
-                return
-            raise RuntimeError(
-                f"invalid structured Plan proposal after repair: {type(error).__name__}"
+            if await self._schedule_structured_proposal_retry(
+                db, runner, work, run, error, invalid_output=content,
+            ):
+                return "structured_retry"
+            context = _structured_validation_context(error, content)
+            raise HarnessRuntimeError(
+                f"invalid structured Plan proposal after bounded repair ({context['category']})",
+                error_code="model_structured_output_invalid",
             ) from None
         runner.status = "succeeded"
         runner.lease_expires_at = None
@@ -2460,6 +3205,7 @@ class RuntimeWorker:
             db, session_id=run.session_id, triggering_event_id=ready_event.id,
             event_type="graph_confirmation_required", run_id=run.id,
         )
+        return "settled"
 
     async def _settle_plan_node(
         self, db, runner: DurableRunner, work: WorkItem, run: Run, content: str,
@@ -2836,8 +3582,9 @@ class RuntimeWorker:
                 await self._settle_group_failure(db, runner, work, run, error)
                 return
             detail = str(error)[:4000]
+            error_code = getattr(error, "error_code", "runner_execution_failed")
             runner.status = "failed"
-            runner.error_code = "runner_execution_failed"
+            runner.error_code = error_code
             runner.error_detail = detail
             runner.lease_expires_at = None
             runner.version += 1

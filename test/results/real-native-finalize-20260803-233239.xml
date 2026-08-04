@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites><testsuite name="pytest" errors="0" failures="1" skipped="0" tests="1" time="19.153" timestamp="2026-08-03T23:32:39.361519+08:00" hostname="wsbrdeMacBook-Pro.local"><properties><property name="commit_sha" value="uncommitted" /><property name="model" value="qwen3.5-plus" /></properties><testcase classname="e2e.fullstack.test_phase_one_acceptance" name="test_phase_one_acceptance" time="19.105"><failure message="AssertionError: assert 'failed' == 'succeeded'&#10;  &#10;  - succeeded&#10;  + failed">e2e/fullstack/test_phase_one_acceptance.py:217: in test_phase_one_acceptance
+    assert api.wait_run(api_chat_response.json()["run"]["id"])["outcome"] == "succeeded"
+E   AssertionError: assert 'failed' == 'succeeded'
+E     
+E     - succeeded
+E     + failed</failure></testcase></testsuite></testsuites>

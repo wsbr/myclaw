@@ -151,14 +151,34 @@ services:
       retries: 20
     restart: unless-stopped
 
+  otel-volume-init:
+    image: alpine:3.20
+    user: "0:0"
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, FOWNER]
+    security_opt:
+      - no-new-privileges:true
+    command:
+      - sh
+      - -c
+      - install -d -m 0750 -o 10001 -g 10001 /var/lib/myclaw/otel
+    volumes:
+      - myclaw_data:/var/lib/myclaw
+    restart: "no"
+
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.153.0
     command: ["--config=/etc/otelcol-contrib/config.yaml"]
     volumes:
       - ./otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+      - myclaw_data:/var/lib/myclaw
     ports:
       - "127.0.0.1:${UAT_OTLP_PORT:-4320}:4318"
       - "127.0.0.1:${UAT_OTEL_HEALTH_PORT:-13135}:13133"
+    depends_on:
+      otel-volume-init:
+        condition: service_completed_successfully
     restart: unless-stopped
 
 volumes:

@@ -1,12 +1,13 @@
 """Outbox/Runner lease cut and Chat settlement test."""
 
+import json
 import pytest
 from datetime import timedelta
 from types import SimpleNamespace
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app.core.model_hub.base import LLMResponse, TokenUsage
+from app.core.model_hub.base import LLMResponse, TokenUsage, ToolCall
 from app.database import Base
 from app.models.agent_v1 import (
     AgentAssemblyVersion, AgentBlueprint, AgentVersionBinding, AgentVersionSkill, AgentVersionTool,
@@ -25,9 +26,150 @@ from app.models.runtime_v1 import (
 from app.models.artifact_v1 import Artifact, MessageArtifact
 from app.models.observability_v1 import ObservabilitySpan, ObservabilitySpanLink, RunnerTrace
 from app.services.chat_service import create_user_session, enqueue_chat_message
-from app.workers.runtime_worker_v1 import RuntimeWorker
+from app.workers.runtime_worker_v1 import RuntimeWorker, _parse_completion_turn
 
 pytestmark = pytest.mark.unit
+
+
+def test_completion_turn_parser_accepts_only_closed_machine_effects():
+    assert _parse_completion_turn(
+        '{"message":"请确认周期","required_tool_keys":["request_clarification"],'
+        '"reason_code":"clarification_required"}'
+    ) == {
+        "message": "请确认周期",
+        "required_tool_keys": ["request_clarification"],
+        "reason_code": "clarification_required",
+    }
+    with pytest.raises(ValueError, match="only message"):
+        _parse_completion_turn(
+            '{"message":"ok","required_tool_keys":[],"reason_code":"no_observable_effect",'
+            '"answer":"fake"}'
+        )
+    with pytest.raises(ValueError, match="unknown completion effect"):
+        _parse_completion_turn(
+            '{"message":"ok","required_tool_keys":["shell_by_text"],'
+            '"reason_code":"multiple_effects_required"}'
+        )
+
+
+def test_completion_contract_eligibility_uses_topology_not_task_phrases():
+    run = SimpleNamespace(execution_kind="normal", mode="group")
+    runner = SimpleNamespace(
+        input_snapshot={
+            "group_run_id": "group-run",
+            "goal": "任意自然业务话术",
+            "acceptance_criteria": "Respond to the user request",
+        },
+        principal_snapshot={},
+    )
+    assert RuntimeWorker._completion_contract_task(run, runner) == {
+        "goal": "任意自然业务话术",
+        "acceptance_criteria": "Respond to the user request",
+    }
+    runner.input_snapshot["agent_invocation_id"] = "delegation"
+    assert RuntimeWorker._completion_contract_task(run, runner) is None
+
+
+def test_only_hidden_completed_one_shot_effects_receive_finalization_repair():
+    manifest = {
+        "completion_contract": {
+            "status": "enforced",
+            "pending_tool_keys": [],
+            "satisfied_tool_keys": ["search_group_history"],
+        },
+        "capabilities": {"effective_tool_keys": ["read_file"]},
+    }
+    repeated = [SimpleNamespace(name="search_group_history")]
+    assert RuntimeWorker._classify_repeated_satisfied_effect_tool_keys(
+        manifest, repeated,
+    ) == ["search_group_history"]
+
+    # Unknown tools, still-pending effects, and currently exposed calls must go
+    # through the normal authorization path rather than this bounded repair.
+    assert RuntimeWorker._classify_repeated_satisfied_effect_tool_keys(
+        manifest, [SimpleNamespace(name="hallucinated_shell")],
+    ) == []
+    pending = {
+        **manifest,
+        "completion_contract": {
+            **manifest["completion_contract"],
+            "pending_tool_keys": ["search_group_history"],
+        },
+    }
+    assert RuntimeWorker._classify_repeated_satisfied_effect_tool_keys(
+        pending, repeated,
+    ) == []
+    exposed = {
+        **manifest,
+        "capabilities": {"effective_tool_keys": ["search_group_history"]},
+    }
+    assert RuntimeWorker._classify_repeated_satisfied_effect_tool_keys(
+        exposed, repeated,
+    ) == []
+
+
+def test_single_declared_clarification_becomes_a_durable_control_call():
+    finalize = ToolCall(
+        id="finalize-1",
+        name="finalize_response",
+        arguments={
+            "message": "本轮按第二季度还是六月单月统计？",
+            "required_tool_keys": ["request_clarification"],
+            "reason_code": "clarification_required",
+        },
+    )
+    materialized = RuntimeWorker._declared_clarification_call(finalize)
+    assert materialized is not None
+    assert materialized.name == "request_clarification"
+    assert materialized.arguments == {"question": "本轮按第二季度还是六月单月统计？"}
+
+    plain = RuntimeWorker._declared_clarification_from_content(json.dumps(
+        finalize.arguments, ensure_ascii=False,
+    ))
+    assert plain is not None
+    assert plain.arguments == {"question": "本轮按第二季度还是六月单月统计？"}
+
+    finalize.arguments["required_tool_keys"] = ["request_clarification", "execute"]
+    finalize.arguments["reason_code"] = "multiple_effects_required"
+    assert RuntimeWorker._declared_clarification_call(finalize) is None
+
+
+def test_plain_completion_fallback_requires_a_settled_nonempty_effect_ledger():
+    contract = {"status": "enforced"}
+    settled_search = {
+        "required_tool_keys": ["search_group_history"],
+        "satisfied_tool_keys": ["search_group_history"],
+        "pending_tool_keys": [],
+        "unavailable_tool_keys": [],
+    }
+    assert RuntimeWorker._plain_completion_after_satisfied_effects_is_safe(
+        contract, settled_search, "可追溯摘要",
+    )
+    assert not RuntimeWorker._plain_completion_after_satisfied_effects_is_safe(
+        contract, {**settled_search, "required_tool_keys": [], "satisfied_tool_keys": []},
+        "声称已经执行但没有账本",
+    )
+    assert not RuntimeWorker._plain_completion_after_satisfied_effects_is_safe(
+        contract, {**settled_search, "pending_tool_keys": ["search_group_history"]},
+        "尚未检索",
+    )
+    write_only = {
+        **settled_search,
+        "required_tool_keys": ["write_file"],
+        "satisfied_tool_keys": ["write_file"],
+    }
+    assert not RuntimeWorker._plain_completion_after_satisfied_effects_is_safe(
+        contract, write_only, "文件已写入",
+    )
+    assert RuntimeWorker._plain_completion_after_satisfied_effects_is_safe(
+        contract,
+        {
+            **write_only,
+            "required_tool_keys": ["write_file", "publish_artifact"],
+            "satisfied_tool_keys": ["write_file", "publish_artifact"],
+        },
+        "文件已正式发布",
+    )
 
 
 class FakeLLM:
@@ -37,47 +179,6 @@ class FakeLLM:
             content="completed response", tool_calls=[], usage=TokenUsage(),
             model="mock", finish_reason="stop",
         )
-
-
-@pytest.mark.parametrize(
-    ("request_text", "tool_name", "expected"),
-    [
-        ("You must call execute once with the supplied arguments.", "execute", True),
-        ("Verification first.\nYou must call `search_group_history` exactly once.",
-         "search_group_history", True),
-        ("you MUST call 'invoke_agent' now!", "invoke_agent", True),
-        ("Use execute only when necessary.", "execute", False),
-        ("The Tool catalog contains search_group_history.", "search_group_history", False),
-        ("You must call execute_extra.", "execute", False),
-        ("Do not repeat the words You must call execute", "execute", False),
-        ("", "execute", False),
-    ],
-)
-def test_delegated_tool_authorization_requires_exact_capability_phrase(
-    request_text, tool_name, expected,
-):
-    assert RuntimeWorker._delegated_tool_is_authorized(request_text, tool_name) is expected
-
-
-@pytest.mark.parametrize(
-    ("task_text", "tool_name", "expected"),
-    [
-        ("You must call execute once.", "execute", True),
-        ("First call write_file, then call publish_artifact.", "write_file", True),
-        ("First call write_file, then call publish_artifact.", "publish_artifact", True),
-        ("Do not call any Tool.", "execute", False),
-        ("Do not call execute.", "execute", False),
-        ("Never call `execute` for this task.", "execute", False),
-        ("slow runner restart acceptance", "execute", False),
-        ("execute_extra is a different capability", "execute", False),
-        ("SEARCH_GROUP_HISTORY is merely named", "search_group_history", False),
-        ("Call SEARCH_GROUP_HISTORY for evidence", "search_group_history", True),
-    ],
-)
-def test_top_level_tool_authorization_requires_exact_tool_key(
-    task_text, tool_name, expected,
-):
-    assert RuntimeWorker._task_explicitly_names_tool(task_text, tool_name) is expected
 
 
 class _ToolAuthorizationDB:
@@ -92,40 +193,120 @@ class _ToolAuthorizationDB:
 
 
 @pytest.mark.asyncio
-async def test_resumed_chat_uses_immutable_work_goal_for_tool_capabilities():
+@pytest.mark.parametrize("task_text", [
+    "请根据订单数据核对退款差异，并给出证据。",
+    "You must call execute exactly once.",
+    "不要在回答中提到任何内部工具名称。",
+    "",
+])
+async def test_chat_capability_is_independent_of_task_wording(task_text):
     worker = RuntimeWorker("authorization-test")
     run = SimpleNamespace(execution_kind="normal", mode="chat")
     work = SimpleNamespace(
         id="work", parent_work_item_id=None, group_run_id=None, plan_node_id=None,
-        goal=("Publish acceptance artifact: first call write_file, then call "
-              "publish_artifact."),
+        goal=task_text,
     )
-    resumed = SimpleNamespace(
-        work_item_id=work.id,
-        input_snapshot={"resumed_from_confirmation_id": "confirmation"},
-        principal_snapshot={},
+    runner = SimpleNamespace(
+        work_item_id=work.id, input_snapshot={"content": task_text}, principal_snapshot={},
     )
-    db = _ToolAuthorizationDB(work)
-
-    assert await worker._runtime_tool_is_authorized(db, run, resumed, "write_file")
-    assert await worker._runtime_tool_is_authorized(db, run, resumed, "publish_artifact")
-    assert not await worker._runtime_tool_is_authorized(db, run, resumed, "execute")
+    assert await worker._runtime_tool_is_authorized(
+        _ToolAuthorizationDB(work), run, runner, "execute",
+    )
 
 
 @pytest.mark.asyncio
-async def test_unrequested_chat_tool_is_not_authorized_after_runner_recovery():
+async def test_chat_and_plan_delegated_children_cannot_fan_out():
     worker = RuntimeWorker("authorization-test")
-    run = SimpleNamespace(execution_kind="normal", mode="chat")
     work = SimpleNamespace(
-        id="work", parent_work_item_id=None, group_run_id=None, plan_node_id=None,
-        goal="slow runner restart acceptance",
+        id="work", parent_work_item_id="parent", group_run_id=None, plan_node_id=None,
+        goal="核对退款单并生成审计证据",
     )
-    recovered = SimpleNamespace(
+    runner = SimpleNamespace(
+        work_item_id=work.id,
+        input_snapshot={"agent_invocation_id": "invocation", "request_text": work.goal},
+        principal_snapshot={"delegation_chain": ["entry"]},
+    )
+    db = _ToolAuthorizationDB(work)
+
+    for mode in ("chat", "plan"):
+        run = SimpleNamespace(execution_kind="normal", mode=mode)
+        assert await worker._runtime_tool_is_authorized(db, run, runner, "read_file")
+        assert not await worker._runtime_tool_is_authorized(db, run, runner, "invoke_agent")
+        assert not await worker._runtime_tool_is_authorized(
+            db, run, runner, "request_clarification",
+        )
+
+
+@pytest.mark.asyncio
+async def test_group_delegation_retains_graph_governed_collaboration_tools():
+    worker = RuntimeWorker("authorization-test")
+    run = SimpleNamespace(execution_kind="normal", mode="group")
+    work = SimpleNamespace(
+        id="work", parent_work_item_id="parent", group_run_id="group-run", plan_node_id=None,
+        goal="请风控同事复核异常退款，并在口径不清时询问业务方。",
+    )
+    runner = SimpleNamespace(
+        work_item_id=work.id,
+        input_snapshot={"agent_invocation_id": "invocation", "group_run_id": "group-run"},
+        principal_snapshot={"delegation_chain": ["entry"]},
+    )
+    db = _ToolAuthorizationDB(work)
+
+    assert await worker._runtime_tool_is_authorized(db, run, runner, "invoke_agent")
+    assert await worker._runtime_tool_is_authorized(db, run, runner, "search_group_history")
+    assert await worker._runtime_tool_is_authorized(db, run, runner, "request_clarification")
+
+
+@pytest.mark.asyncio
+async def test_execution_phase_narrows_capabilities_from_machine_state():
+    worker = RuntimeWorker("authorization-test")
+    work = SimpleNamespace(
+        id="work", parent_work_item_id=None, group_run_id=None, plan_node_id=None, goal="自然语言目标",
+    )
+    db = _ToolAuthorizationDB(work)
+
+    proposal = SimpleNamespace(
         work_item_id=work.id, input_snapshot={}, principal_snapshot={},
     )
-
     assert not await worker._runtime_tool_is_authorized(
-        _ToolAuthorizationDB(work), run, recovered, "execute",
+        db, SimpleNamespace(execution_kind="proposal_generation", mode="plan"), proposal, "execute",
+    )
+
+    chat_run = SimpleNamespace(execution_kind="normal", mode="chat")
+    assert not await worker._runtime_tool_is_authorized(
+        db, chat_run, proposal, "search_group_history",
+    )
+
+    settlement = SimpleNamespace(
+        work_item_id=work.id, input_snapshot={"plan_settlement": True}, principal_snapshot={},
+    )
+    assert not await worker._runtime_tool_is_authorized(
+        db, SimpleNamespace(execution_kind="normal", mode="plan"), settlement, "execute",
+    )
+
+    coordination = SimpleNamespace(
+        work_item_id=work.id,
+        input_snapshot={"plan_coordination_for_node_id": "node"},
+        principal_snapshot={},
+    )
+    plan_run = SimpleNamespace(execution_kind="normal", mode="plan")
+    assert await worker._runtime_tool_is_authorized(db, plan_run, coordination, "invoke_agent")
+    assert not await worker._runtime_tool_is_authorized(db, plan_run, coordination, "execute")
+
+
+@pytest.mark.asyncio
+async def test_answered_clarification_is_not_exposed_again():
+    worker = RuntimeWorker("authorization-test")
+    run = SimpleNamespace(execution_kind="normal", mode="group")
+    work = SimpleNamespace(
+        id="work", parent_work_item_id=None, group_run_id="group-run", plan_node_id=None, goal="补齐口径",
+    )
+    runner = SimpleNamespace(
+        work_item_id=work.id, input_snapshot={"group_run_id": "group-run"}, principal_snapshot={},
+    )
+    assert not await worker._runtime_tool_is_authorized(
+        _ToolAuthorizationDB(work), run, runner, "request_clarification",
+        has_answered_clarification=True,
     )
 
 

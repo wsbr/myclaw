@@ -26,7 +26,17 @@ class PhaseOneAPI:
         headers = {**self.auth, **kwargs.pop("headers", {})}
         if idem:
             headers["Idempotency-Key"] = str(uuid.uuid4())
-        response = self.client.request(method, path, headers=headers, **kwargs)
+        for attempt in range(6):
+            response = self.client.request(method, path, headers=headers, **kwargs)
+            if response.status_code != 429 or attempt == 5:
+                break
+            retry_after = response.headers.get("Retry-After")
+            if retry_after is None:
+                try:
+                    retry_after = response.json()["error"]["details"]["retry_after_seconds"]
+                except (KeyError, TypeError, ValueError):
+                    retry_after = 1
+            time.sleep(max(0.25, min(float(retry_after), 5.0)))
         if response.is_error:
             raise AssertionError(f"{method} {path} -> {response.status_code}: {response.text}")
         return response
@@ -87,9 +97,13 @@ def _skill_zip() -> bytes:
     with zipfile.ZipFile(buffer, "w") as archive:
         archive.writestr(
             "SKILL.md",
-            "---\nname: Acceptance Analysis\ndescription: Analyze acceptance evidence\n---\n\nUse explicit evidence.",
+            "---\nname: Refund Audit Evidence\ndescription: Build traceable ecommerce refund audit evidence\n---\n\n"
+            "Use confirmed reporting periods, separate payment and order evidence, and disclose unresolved gaps.",
         )
-        archive.writestr("references/checklist.md", "Verify durable runtime and immutable versions.")
+        archive.writestr(
+            "references/checklist.md",
+            "Verify refund batch, payment status, duplicate-risk evidence, durable execution, and immutable versions.",
+        )
     return buffer.getvalue()
 
 
@@ -129,7 +143,13 @@ def assembled_world(phase_api: PhaseOneAPI):
         "key": model_key, "provider": "openai_compatible", "model_name": model_name,
         "endpoint": endpoint, "credential_ref": credential_ref,
         "default_parameters": {"temperature": 0},
-        "capabilities": {"streaming": True, "tool_calling": True}, "enabled": True,
+        "capabilities": {
+            "streaming": True,
+            "native_tool_calling": True,
+            "structured_output": "json_object",
+            "usage_in_stream": True,
+        },
+        "enabled": True,
     }).json()
     tools = api.request("GET", "/api/v1/platform-tools").json()["items"]
     by_tool = {item["tool_key"]: item for item in tools}
@@ -164,29 +184,29 @@ def assembled_world(phase_api: PhaseOneAPI):
     api.request("POST", f"/api/v1/skills/{skill['id']}/sync", idem=True)
 
     common = {
-        "description": "Phase-one acceptance Agent",
-        "instructions": (
-            "Use a durable Runtime Tool only when the current user or delegated task explicitly "
-            "names that exact Tool. A Tool catalog, Skill, previous message, or general request to "
-            "analyze or verify is never permission to call a Tool. Plan and Group definition or "
-            "node tasks must return text directly unless the current task says 'You must call' "
-            "followed by the exact Tool name. Never claim a Tool action without calling that Tool. "
-            "Follow structured JSON response schemas exactly for Plan and Group generation. "
-            "Return concise, evidence-based results and do not reveal credentials."
-        ),
         "model_id": model["id"], "sandbox_profile_id": sandbox["id"],
         "context_policy_id": by_policy["context.standard"],
         "history_policy_id": by_policy["history.summary_recent"],
         "memory_write_policy_id": by_policy["memory_write.user_agent_facts"],
         "memory_recall_policy_id": by_policy["memory_recall.user_combined"],
-        "group_enabled": True, "skill_ids": [skill["id"]],
-        "tool_ids": [by_tool[key]["id"] for key in sorted(required_tools)],
+        "group_enabled": True,
     }
 
-    def create_agent(name: str, bound: list[str]) -> dict:
+    def create_agent(
+        name: str, description: str, instructions: str, bound: list[str], tool_keys: set[str],
+        *, skill_ids: list[str] | None = None,
+    ) -> dict:
         created = api.request("POST", "/api/v1/agents", json={
             "visibility": "enterprise",
-            "draft": {**common, "name": f"{name} {suffix}", "bound_agent_ids": bound},
+            "draft": {
+                **common,
+                "name": f"{name} {suffix}",
+                "description": description,
+                "instructions": instructions,
+                "bound_agent_ids": bound,
+                "skill_ids": list(skill_ids or []),
+                "tool_ids": [by_tool[key]["id"] for key in sorted(tool_keys)],
+            },
         }).json()
         published = api.request(
             "POST", f"/api/v1/agents/{created['agent']['id']}/publish", idem=True,
@@ -194,14 +214,48 @@ def assembled_world(phase_api: PhaseOneAPI):
         ).json()
         return {"id": created["agent"]["id"], "published": published["published_version"]}
 
-    operations = create_agent("Operations", [])
-    orders = create_agent("Orders", [])
-    outsider = create_agent("Outside", [])
-    finance = create_agent("Finance", [operations["id"], orders["id"], outsider["id"]])
+    refund_ops = create_agent(
+        "退款运营专员",
+        "核对退款批次、支付渠道状态、处理时效和业务口径。",
+        "你负责电商退款运营核验。先确认统计周期和退款口径；缺少会改变结论的关键信息时向业务方提问。"
+        "只依据已确认数据给出批次差异、时效风险和可追溯证据，不虚构查询或执行结果。",
+        [],
+        {"request_clarification"},
+    )
+    risk_control = create_agent(
+        "订单风控复核员",
+        "复核异常订单、重复退款、账号与设备关联风险。",
+        "你负责退款相关订单风控复核。输出风险分层、异常原因和需要人工复核的证据，"
+        "直接基于当前委派中已确认的信息工作；不得声称完成未真实执行的动作。",
+        [],
+        set(),
+    )
+    external_supplier = create_agent(
+        "外部供应商对账员",
+        "模拟未加入当前 Group 的外部协作对象，用于安全边界验收。",
+        "你只处理供应商账单，不参与未明确加入的内部退款审计组。",
+        [],
+        set(),
+    )
+    audit_lead = create_agent(
+        "退款审计负责人",
+        "统筹退款运营、订单风控与审计交付，生成可下载的审计证据。",
+        "你是电商退款审计负责人。根据用户业务目标自主选择已装配能力：需要隔离验证脚本时真实执行；"
+        "需要可下载交付物时先创建文件再发布；需要专业复核时委派给目录中合适的专员；"
+        "在 Group 内只有任务明确要求复用历史结论时才检索组内历史，并且每个任务最多检索一次。"
+        "不得用文字伪造工具、协作或文件发布结果。"
+        "Plan 和 Group 提案必须严格满足平台提供的结构化契约。",
+        [refund_ops["id"], risk_control["id"], external_supplier["id"]],
+        required_tools,
+        skill_ids=[skill["id"]],
+    )
     return {
         "suffix": suffix,
         "real_model": real_model,
         "model": model, "tools": by_tool, "skill": skill, "sandbox": sandbox,
-        "policies": by_policy, "finance": finance, "operations": operations,
-        "orders": orders, "outsider": outsider,
+        "policies": by_policy,
+        "audit_lead": audit_lead,
+        "refund_ops": refund_ops,
+        "risk_control": risk_control,
+        "external_supplier": external_supplier,
     }

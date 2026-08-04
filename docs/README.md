@@ -46,6 +46,7 @@
 - [事务、一致性与并发](technical/consistency-concurrency.md)
 - [执行事件、平台审计与可见性](technical/events-audit-visibility.md)
 - [Runtime 详细流程](technical/runtime-flows.md)
+- [三模式 Agent Harness 稳定性优化方案](technical/agent-harness-stability-plan.md)
 - [Context、History 与 Memory 实现](technical/context-history-memory.md)
 - [Platform Tool 与 Skill 接口](technical/tools-skills.md)
 - [API 与 SSE 契约](technical/api-sse.md)
@@ -56,7 +57,9 @@
 
 ## 验收报告
 
-- [一期真实业务 UAT 报告（2026-08-03）](acceptance/phase-one-uat-2026-08-03.md)
+- [首次测试基线：一期真实业务 UAT 报告（2026-08-03）](acceptance/phase-one-uat-2026-08-03.md)
+- [修复后持久 UAT 复验报告（2026-08-03）](acceptance/phase-one-uat-revalidation-2026-08-03.md)
+- [Harness 修复实现与候选验收报告（2026-08-03）](acceptance/phase-one-harness-remediation-2026-08-03.md)
 - [验收文档与证据索引](acceptance/README.md)
 
 ## 维护规则
