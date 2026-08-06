@@ -46,13 +46,13 @@ def _mysql_rows(run_id: str) -> dict:
                     "(SELECT id FROM runner_v1 WHERE run_id=%s) ORDER BY created_at"
                 ),
                 "turns": (
-                    "SELECT id,runner_id,turn_no,status,stop_reason,usage,turn_items "
+                    "SELECT id,runner_id,turn_no,status,stop_reason,`usage`,turn_items "
                     "FROM agent_turn WHERE run_id=%s ORDER BY turn_no"
                 ),
                 "attempts": (
                     "SELECT p.id,p.agent_turn_id,p.model_version_id,p.attempt_no,p.provider,"
                     "p.status,p.provider_request_id,p.received_payload,p.tool_call_observed,"
-                    "p.stop_reason,p.usage FROM provider_attempt p JOIN agent_turn t "
+                    "p.stop_reason,p.`usage` FROM provider_attempt p JOIN agent_turn t "
                     "ON t.id=p.agent_turn_id WHERE t.run_id=%s ORDER BY t.turn_no,p.attempt_no"
                 ),
                 "invocations": (
