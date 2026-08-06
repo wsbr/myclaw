@@ -57,7 +57,10 @@ async def _version_view(db: AsyncSession, version: ModelVersion) -> dict:
             await latest_terminal_conformance(db, version.id)
         ),
         "content_hash": version.content_hash,
-        "published_at": version.published_at,
+        # The view is also persisted as an idempotency JSON snapshot. Keep it
+        # JSON-native rather than relying on FastAPI's response encoder, which
+        # runs only after the database transaction has committed.
+        "published_at": version.published_at.isoformat() if version.published_at else None,
     }
 
 

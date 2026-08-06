@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.api.model_registry_v2 import _version_view
 from app.config import settings
 from app.database import Base
 from app.models.common import utcnow
@@ -45,6 +46,8 @@ async def test_model_version_is_append_only_and_latest_conformance_controls_acti
                 },
             },
         )
+        version_response = await _version_view(db, immutable)
+        assert version_response["published_at"] == immutable.published_at.isoformat()
         assert model.current_version_id is None
         assert immutable.version_no == 1
         with pytest.raises(ModelActivationRejected):
