@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Alert, Button, Card, Input, Modal, Select, Space, Spin, Tag, message as toast } from 'antd'
 import { ArrowLeftOutlined, HistoryOutlined, SendOutlined, StopOutlined } from '@ant-design/icons'
 import { agentsApi } from '@/api/agents'
-import { ApprovalAction, GroupFormationRevision, Message, PlanNode, PlanDependency, ToolConfirmation, sessionsApi, subscribeSessionEvents } from '@/api/sessions'
+import { ApprovalAction, GroupFormationRevision, Message, ToolConfirmation, sessionsApi, subscribeSessionEvents } from '@/api/sessions'
 import { cn } from '@/lib/utils'
 import PlanPanel from './PlanPanel'
 import GroupPanel from './GroupPanel'
@@ -36,15 +36,14 @@ export default function SessionPage() {
   const { data: messages = [], isLoading: historyLoading } = useQuery({
     queryKey: ['messages', sessionId], queryFn: () => sessionsApi.getMessages(sessionId!), enabled: !!sessionId,
   })
-  const { data: plans = [] } = useQuery({
-    queryKey: ['plans', sessionId], queryFn: () => sessionsApi.listPlans(sessionId!), enabled: !!sessionId,
-    refetchInterval: query => query.state.data?.some(plan => ['running', 'waiting', 'settling'].includes(plan.run.lifecycle)) ? 2500 : false,
+  const { data: sessionRecord } = useQuery({
+    queryKey: ['session', sessionId], queryFn: () => sessionsApi.get(sessionId!), enabled: !!sessionId,
   })
-  const activePlan = plans[0]
-  const { data: planWorkItems = [] } = useQuery({
-    queryKey: ['plan-work-items', activePlan?.id], queryFn: () => sessionsApi.getPlanWorkItems(activePlan!.id),
-    enabled: !!activePlan, refetchInterval: activePlan && ['running', 'waiting', 'settling'].includes(activePlan.run.lifecycle) ? 2500 : false,
+  const { data: planRuns = [] } = useQuery({
+    queryKey: ['session-runs', sessionId, 'plan'], queryFn: () => sessionsApi.getSessionRuns(sessionId!, 'plan'), enabled: !!sessionId,
+    refetchInterval: query => query.state.data?.some(run => !['completed', 'cancelled', 'failed'].includes(run.status)) ? 2500 : false,
   })
+  const activePlanRun = planRuns.find(run => !['completed', 'cancelled', 'failed'].includes(run.status)) || planRuns[0]
   const { data: formations = [] } = useQuery({
     queryKey: ['group-formations', sessionId], queryFn: () => sessionsApi.listGroupFormations(sessionId!),
     enabled: !!sessionId,
@@ -74,7 +73,7 @@ export default function SessionPage() {
     queryKey: ['group-messages', activeGroupRun?.id],
     queryFn: () => sessionsApi.getGroupRunMessages(activeGroupRun!.id), enabled: !!activeGroupRun,
   })
-  const latestRunId = activeRunId || (mode === 'plan' ? activePlan?.run_id : null)
+  const latestRunId = activeRunId || (mode === 'plan' ? activePlanRun?.id : null)
     || (mode === 'group' ? activeGroupRun?.run.id || activeFormation?.generation_run.id : null)
     || [...messages].reverse().find(item => item.run_id)?.run_id || null
   const { data: activeRun } = useQuery({
@@ -86,6 +85,13 @@ export default function SessionPage() {
     queryFn: () => sessionsApi.getWorkingPlans(latestRunId!), enabled: !!latestRunId,
   })
   const activeWorkingPlan = workingPlans.find(plan => plan.status === 'active') || workingPlans[0]
+  const { data: agentInvocations = [] } = useQuery({
+    queryKey: ['agent-invocations', activePlanRun?.id],
+    queryFn: () => sessionsApi.getAgentInvocations(activePlanRun!.id), enabled: !!activePlanRun,
+  })
+  const { data: artifacts = [] } = useQuery({
+    queryKey: ['artifacts', sessionId], queryFn: () => sessionsApi.getArtifacts(sessionId!), enabled: !!sessionId,
+  })
   useEffect(() => { latestRunIdRef.current = latestRunId }, [latestRunId])
   const { data: requiredActions = [] } = useQuery({
     queryKey: ['required-actions'], queryFn: sessionsApi.getRequiredActions, refetchInterval: 5000,
@@ -96,12 +102,19 @@ export default function SessionPage() {
       ['tool', 'session_grant', 'tool_confirmation'].includes(action.type),
   )
   const clarificationActions = sessionActions.filter(action => action.type === 'clarification')
+  const planApproval = sessionActions.find(
+    (action): action is ApprovalAction => action.type === 'plan_implementation' && action.run_id === activePlanRun?.id,
+  )
 
   useEffect(() => {
     setSessionId(routeSessionId ?? null)
     setActiveRunId(null)
     setMode('chat')
   }, [routeSessionId])
+
+  useEffect(() => {
+    if (sessionRecord?.interaction_mode === 'plan') setMode('plan')
+  }, [sessionRecord?.interaction_mode])
 
   useEffect(() => { setGroupRecipient(undefined) }, [groupId])
 
@@ -125,13 +138,15 @@ export default function SessionPage() {
       }
       if (event.event_type.startsWith('approval.')) {
         queryClient.invalidateQueries({ queryKey: ['required-actions'] })
+        queryClient.invalidateQueries({ queryKey: ['session', sessionId] })
       }
       if (event.event_type === 'working_plan.updated') {
         queryClient.invalidateQueries({ queryKey: ['working-plans', event.run_id] })
       }
       if (event.event_type.startsWith('plan.')) {
-        queryClient.invalidateQueries({ queryKey: ['plans', sessionId] })
-        queryClient.invalidateQueries({ queryKey: ['plan-work-items'] })
+        queryClient.invalidateQueries({ queryKey: ['session', sessionId] })
+        queryClient.invalidateQueries({ queryKey: ['session-runs', sessionId, 'plan'] })
+        queryClient.invalidateQueries({ queryKey: ['working-plans'] })
         queryClient.invalidateQueries({ queryKey: ['required-actions'] })
       }
       if (event.event_type.startsWith('group')) {
@@ -144,11 +159,18 @@ export default function SessionPage() {
       }
       if (event.event_type.startsWith('agent_invocation.')) {
         queryClient.invalidateQueries({ queryKey: ['group-collaboration-edges'] })
+        if ('run_id' in event) {
+          queryClient.invalidateQueries({ queryKey: ['agent-invocations', event.run_id] })
+        }
       }
       if (event.event_type.startsWith('artifact.')) {
         queryClient.invalidateQueries({ queryKey: ['artifacts', sessionId] })
       }
       queryClient.invalidateQueries({ queryKey: ['session-inspector-events', sessionId] })
+      if ('run_id' in event && event.run_id) {
+        queryClient.invalidateQueries({ queryKey: ['run', event.run_id] })
+        queryClient.invalidateQueries({ queryKey: ['session-runs', sessionId] })
+      }
       if ((event.event_type === 'run.completed' || event.event_type === 'run.cancelled') && 'run_id' in event) {
         queryClient.invalidateQueries({ queryKey: ['run', event.run_id] })
         setActiveRunId(null)
@@ -157,7 +179,8 @@ export default function SessionPage() {
     }, value => { setConnected(value); if (!value) setLiveText('') }, () => {
       setLiveText('')
       queryClient.invalidateQueries({ queryKey: ['messages', sessionId] })
-      queryClient.invalidateQueries({ queryKey: ['plans', sessionId] })
+      queryClient.invalidateQueries({ queryKey: ['session', sessionId] })
+      queryClient.invalidateQueries({ queryKey: ['session-runs', sessionId] })
       queryClient.invalidateQueries({ queryKey: ['group-formations', sessionId] })
       queryClient.invalidateQueries({ queryKey: ['required-actions'] })
       queryClient.invalidateQueries({ queryKey: ['session-inspector-events', sessionId] })
@@ -189,13 +212,18 @@ export default function SessionPage() {
     onError: (error: any) => toast.error(error?.response?.data?.error?.message || '消息提交失败'),
   })
   const sendPlan = useMutation({
-    mutationFn: async (goal: string) => sessionsApi.createPlan(await ensureSession(), goal),
+    mutationFn: async (goal: string) => {
+      const id = await ensureSession()
+      const current = await sessionsApi.get(id)
+      return sessionsApi.enterPlanMode(current, goal)
+    },
     onSuccess: result => {
-      setActiveRunId(result.generation_run.id)
+      setActiveRunId(result.run.id)
       setLiveText('')
       setInput('')
-      queryClient.invalidateQueries({ queryKey: ['messages', result.plan.session_id] })
-      queryClient.invalidateQueries({ queryKey: ['plans', result.plan.session_id] })
+      queryClient.setQueryData(['session', result.session.id], result.session)
+      queryClient.invalidateQueries({ queryKey: ['messages', result.session.id] })
+      queryClient.invalidateQueries({ queryKey: ['session-runs', result.session.id, 'plan'] })
     },
     onError: (error: any) => toast.error(error?.response?.data?.error?.code || 'Plan 创建失败'),
   })
@@ -225,25 +253,34 @@ export default function SessionPage() {
   })
 
   const refreshPlan = () => {
-    queryClient.invalidateQueries({ queryKey: ['plans', sessionId] })
-    queryClient.invalidateQueries({ queryKey: ['plan-work-items'] })
+    queryClient.invalidateQueries({ queryKey: ['session', sessionId] })
+    queryClient.invalidateQueries({ queryKey: ['session-runs', sessionId, 'plan'] })
+    queryClient.invalidateQueries({ queryKey: ['working-plans'] })
+    queryClient.invalidateQueries({ queryKey: ['agent-invocations'] })
     queryClient.invalidateQueries({ queryKey: ['required-actions'] })
   }
-  const savePlan = useMutation({
-    mutationFn: (value: { goal: string; deliverable: string; nodes: PlanNode[]; dependencies: PlanDependency[] }) =>
-      sessionsApi.updatePlan(activePlan!, value),
-    onSuccess: refreshPlan,
-    onError: (error: any) => toast.error(error?.response?.data?.error?.code || 'Plan 保存失败'),
-  })
   const revisePlan = useMutation({
-    mutationFn: (instruction: string) => sessionsApi.revisePlan(activePlan!, instruction),
-    onSuccess: result => { setActiveRunId(result.run_id); refreshPlan() },
-    onError: (error: any) => toast.error(error?.response?.data?.error?.code || 'Plan 重新生成失败'),
+    mutationFn: (instruction: string) => sessionsApi.continuePlanning(activeWorkingPlan!, instruction),
+    onSuccess: result => { setActiveRunId(result.run.id); setInput(''); refreshPlan() },
+    onError: (error: any) => toast.error(error?.response?.data?.detail?.code || 'Plan 修改方向失败'),
   })
   const confirmPlan = useMutation({
-    mutationFn: () => sessionsApi.confirmPlan(activePlan!),
-    onSuccess: result => { setActiveRunId(result.run_id); refreshPlan(); toast.success('Plan 已冻结并开始执行') },
-    onError: (error: any) => toast.error(error?.response?.data?.error?.code || 'Plan 确认失败'),
+    mutationFn: () => sessionsApi.approvePlanImplementation(activeWorkingPlan!, planApproval!.subject_hash),
+    onSuccess: () => { refreshPlan(); toast.success('当前 revision 已批准；同一 Session 开始动态实施') },
+    onError: (error: any) => toast.error(error?.response?.data?.detail?.code || 'Plan 批准失败'),
+  })
+  const rejectPlan = useMutation({
+    mutationFn: (reason?: string) => sessionsApi.decideApproval(planApproval!, 'reject', reason),
+    onSuccess: () => { refreshPlan(); toast.info('当前 Plan revision 已拒绝，项目经理将继续只读规划') },
+    onError: (error: any) => toast.error(error?.response?.data?.detail?.code || 'Plan 拒绝失败'),
+  })
+  const exitPlan = useMutation({
+    mutationFn: () => sessionsApi.exitPlanMode(sessionRecord!),
+    onSuccess: result => {
+      queryClient.setQueryData(['session', result.id], result)
+      setActiveRunId(null); setMode('chat'); refreshPlan()
+    },
+    onError: (error: any) => toast.error(error?.response?.data?.detail?.code || '退出 Plan 失败'),
   })
   const saveFormation = useMutation({
     mutationFn: (revision: GroupFormationRevision) => sessionsApi.updateGroupFormation(activeFormation!, revision),
@@ -281,10 +318,6 @@ export default function SessionPage() {
 
   const cancel = useMutation({
     mutationFn: async () => {
-      if (mode === 'plan' && activePlan) {
-        const plan = await sessionsApi.cancelPlan(activePlan, '用户在 Web 工作区取消')
-        return { run: plan.run, plan }
-      }
       if (mode === 'group' && activeGroupRun) {
         return { run: (await sessionsApi.cancelGroupRun(activeGroupRun, '用户在 Web 工作区取消')).run }
       }
@@ -327,8 +360,17 @@ export default function SessionPage() {
   })
 
   const isRunning = Boolean(activeRun && ['running', 'waiting', 'settling'].includes(activeRun.lifecycle))
-  const planBusy = savePlan.isPending || revisePlan.isPending || confirmPlan.isPending
+  const planBusy = sendPlan.isPending || revisePlan.isPending || confirmPlan.isPending
+    || rejectPlan.isPending || exitPlan.isPending
   const groupBusy = saveFormation.isPending || confirmFormation.isPending || rejectFormation.isPending
+  const planAlreadyEntered = sessionRecord?.interaction_mode === 'plan'
+  const inputDisabled = send.isPending || sendPlan.isPending || sendGroup.isPending
+    || (isRunning && mode !== 'group')
+    || (mode === 'plan' && Boolean(planAlreadyEntered))
+    || (mode === 'group' && Boolean(groupRunSettling || (activeFormation && (
+      !['confirmed', 'rejected', 'cancelled', 'failed'].includes(activeFormation.status)
+      || (activeFormation.status === 'confirmed' && !groupIsOpen)
+    ))))
 
   return (
     <div className="bg-background flex h-full min-h-[calc(100vh-0px)]">
@@ -360,6 +402,9 @@ export default function SessionPage() {
           </div>
           <Space>
             {sessionId && <Tag>{`${mode === 'plan' ? 'Plan Owner' : mode === 'group' ? 'Group' : 'Chat'} · ${sessionId.slice(0, 8)}`}</Tag>}
+            {sessionRecord && <Tag color={sessionRecord.permission_mode === 'plan_readonly' ? 'gold' : 'green'}>
+              {sessionRecord.permission_mode} · r{sessionRecord.permission_revision}
+            </Tag>}
             {activeRun?.execution_kind === 'draft_test' && <Tag color="purple">草稿测试快照</Tag>}
             {isRunning && <Tag color="processing">后台执行中</Tag>}
             {isRunning && <Button danger size="small" icon={<StopOutlined />} loading={cancel.isPending} onClick={() => Modal.confirm({
@@ -413,10 +458,14 @@ export default function SessionPage() {
                 </div>
               </Card>
             )}
-            {mode === 'plan' && <PlanPanel plan={activePlan} workItems={planWorkItems} busy={planBusy}
-              onSave={async value => { await savePlan.mutateAsync(value) }}
-              onRevise={async value => { await revisePlan.mutateAsync(value) }}
-              onConfirm={async () => { await confirmPlan.mutateAsync() }} />}
+            {mode === 'plan' && <PlanPanel session={sessionRecord} run={activePlanRun}
+              plan={activeWorkingPlan} collaborators={agentInvocations}
+              approval={planApproval} artifacts={artifacts} busy={planBusy}
+              onContinue={async value => { await revisePlan.mutateAsync(value) }}
+              onApprove={async () => { await confirmPlan.mutateAsync() }}
+              onReject={async reason => { await rejectPlan.mutateAsync(reason) }}
+              onExit={async () => { await exitPlan.mutateAsync() }}
+              onDownload={sessionsApi.downloadArtifact} />}
             {mode === 'group' && <GroupPanel proposal={activeFormation} nodes={groupNodes} runs={groupRuns}
               messages={groupMessages} suggestedEdges={groupSuggestedEdges}
               collaborationEdges={groupCollaborationEdges} busy={groupBusy}
@@ -463,12 +512,12 @@ export default function SessionPage() {
               aria-label="Group 接收 Agent"
             />}
             <Input.TextArea value={input} onChange={event => setInput(event.target.value)} autoSize={{ minRows: 1, maxRows: 6 }}
-              placeholder={mode === 'plan' ? '描述需要规划的长任务目标' : mode === 'group' ? '输入 Group Formation 目标、后续 GroupRun 或定向补充' : '输入消息；Enter 发送，Shift+Enter 换行'}
-              disabled={send.isPending || sendPlan.isPending || sendGroup.isPending || (isRunning && mode !== 'group') || (mode === 'plan' && !!activePlan && !['completed', 'cancelled'].includes(activePlan.run.lifecycle)) || (mode === 'group' && (!!groupRunSettling || (!!activeFormation && (!['confirmed', 'rejected', 'cancelled', 'failed'].includes(activeFormation.status) || (activeFormation.status === 'confirmed' && !groupIsOpen)))))}
+              placeholder={mode === 'plan' ? (planAlreadyEntered ? '请在 Plan 面板中继续讨论、修改方向或批准' : '描述需要只读调查与规划的长任务目标') : mode === 'group' ? '输入 Group Formation 目标、后续 GroupRun 或定向补充' : '输入消息；Enter 发送，Shift+Enter 换行'}
+              disabled={inputDisabled}
               onPressEnter={event => { if (!event.shiftKey) { event.preventDefault(); if (input.trim()) (mode === 'plan' ? sendPlan : mode === 'group' ? sendGroup : send).mutate(input.trim()) } }} />
             <Button type="primary" icon={<SendOutlined />} loading={send.isPending || sendPlan.isPending || sendGroup.isPending}
-              disabled={!input.trim() || (isRunning && mode !== 'group') || (mode === 'plan' && !!activePlan && !['completed', 'cancelled'].includes(activePlan.run.lifecycle)) || (mode === 'group' && (!!groupRunSettling || (!!activeFormation && (!['confirmed', 'rejected', 'cancelled', 'failed'].includes(activeFormation.status) || (activeFormation.status === 'confirmed' && !groupIsOpen)))))}
-              onClick={() => (mode === 'plan' ? sendPlan : mode === 'group' ? sendGroup : send).mutate(input.trim())}>{mode === 'plan' ? '生成 Plan' : mode === 'group' ? (activeFormation?.status === 'confirmed' ? '提交 Group 工作' : '生成 Group Formation') : '发送'}</Button>
+              disabled={!input.trim() || inputDisabled}
+              onClick={() => (mode === 'plan' ? sendPlan : mode === 'group' ? sendGroup : send).mutate(input.trim())}>{mode === 'plan' ? '进入只读 Plan' : mode === 'group' ? (activeFormation?.status === 'confirmed' ? '提交 Group 工作' : '生成 Group Formation') : '发送'}</Button>
           </div>
         </footer>
       </main>

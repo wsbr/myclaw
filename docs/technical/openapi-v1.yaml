@@ -829,6 +829,18 @@ paths:
         '202': {description: Permission changed to plan_readonly and Plan Run created., content: {application/json: {schema: {$ref: '#/components/schemas/RunEnvelope'}}}}
         default: {$ref: '#/components/responses/Error'}
 
+  /sessions/{session_id}/runs:
+    get:
+      tags: [Runs]
+      operationId: listSessionRuns
+      parameters:
+        - {$ref: '#/components/parameters/SessionId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+        - {name: mode, in: query, schema: {$ref: '#/components/schemas/RunMode'}}
+      responses:
+        '200': {description: Session Run page., content: {application/json: {schema: {$ref: '#/components/schemas/RunPage'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
   /sessions/{session_id}/plan-mode/exit:
     post:
       tags: [Plans]
@@ -936,6 +948,15 @@ paths:
         default: {$ref: '#/components/responses/Error'}
 
   /runs/{run_id}/agent-invocations:
+    get:
+      tags: [Network]
+      operationId: listAgentInvocations
+      parameters:
+        - {$ref: '#/components/parameters/RunId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+      responses:
+        '200': {description: Durable collaboration facts for the Run., content: {application/json: {schema: {$ref: '#/components/schemas/AgentInvocationPage'}}}}
+        default: {$ref: '#/components/responses/Error'}
     post:
       tags: [Network]
       operationId: createAgentInvocation
@@ -2134,12 +2155,14 @@ components:
     Session:
       type: object
       additionalProperties: false
-      required: [id, entry_agent_id, origin, status, permission_mode, permission_revision, version]
+      required: [id, entry_agent_id, origin, status, interaction_mode, interaction_revision, permission_mode, permission_revision, version]
       properties:
         id: {$ref: '#/components/schemas/Uuid'}
         entry_agent_id: {$ref: '#/components/schemas/Uuid'}
         origin: {type: string, enum: [web, api, channel]}
         status: {type: string, enum: [active, closed, archived]}
+        interaction_mode: {type: string, enum: [chat, plan]}
+        interaction_revision: {type: integer, format: int64, minimum: 1}
         permission_mode: {$ref: '#/components/schemas/PermissionMode'}
         permission_revision: {type: integer, format: int64, minimum: 1}
         version: {type: integer, format: int64, minimum: 1}
@@ -2182,7 +2205,7 @@ components:
     Run:
       type: object
       additionalProperties: false
-      required: [id, session_id, mode, status, wait_reason, terminal_reason, permission_mode_snapshot, version]
+      required: [id, session_id, mode, status, wait_reason, permission_mode, version]
       properties:
         id: {$ref: '#/components/schemas/Uuid'}
         session_id: {$ref: '#/components/schemas/Uuid'}
@@ -2190,15 +2213,21 @@ components:
         status: {$ref: '#/components/schemas/RunStatus'}
         wait_reason: {$ref: '#/components/schemas/WaitReason'}
         terminal_reason: {type: [string, 'null']}
-        permission_mode_snapshot: {$ref: '#/components/schemas/PermissionMode'}
+        root_work_item_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        permission_mode: {$ref: '#/components/schemas/PermissionMode'}
         cancellation_requested_at: {oneOf: [{$ref: '#/components/schemas/Timestamp'}, {type: 'null'}]}
         completed_at: {oneOf: [{$ref: '#/components/schemas/Timestamp'}, {type: 'null'}]}
         version: {type: integer, format: int64, minimum: 1}
+    RunPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/Run'}}, next_cursor: {type: [string, 'null']}}
     RunEnvelope:
       type: object
       additionalProperties: false
       required: [run, required_actions, links]
-      properties: {run: {$ref: '#/components/schemas/Run'}, required_actions: {type: array, items: {$ref: '#/components/schemas/RequiredAction'}}, links: {$ref: '#/components/schemas/LinkMap'}}
+      properties: {message: {$ref: '#/components/schemas/Message'}, session: {$ref: '#/components/schemas/Session'}, run: {$ref: '#/components/schemas/Run'}, required_actions: {type: array, items: {$ref: '#/components/schemas/RequiredAction'}}, links: {$ref: '#/components/schemas/LinkMap'}}
     MessageRunEnvelope:
       type: object
       additionalProperties: false
@@ -2251,7 +2280,7 @@ components:
     WorkingPlan:
       type: object
       additionalProperties: false
-      required: [id, session_id, run_id, owner_agent_id, summary, revision, status, version]
+      required: [id, session_id, run_id, owner_agent_id, summary, revision, status, version, items]
       properties:
         id: {$ref: '#/components/schemas/Uuid'}
         session_id: {$ref: '#/components/schemas/Uuid'}
@@ -2261,6 +2290,9 @@ components:
         revision: {type: integer, format: int64, minimum: 1}
         status: {type: string, enum: [active, superseded, closed]}
         version: {type: integer, format: int64, minimum: 1}
+        items: {type: array, items: {$ref: '#/components/schemas/JsonObject'}}
+        explanation: {type: [string, 'null']}
+        content_hash: {oneOf: [{$ref: '#/components/schemas/Sha256'}, {type: 'null'}]}
     WorkingPlanPage:
       type: object
       additionalProperties: false
@@ -2326,11 +2358,21 @@ components:
         target_agent_version_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
         target_work_item_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
         return_route: {type: string, enum: [caller, direct, group]}
+        request_text: {type: string}
         status: {type: string, enum: [created, queued, running, succeeded, failed, cancelled, timed_out, rejected]}
         operation_key: {type: string}
         request_hash: {$ref: '#/components/schemas/Sha256'}
+        result_summary: {type: [string, 'null']}
+        result_message_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
         error_code: {type: [string, 'null']}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        completed_at: {oneOf: [{$ref: '#/components/schemas/Timestamp'}, {type: 'null'}]}
         version: {type: integer, format: int64, minimum: 1}
+    AgentInvocationPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/AgentInvocation'}}, next_cursor: {type: [string, 'null']}}
 
     GroupCreate:
       type: object

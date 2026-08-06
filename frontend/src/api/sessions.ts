@@ -7,6 +7,10 @@ export interface UserSession {
   status: 'active' | 'closed' | 'archived'
   title: string | null
   origin_type: 'web' | 'api' | 'channel'
+  permission_mode: 'direct' | 'readonly' | 'plan_readonly'
+  permission_revision: number
+  interaction_mode: 'chat' | 'plan'
+  interaction_revision: number
   version: number
   created_at: string
   updated_at: string
@@ -33,6 +37,8 @@ export interface Run {
   status: 'active' | 'waiting_user' | 'waiting_approval' | 'waiting_tool' | 'waiting_agent' | 'completed' | 'cancelled' | 'failed'
   wait_reason: string | null
   outcome: 'succeeded' | 'partially_succeeded' | 'failed' | null
+  root_work_item_id: string | null
+  permission_mode: 'direct' | 'readonly' | 'plan_readonly'
   version: number
   result_summary: string | null
   error_code: string | null
@@ -105,17 +111,21 @@ export interface ToolConfirmation {
 }
 
 export interface ApprovalAction {
-  type: 'tool' | 'session_grant'
+  type: 'tool' | 'session_grant' | 'plan_implementation'
   id: string
   session_id: string
   run_id: string
   work_item_id: string
-  tool_invocation_id: string
-  tool_key: string
-  arguments: Record<string, unknown>
+  tool_invocation_id: string | null
+  tool_key: string | null
+  arguments: Record<string, unknown> | null
   subject_hash: string
   status: 'pending' | 'approved' | 'rejected' | 'cancelled'
-  presentation: { title: string; summary: string }
+  presentation: {
+    title: string; summary: string
+    working_plan_id?: string; plan_revision?: number
+    permission_revision?: number; target_permission_mode?: string
+  }
   version: number
   created_at: string
   decided_at: string | null
@@ -132,66 +142,30 @@ export interface WorkingPlan {
   version: number
   items: Array<{ text: string; status: 'pending' | 'in_progress' | 'completed' }>
   explanation: string | null
+  content_hash: string | null
+  created_at: string
+  updated_at: string
 }
 
-export interface PlanNode {
-  id: string
-  node_key: string
-  title: string
-  goal: string
-  acceptance_criteria: string
-  assigned_agent_id: string
-  agent_version_id: string | null
-  work_item_id: string | null
-  sort_order: number
-  definition_version: number
-}
-
-export interface PlanDependency {
-  predecessor_node_key: string
-  successor_node_key: string
-  dependency_type: 'success' | 'settled'
-}
-
-export interface PlanExecution {
+export interface AgentInvocation {
   id: string
   run_id: string
-  session_id: string
-  owner_agent_id: string
-  owner_agent_version_id: string | null
-  predecessor_plan_id: string | null
-  goal: string
-  deliverable: string
-  definition_status: 'draft' | 'awaiting_confirmation' | 'frozen' | 'cancelled'
-  graph_revision: number
-  confirmed_at: string | null
-  frozen_hash: string | null
-  version: number
-  declared_agents: { agent_id: string; agent_version_id: string }[]
-  nodes: PlanNode[]
-  dependencies: PlanDependency[]
-  run: Run
-}
-
-export interface PlanWorkItem {
-  id: string
-  plan_node_id: string | null
-  status: string
-  owner_agent_id: string
+  caller_work_item_id: string
+  caller_agent_id: string
+  target_work_item_id: string | null
+  target_agent_id: string
+  target_agent_version_id: string | null
+  return_route: 'caller' | 'direct' | 'group'
+  request_text: string
+  operation_key: string
+  request_hash: string
+  status: 'created' | 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'timed_out' | 'rejected'
   result_summary: string | null
   error_code: string | null
+  result_message_id: string | null
+  created_at: string
+  completed_at: string | null
   version: number
-}
-
-export interface PlanConfirmationAction {
-  id: string
-  type: 'plan_confirmation'
-  status: 'pending'
-  session_id: string
-  run_id: string
-  version: number
-  graph_revision: number
-  presentation: { title: string; summary: string }
 }
 
 export interface ClarificationAction {
@@ -315,7 +289,7 @@ export interface Artifact {
   created_at: string
 }
 
-export type RequiredAction = ApprovalAction | ToolConfirmation | PlanConfirmationAction | ClarificationAction | GroupConfirmationAction
+export type RequiredAction = ApprovalAction | ToolConfirmation | ClarificationAction | GroupConfirmationAction
 
 const idempotency = () => ({ headers: { 'Idempotency-Key': crypto.randomUUID() } })
 
@@ -330,32 +304,33 @@ export const sessionsApi = {
   sendMessage: (id: string, content: string) => client.post<{ message: Message; run: Run; links: Record<string, string> }>(
     `/sessions/${id}/messages`, { content }, idempotency(),
   ).then(r => r.data),
-  listPlans: (id: string) => client.get<{ items: PlanExecution[] }>(`/sessions/${id}/plans`).then(r => r.data.items),
-  createPlan: (id: string, goal: string, predecessorPlanId?: string) => client.post<{
-    plan: PlanExecution; generation_run: Run
-  }>(`/sessions/${id}/plans`, { goal, predecessor_plan_id: predecessorPlanId }, idempotency()).then(r => r.data),
-  updatePlan: (plan: PlanExecution, value: Pick<PlanExecution, 'goal' | 'deliverable' | 'nodes' | 'dependencies'>) =>
-    client.patch<PlanExecution>(`/plans/${plan.id}`, {
-      goal: value.goal, deliverable: value.deliverable,
-      nodes: value.nodes.map(({ node_key, title, goal, acceptance_criteria, assigned_agent_id }) =>
-        ({ node_key, title, goal, acceptance_criteria, assigned_agent_id })),
-      dependencies: value.dependencies, expected_graph_revision: plan.graph_revision,
-    }, { headers: { 'Idempotency-Key': crypto.randomUUID(), 'If-Match': `"${plan.version}"` } }).then(r => r.data),
-  revisePlan: (plan: PlanExecution, instruction: string) => client.post<PlanExecution>(
-    `/plans/${plan.id}/revise`, { instruction, expected_graph_revision: plan.graph_revision },
-    { headers: { 'Idempotency-Key': crypto.randomUUID(), 'If-Match': `"${plan.version}"` } },
-  ).then(r => r.data),
-  confirmPlan: (plan: PlanExecution) => client.post<PlanExecution>(
-    `/plans/${plan.id}/confirm`, { expected_graph_revision: plan.graph_revision },
-    { headers: { 'Idempotency-Key': crypto.randomUUID(), 'If-Match': `"${plan.version}"` } },
-  ).then(r => r.data),
-  cancelPlan: (plan: PlanExecution, reason: string) => client.post<PlanExecution>(
-    `/plans/${plan.id}/cancel`, { reason },
-    { headers: { 'Idempotency-Key': crypto.randomUUID(), 'If-Match': `"${plan.version}"` } },
-  ).then(r => r.data),
-  getPlanWorkItems: (planId: string) => client.get<{ items: PlanWorkItem[] }>(
-    `/plans/${planId}/work-items`,
+  getSessionRuns: (id: string, mode?: Run['mode']) => client.get<{ items: Run[] }>(
+    `/sessions/${id}/runs`, { params: { mode } },
   ).then(r => r.data.items),
+  enterPlanMode: (session: UserSession, goal: string) => client.post<{
+    message: Message; run: Run; session: UserSession; links: Record<string, string>
+  }>(`/sessions/${session.id}/plan-mode`, { goal }, {
+    headers: { 'Idempotency-Key': crypto.randomUUID(), 'If-Match': `"${session.version}"` },
+  }).then(r => r.data),
+  exitPlanMode: (session: UserSession) => client.post<UserSession>(
+    `/sessions/${session.id}/plan-mode/exit`, {}, {
+      headers: { 'Idempotency-Key': crypto.randomUUID(), 'If-Match': `"${session.version}"` },
+    },
+  ).then(r => r.data),
+  continuePlanning: (plan: WorkingPlan, instruction: string) => client.post<{
+    message: Message; run: Run; session: UserSession
+  }>(`/working-plans/${plan.id}/continue-planning`, {
+    instruction, expected_revision: plan.revision,
+  }, {
+    headers: { 'Idempotency-Key': crypto.randomUUID(), 'If-Match': `"${plan.version}"` },
+  }).then(r => r.data),
+  approvePlanImplementation: (plan: WorkingPlan, subjectHash: string) => client.post<ApprovalAction>(
+    `/working-plans/${plan.id}/approve-implementation`, {
+      expected_revision: plan.revision, subject_hash: subjectHash,
+    }, {
+      headers: { 'Idempotency-Key': crypto.randomUUID(), 'If-Match': `"${plan.version}"` },
+    },
+  ).then(r => r.data),
   listGroupFormations: (sessionId: string) => client.get<{ items: GroupFormationProposal[] }>(
     `/sessions/${sessionId}/group-formations`,
   ).then(r => r.data.items),
@@ -412,6 +387,9 @@ export const sessionsApi = {
   getRun: (id: string) => client.get<Run>(`/runs/${id}`).then(r => r.data),
   getWorkingPlans: (id: string) => client.get<{ items: WorkingPlan[] }>(
     `/runs/${id}/working-plans`,
+  ).then(r => r.data.items),
+  getAgentInvocations: (id: string) => client.get<{ items: AgentInvocation[] }>(
+    `/runs/${id}/agent-invocations`,
   ).then(r => r.data.items),
   getRunTimeline: (id: string, afterSequence = 0) => client.get<{
     items: ExecutionEvent[]; scanned_through_sequence: number; session_high_watermark: number; has_more: boolean
