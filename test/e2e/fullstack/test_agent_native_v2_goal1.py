@@ -209,12 +209,11 @@ def test_agent_native_v2_goal1_fullstack_smoke(
 
     session = api.request(
         "POST", "/api/v1/sessions", idem=True,
-        json={"entry_agent_id": agent_id, "origin_type": "web", "title": "Goal 1 v2"},
+        json={"entry_agent_id": agent_id},
     ).json()
     command = api.request(
         "POST", f"/api/v1/sessions/{session['id']}/messages", idem=True,
         json={
-            "mode": "chat",
             "content": (
                 "goal1-v2-fullstack-smoke: write the requested evidence file, "
                 "consume the Tool Result, then finish with a normal message."
@@ -241,20 +240,19 @@ def test_agent_native_v2_goal1_fullstack_smoke(
             break
         time.sleep(0.2)
 
-    assert len(database["runner"]) == 1
-    runner = database["runner"][0]
-    assert runner["status"] == "succeeded"
-    assert runner["lease_owner"].startswith("runtime-v2:")
-    assert runner["capability_snapshot_id"]
-    assert len(database["outbox"]) == 1
-    assert database["outbox"][0]["topic"] == "runtime.runner"
-    assert database["outbox"][0]["status"] == "completed"
-    assert database["outbox"][0]["attempt_count"] == 1
+    assert len(database["runner"]) == 2
+    assert all(runner["status"] == "succeeded" for runner in database["runner"])
+    assert all(runner["lease_owner"].startswith("runtime-v2:") for runner in database["runner"])
+    assert all(runner["capability_snapshot_id"] for runner in database["runner"])
+    runner_outbox = [item for item in database["outbox"] if item["topic"] == "runtime.runner"]
+    assert len(runner_outbox) == 2
+    assert all(item["status"] == "completed" for item in runner_outbox)
+    assert all(item["attempt_count"] == 1 for item in runner_outbox)
     assert [turn["stop_reason"] for turn in database["turns"]] == [
         "tool_use", "end_turn",
     ]
     assert [turn["status"] for turn in database["turns"]] == [
-        "completed", "completed",
+        "waiting_actions", "completed",
     ]
     assert len(database["attempts"]) == 2
     assert all(attempt["status"] == "succeeded" for attempt in database["attempts"])
@@ -268,7 +266,7 @@ def test_agent_native_v2_goal1_fullstack_smoke(
     assert _json_value(invocation["result_data"])["data"]["path"] == "goal1-v2-smoke.txt"
     checkpoint_types = [item["checkpoint_type"] for item in database["checkpoints"]]
     assert "lease_acquired" in checkpoint_types
-    assert "tool_results_persisted" in checkpoint_types
+    assert "durable_wait" in checkpoint_types
     assert "turn_completed" in checkpoint_types
     assert "run.completed" in [item["event_type"] for item in database["events"]]
     assert database["messages"][-1]["content"] == FINAL_MESSAGE

@@ -139,23 +139,39 @@ def assembled_world(phase_api: PhaseOneAPI):
         model_name = "mock-model"
         endpoint = "http://mock-llm:9090/v1"
         credential_ref = None
-    model = api.request("POST", "/api/v1/models", idem=True, json={
-        "key": model_key, "provider": "openai_compatible", "model_name": model_name,
-        "endpoint": endpoint, "credential_ref": credential_ref,
-        "default_parameters": {"temperature": 0},
-        "capabilities": {
-            "streaming": True,
-            "native_tool_calling": True,
-            "structured_output": "json_object",
-            "usage_in_stream": True,
-        },
-        "enabled": True,
+    model = api.request("POST", "/api/v1/admin/models", idem=True, json={
+        "key": model_key, "name": f"Acceptance {model_key}",
     }).json()
+    model_version = api.request(
+        "POST", f"/api/v1/admin/models/{model['id']}/versions", idem=True,
+        headers={"If-Match": f'W/"{model["version"]}"'},
+        json={
+            "provider": "openai_compatible", "model_name": model_name,
+            "endpoint": endpoint, "credential_ref": credential_ref,
+            "default_parameters": {"temperature": 0, "max_tokens": 1024},
+            "capabilities": {
+                "streaming": True, "native_tool_calling": True,
+                "parallel_tool_calling": False, "tool_result_continuation": True,
+                "usage_in_stream": True, "stop_reason": True,
+                "context_window": 16384, "structured_output": "none",
+            },
+        },
+    ).json()
+    conformance = api.request(
+        "POST", f"/api/v1/admin/models/{model['id']}/versions/{model_version['id']}/conformance",
+        idem=True,
+    ).json()
+    assert conformance["status"] == "passed", conformance
+    model = api.request("GET", f"/api/v1/admin/models/{model['id']}").json()
+    model = api.request(
+        "POST", f"/api/v1/admin/models/{model['id']}/versions/{model_version['id']}/activate",
+        idem=True, headers={"If-Match": f'W/"{model["version"]}"'},
+    ).json()
     tools = api.request("GET", "/api/v1/platform-tools").json()["items"]
     by_tool = {item["tool_key"]: item for item in tools}
     required_tools = {
-        "read_file", "write_file", "execute", "invoke_agent",
-        "request_clarification", "search_group_history", "publish_artifact",
+        "read_file", "write_file", "execute",
+        "search_group_history", "publish_artifact",
     }
     assert required_tools <= by_tool.keys()
     execute = by_tool["execute"]
@@ -220,7 +236,7 @@ def assembled_world(phase_api: PhaseOneAPI):
         "你负责电商退款运营核验。先确认统计周期和退款口径；缺少会改变结论的关键信息时向业务方提问。"
         "只依据已确认数据给出批次差异、时效风险和可追溯证据，不虚构查询或执行结果。",
         [],
-        {"request_clarification"},
+        set(),
     )
     risk_control = create_agent(
         "订单风控复核员",

@@ -136,14 +136,15 @@ def _requested_control_tool(messages: list[ChatMessage], tools: list[dict] | Non
     names = _tool_names(tools)
     user_messages = [m.content or "" for m in messages if m.role == "user"]
     text = user_messages[-1].lower() if user_messages else ""
+    clarification_tool = "ask_user" if "ask_user" in names else "request_clarification"
     if (
         _pending_effect(messages, "request_clarification")
         or
         "ask clarification" in text
         or "request_clarification" in text
         or ("确认" in text and "统计口径" in text and "哪个周期" in text)
-    ) and "request_clarification" in names:
-        return "request_clarification", {"question": "本轮退款差异应按第二季度还是六月单月统计？"}
+    ) and clarification_tool in names:
+        return clarification_tool, {"question": "本轮退款差异应按第二季度还是六月单月统计？"}
     coordination = re.search(
         r'"plan_node_key":"([^"]+)","assigned_agent_id":"([0-9a-f-]{36})"',
         text,
@@ -203,6 +204,27 @@ def _requested_artifact_tool(messages: list[ChatMessage], tools: list[dict] | No
             "publish_to_group": False,
         }
     return None
+
+
+def _requested_working_plan_tool(
+    messages: list[ChatMessage], tools: list[dict] | None,
+) -> tuple[str, dict] | None:
+    names = _tool_names(tools)
+    if "update_plan" not in names or _has_tool_result(messages):
+        return None
+    user_messages = [m.content or "" for m in messages if m.role == "user"]
+    text = user_messages[-1].lower() if user_messages else ""
+    if not any(marker in text for marker in ("复杂任务", "分步骤", "multi-step", "workingplan")):
+        return None
+    return "update_plan", {
+        "summary": "完成复杂任务的分步交付",
+        "items": [
+            {"text": "确认目标与输入", "status": "completed"},
+            {"text": "执行分析并整理结果", "status": "in_progress"},
+            {"text": "交付并核验结果", "status": "pending"},
+        ],
+        "explanation": "任务包含多个相互依赖的步骤。",
+    }
 
 
 def _has_tool_result(messages: list[ChatMessage]) -> bool:
@@ -635,7 +657,11 @@ async def chat_completions(body: ChatCompletionRequest):
                 media_type="text/event-stream",
             )
         return _completion_payload(declared_content, body.model)
-    control_tool = _requested_artifact_tool(body.messages, body.tools) or _requested_control_tool(body.messages, body.tools)
+    control_tool = (
+        _requested_working_plan_tool(body.messages, body.tools)
+        or _requested_artifact_tool(body.messages, body.tools)
+        or _requested_control_tool(body.messages, body.tools)
+    )
     if control_tool:
         name, arguments = control_tool
         tool_calls = [{
