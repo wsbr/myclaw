@@ -57,8 +57,8 @@ async def test_tool_approval_resume_preserves_group_runner_snapshots(monkeypatch
     )
     record = SimpleNamespace(id="idempotency", response_snapshot=None)
     db = SimpleNamespace(
-        scalar=AsyncMock(side_effect=[confirmation, invocation, run, work, None, None]),
-        get=AsyncMock(return_value=source),
+        scalar=AsyncMock(side_effect=[None, confirmation, invocation, run, work, None]),
+        get=AsyncMock(side_effect=[confirmation, invocation, source]),
         flush=AsyncMock(),
         commit=AsyncMock(),
     )

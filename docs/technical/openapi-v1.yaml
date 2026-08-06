@@ -929,6 +929,8 @@ paths:
         - {$ref: '#/components/parameters/RawUserId'}
         - {name: query, in: query, schema: {type: string, maxLength: 500}}
         - {name: domain_tag, in: query, schema: {type: string, maxLength: 100}}
+        - {name: capability, in: query, schema: {type: array, items: {type: string, maxLength: 100}}}
+        - {name: governance_label, in: query, schema: {type: array, items: {type: string, maxLength: 100}}}
         - {name: group_enabled, in: query, schema: {type: boolean}}
         - {$ref: '#/components/parameters/Limit'}
         - {$ref: '#/components/parameters/Cursor'}
@@ -973,6 +975,15 @@ paths:
         default: {$ref: '#/components/responses/Error'}
 
   /sessions/{session_id}/groups:
+    get:
+      tags: [Groups]
+      operationId: listSessionGroups
+      parameters:
+        - {$ref: '#/components/parameters/SessionId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+      responses:
+        '200': {description: Groups associated with the Session., content: {application/json: {schema: {$ref: '#/components/schemas/GroupSessionPage'}}}}
+        default: {$ref: '#/components/responses/Error'}
     post:
       tags: [Groups]
       operationId: createGroup
@@ -2379,7 +2390,7 @@ components:
       additionalProperties: false
       required: [member_agent_ids, goal]
       properties:
-        member_agent_ids: {type: array, minItems: 2, uniqueItems: true, items: {$ref: '#/components/schemas/Uuid'}}
+        member_agent_ids: {type: array, minItems: 3, maxItems: 3, uniqueItems: true, items: {$ref: '#/components/schemas/Uuid'}}
         goal: {type: string, minLength: 1}
         reporter_agent_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
         shared_context_refs: {type: array, uniqueItems: true, items: {$ref: '#/components/schemas/Uuid'}}
@@ -2398,7 +2409,23 @@ components:
       type: object
       additionalProperties: false
       required: [id, group_session_id, agent_id, status, version]
-      properties: {id: {$ref: '#/components/schemas/Uuid'}, group_session_id: {$ref: '#/components/schemas/Uuid'}, agent_id: {$ref: '#/components/schemas/Uuid'}, status: {type: string, enum: [invited, joined, declined, cancelled, left, removed]}, version: {type: integer, format: int64, minimum: 1}}
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        group_session_id: {$ref: '#/components/schemas/Uuid'}
+        agent_id: {$ref: '#/components/schemas/Uuid'}
+        status: {type: string, enum: [invited, joined, declined, cancelled, left, removed]}
+        invited_by_kind: {type: string, enum: [user, agent, system]}
+        reason: {type: string}
+        context_scope: {type: object, additionalProperties: true}
+        authorization_source: {type: string}
+        joined_at: {oneOf: [{$ref: '#/components/schemas/Timestamp'}, {type: 'null'}]}
+        ended_at: {oneOf: [{$ref: '#/components/schemas/Timestamp'}, {type: 'null'}]}
+        version: {type: integer, format: int64, minimum: 1}
+    GroupSessionPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/GroupSession'}}, next_cursor: {type: [string, 'null']}}
     GroupMembershipPage:
       type: object
       additionalProperties: false
@@ -2416,8 +2443,17 @@ components:
     GroupRunMember:
       type: object
       additionalProperties: false
-      required: [agent_id, agent_version_id, participation_status]
-      properties: {agent_id: {$ref: '#/components/schemas/Uuid'}, agent_version_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}, participation_status: {type: string, enum: [available, unavailable]}, unavailable_reason: {type: [string, 'null']}}
+      required: [agent_id, membership_id, agent_version_id, participation_status, membership_policy, context_scope, capability_boundary, budget_snapshot]
+      properties:
+        agent_id: {$ref: '#/components/schemas/Uuid'}
+        membership_id: {$ref: '#/components/schemas/Uuid'}
+        agent_version_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        participation_status: {type: string, enum: [available, unavailable]}
+        unavailable_reason: {type: [string, 'null']}
+        membership_policy: {type: string, enum: [fixed_for_run]}
+        context_scope: {type: object, additionalProperties: true}
+        capability_boundary: {type: object, additionalProperties: true}
+        budget_snapshot: {type: object, additionalProperties: true}
     GroupRunMemberPage:
       type: object
       additionalProperties: false
@@ -2426,28 +2462,32 @@ components:
     GroupRun:
       type: object
       additionalProperties: false
-      required: [id, group_session_id, reporter_agent_id, summary_epoch, delivered_summary_epoch, run, members, version]
+      required: [id, group_session_id, reporter_agent_id, summary_epoch, delivered_summary_epoch, goal, shared_context, budget_snapshot, policy_snapshot, run, members, version]
       properties:
         id: {$ref: '#/components/schemas/Uuid'}
         group_session_id: {$ref: '#/components/schemas/Uuid'}
         reporter_agent_id: {$ref: '#/components/schemas/Uuid'}
         summary_epoch: {type: integer, format: int64, minimum: 0}
         delivered_summary_epoch: {type: integer, format: int64, minimum: 0}
+        goal: {type: string}
+        shared_context: {type: object, additionalProperties: true}
+        budget_snapshot: {type: object, additionalProperties: true}
+        policy_snapshot: {type: object, additionalProperties: true}
         run: {$ref: '#/components/schemas/Run'}
         members: {type: array, items: {$ref: '#/components/schemas/GroupRunMember'}}
         version: {type: integer, format: int64, minimum: 1}
     ReporterReplaceRequest:
       type: object
       additionalProperties: false
-      required: [reporter_agent_id, clarification_id]
-      properties: {reporter_agent_id: {$ref: '#/components/schemas/Uuid'}, clarification_id: {$ref: '#/components/schemas/Uuid'}}
+      required: [reporter_agent_id]
+      properties: {reporter_agent_id: {$ref: '#/components/schemas/Uuid'}, clarification_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}}
     InteractionGraph:
       type: object
       additionalProperties: false
       required: [nodes, edges]
       properties:
         nodes: {type: array, items: {$ref: '#/components/schemas/GroupRunMember'}}
-        edges: {type: array, items: {type: object, additionalProperties: false, required: [source_agent_id, target_agent_id, cause_type, cause_id], properties: {source_agent_id: {$ref: '#/components/schemas/Uuid'}, target_agent_id: {$ref: '#/components/schemas/Uuid'}, cause_type: {type: string, enum: [message, agent_invocation]}, cause_id: {$ref: '#/components/schemas/Uuid'}}}}
+        edges: {type: array, items: {type: object, additionalProperties: false, required: [source_agent_id, target_agent_id, cause_type, cause_id, status, created_at], properties: {source_agent_id: {$ref: '#/components/schemas/Uuid'}, target_agent_id: {$ref: '#/components/schemas/Uuid'}, cause_type: {type: string, enum: [message, agent_invocation]}, cause_id: {$ref: '#/components/schemas/Uuid'}, status: {type: string}, created_at: {$ref: '#/components/schemas/Timestamp'}}}}
     SharedTask:
       type: object
       additionalProperties: false

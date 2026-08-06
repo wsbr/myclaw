@@ -28,7 +28,16 @@ class PhaseOneAPI:
             headers["Idempotency-Key"] = str(uuid.uuid4())
         for attempt in range(6):
             response = self.client.request(method, path, headers=headers, **kwargs)
-            if response.status_code != 429 or attempt == 5:
+            retryable_server_error = False
+            if response.status_code >= 500:
+                try:
+                    retryable_server_error = bool(response.json()["error"]["retryable"])
+                except (KeyError, TypeError, ValueError):
+                    retryable_server_error = False
+            if (
+                response.status_code != 429
+                and not retryable_server_error
+            ) or attempt == 5:
                 break
             retry_after = response.headers.get("Retry-After")
             if retry_after is None:
@@ -258,21 +267,21 @@ def assembled_world(phase_api: PhaseOneAPI):
         "澄清产品目标、用户价值、范围边界和验收优先级。",
         "你负责产品需求复核，只依据当前委派内容指出范围、用户价值和验收标准缺口。",
         [],
-        set(),
+        {"search_group_history"},
     )
     developer = create_agent(
         "开发工程师",
         "评估实现方案、技术边界、迁移风险和可恢复性。",
         "你负责开发方案复核，返回实现风险、迁移边界和可验证的技术建议。",
         [],
-        set(),
+        {"write_file", "execute", "publish_artifact", "search_group_history"},
     )
     test_engineer = create_agent(
         "测试工程师",
         "设计验收、失败注入、并发与恢复测试。",
         "你负责测试方案复核，返回验收样本、失败路径和恢复检查建议。",
         [],
-        set(),
+        {"read_file", "execute", "search_group_history"},
     )
     audit_lead = create_agent(
         "退款审计负责人",

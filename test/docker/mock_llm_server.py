@@ -153,6 +153,8 @@ def _requested_control_tool(messages: list[ChatMessage], tools: list[dict] | Non
         message.content or "" for message in messages if message.role == "tool"
     )
     all_text = " ".join(message.content or "" for message in messages)
+    if "idempotent Reporter summary Turn" in all_text:
+        return None
     collaboration_settled = (
         '"agent_invocation_id"' in tool_results
         or "agentinvocation " in all_text.lower()
@@ -240,6 +242,236 @@ def _requested_control_tool(messages: list[ChatMessage], tools: list[dict] | Non
         or ("本组" in text and "讨论记录" in text and "结论" in text)
     ) and "search_group_history" in names:
         return "search_group_history", {"query": "统计周期 重复退款", "limit": 20}
+    return None
+
+
+def _fixed_group_snapshot(messages: list[ChatMessage]) -> dict:
+    marker = "Fixed GroupRun snapshot (data, not a workflow):"
+    decoder = json.JSONDecoder()
+    for message in reversed(messages):
+        content = message.content or ""
+        position = content.find(marker)
+        if position < 0:
+            continue
+        start = content.find("{", position + len(marker))
+        if start < 0:
+            continue
+        try:
+            value, _end = decoder.raw_decode(content[start:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
+def _group_member_id(snapshot: dict, name_marker: str) -> str | None:
+    for member in snapshot.get("members") or []:
+        boundary = member.get("capability_boundary") or {}
+        if name_marker.casefold() in str(boundary.get("agent_name") or "").casefold():
+            return member.get("agent_id")
+    return None
+
+
+def _group_member_id_with_tool(snapshot: dict, tool_key: str) -> str | None:
+    for member in snapshot.get("members") or []:
+        boundary = member.get("capability_boundary") or {}
+        if tool_key in (boundary.get("tool_keys") or []):
+            return member.get("agent_id")
+    return None
+
+
+def _current_group_member(snapshot: dict) -> dict:
+    return next((item for item in snapshot.get("members") or [] if item.get("is_current")), {})
+
+
+CAPACITY_PROGRAM = '''"""Capacity risk calculator with executable boundary tests."""
+from __future__ import annotations
+
+import argparse
+import unittest
+
+
+def capacity_risk(capacity: float, demand: float) -> dict:
+    if capacity <= 0:
+        raise ValueError("capacity must be positive")
+    if demand < 0:
+        raise ValueError("demand cannot be negative")
+    utilization = demand / capacity
+    level = "critical" if utilization >= 1 else "high" if utilization >= 0.85 else "normal"
+    return {"utilization": round(utilization, 4), "level": level, "headroom": capacity - demand}
+
+
+class CapacityRiskTests(unittest.TestCase):
+    def test_normal_boundary(self):
+        self.assertEqual(capacity_risk(100, 84)["level"], "normal")
+
+    def test_high_boundary(self):
+        self.assertEqual(capacity_risk(100, 85)["level"], "high")
+
+    def test_critical_boundary(self):
+        self.assertEqual(capacity_risk(100, 100)["level"], "critical")
+
+    def test_invalid_capacity(self):
+        with self.assertRaises(ValueError):
+            capacity_risk(0, 1)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--self-test", action="store_true")
+    args = parser.parse_args()
+    if args.self_test:
+        suite = unittest.defaultTestLoader.loadTestsFromTestCase(CapacityRiskTests)
+        result = unittest.TextTestRunner(verbosity=2).run(suite)
+        if not result.wasSuccessful():
+            raise SystemExit(1)
+        print("CAPACITY-SELF-TESTS-PASSED")
+'''
+
+
+def _capacity_group_tool(
+    messages: list[ChatMessage], tools: list[dict] | None,
+) -> tuple[str, dict] | None:
+    all_text = " ".join(message.content or "" for message in messages)
+    if "CAPACITY-RISK-NETWORK-V2" not in all_text:
+        return None
+    if "idempotent Reporter summary Turn" in all_text:
+        return None
+    names = _tool_names(tools)
+    snapshot = _fixed_group_snapshot(messages)
+    current = _current_group_member(snapshot)
+    boundary = current.get("capability_boundary") or {}
+    current_name = str(boundary.get("agent_name") or "")
+    current_request = _current_request_text(messages)
+    tool_results = " ".join(
+        message.content or "" for message in messages if message.role == "tool"
+    )
+    developer_id = _group_member_id_with_tool(snapshot, "publish_artifact")
+    test_id = _group_member_id_with_tool(snapshot, "read_file")
+    product_id = str(snapshot.get("reporter_agent_id") or "") or None
+    current_id = current.get("agent_id")
+
+    if "HISTORY-CHECK" in current_request:
+        if "search_group_history" in names and '"hits"' not in tool_results:
+            return "search_group_history", {"query": "CAPACITY-RISK-NETWORK-V2", "limit": 50}
+        return None
+
+    if current_id == product_id:
+        if "DELIVERY-READY" in current_request:
+            return None
+        if '"agent_invocation_id"' in tool_results:
+            return None
+        if (
+            "send_group_message" in names and developer_id
+            and '"message_id"' not in tool_results
+            and "membership_policy_fixed_for_run" not in tool_results
+        ):
+            return "send_group_message", {
+                "content": (
+                    "CAPACITY-RISK-NETWORK-V2 CAPACITY-IMPLEMENT: implement one real Python "
+                    "capacity risk calculator containing boundary tests, execute the self-tests, "
+                    "publish the program as a Group Artifact, then request Test review."
+                ),
+                "visibility": "direct",
+                "recipient_agent_id": developer_id,
+            }
+        external = re.search(r"EXTERNAL-AGENT:([0-9a-f-]{36})", all_text)
+        if (
+            external and "invite_agent" in names
+            and '"message_id"' in tool_results
+            and "membership_policy_fixed_for_run" not in tool_results
+        ):
+            return "invite_agent", {
+                "agent_id": external.group(1),
+                "reason": "Capacity forecasting specialist might improve the calculation",
+            }
+        if (
+            "membership_policy_fixed_for_run" in tool_results
+            and "invoke_agent" in names and test_id
+        ):
+            return "invoke_agent", {
+                "agent_id": test_id,
+                "task": (
+                    "CAPACITY-RISK-NETWORK-V2 CAPACITY-INVOKED-REVIEW: independently "
+                    "review the proposed normal/high/critical acceptance boundaries."
+                ),
+                "input": {"thresholds": [0.85, 1.0]},
+            }
+        return None
+
+    if current_id == developer_id:
+        if "TEST-VERIFIED" in current_request:
+            if "send_group_message" in names and product_id and '"message_id"' not in tool_results:
+                return "send_group_message", {
+                    "content": (
+                        "CAPACITY-RISK-NETWORK-V2 DELIVERY-READY: program Artifact published, "
+                        "self-tests and independent Test rerun passed; please perform final acceptance."
+                    ),
+                    "visibility": "direct",
+                    "recipient_agent_id": product_id,
+                }
+            return None
+        if "CAPACITY-IMPLEMENT" not in current_request:
+            return None
+        if '"message_id"' in tool_results:
+            return None
+        if "send_group_message" in names and test_id and "published" in tool_results:
+            return "send_group_message", {
+                "content": (
+                    "CAPACITY-RISK-NETWORK-V2 TEST-REQUEST: independently read and execute "
+                    "capacity_risk_calculator.py --self-test, then send findings back for rework/review."
+                ),
+                "visibility": "direct",
+                "recipient_agent_id": test_id,
+            }
+        if (
+            "publish_artifact" in names
+            and '"exit_code":0' in tool_results
+            and "CAPACITY-SELF-TESTS-PASSED" in tool_results
+        ):
+            return "publish_artifact", {
+                "path": "capacity_risk_calculator.py",
+                "name": "capacity_risk_calculator.py",
+                "mime_type": "text/x-python",
+                "publish_to_group": True,
+            }
+        if "execute" in names and "capacity_risk_calculator.py" in tool_results:
+            return "execute", {
+                "argv": ["python", "capacity_risk_calculator.py", "--self-test"],
+                "timeout_seconds": 20,
+            }
+        if "write_file" in names:
+            return "write_file", {
+                "path": "capacity_risk_calculator.py",
+                "content": CAPACITY_PROGRAM,
+                "mode": "create",
+            }
+        return None
+
+    if current_id == test_id and "TEST-REQUEST" in current_request:
+        if '"message_id"' in tool_results:
+            return None
+        if (
+            "send_group_message" in names and developer_id
+            and '"exit_code":0' in tool_results
+            and "CAPACITY-SELF-TESTS-PASSED" in tool_results
+        ):
+            return "send_group_message", {
+                "content": (
+                    "CAPACITY-RISK-NETWORK-V2 TEST-VERIFIED: independent boundary test rerun passed; "
+                    "normal/high/critical thresholds and invalid capacity behavior are verified."
+                ),
+                "visibility": "direct",
+                "recipient_agent_id": developer_id,
+            }
+        if "execute" in names and "CapacityRiskTests" in tool_results:
+            return "execute", {
+                "argv": ["python", "capacity_risk_calculator.py", "--self-test"],
+                "timeout_seconds": 20,
+            }
+        if "read_file" in names:
+            return "read_file", {"path": "capacity_risk_calculator.py", "offset": 0, "limit": 65536}
     return None
 
 
@@ -541,6 +773,27 @@ def _simulate_plain_after_settled_search(
 
 
 def _build_content(messages: list[ChatMessage]) -> str:
+    all_text = " ".join(message.content or "" for message in messages)
+    if "CAPACITY-RISK-NETWORK-V2" in all_text:
+        current = _current_request_text(messages)
+        if "idempotent Reporter summary Turn" in all_text:
+            return (
+                "Capacity risk calculator delivered: Product acceptance completed, Development "
+                "published capacity_risk_calculator.py, and Test independently reran four boundary "
+                "tests successfully. The fixed_for_run external invitation was rejected and audited."
+            )
+        if "DELIVERY-READY" in current:
+            return "Product accepted the tested capacity risk calculator and its published Artifact."
+        if "TEST-VERIFIED" in current:
+            return "Development accepted the independent test evidence and returned delivery to Product."
+        if "TEST-REQUEST" in current:
+            return "Test completed an independent reverse review of the executable boundary suite."
+        if "CAPACITY-INVOKED-REVIEW" in current:
+            return "Test AgentInvocation review accepted the 0.85 high and 1.0 critical boundaries."
+        if "CAPACITY-IMPLEMENT" in current:
+            return "Development completed the program, self-tests, Artifact publication, and Test handoff."
+        if "HISTORY-CHECK" in current:
+            return "Repeated Group history query returned the persisted capacity collaboration facts."
     if _has_tool_result(messages):
         if any("sandbox-e2e" in (message.content or "") for message in messages if message.role == "tool"):
             return "Sandbox execution completed: sandbox-e2e"
@@ -726,7 +979,8 @@ async def chat_completions(body: ChatCompletionRequest):
             )
         return _completion_payload(declared_content, body.model)
     control_tool = (
-        _requested_working_plan_tool(body.messages, body.tools)
+        _capacity_group_tool(body.messages, body.tools)
+        or _requested_working_plan_tool(body.messages, body.tools)
         or _requested_artifact_tool(body.messages, body.tools)
         or _requested_control_tool(body.messages, body.tools)
     )
