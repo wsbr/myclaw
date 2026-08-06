@@ -10,8 +10,14 @@ from typing import Iterable
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.common import uuid7
-from app.models.registry import PlatformTool, PolicyDefinition, SandboxProfile
+from app.models.common import utcnow, uuid7
+from app.models.registry import (
+    PlatformTool,
+    PolicyDefinition,
+    PolicyVersion,
+    SandboxProfile,
+    SandboxProfileVersion,
+)
 from app.persistence.reliable_writes import PlatformAuditWriter
 
 
@@ -69,37 +75,95 @@ async def seed_core_registries(db: AsyncSession) -> None:
             select(PolicyDefinition).where(PolicyDefinition.policy_key == key)
         )
         if existing is None:
-            db.add(
-                PolicyDefinition(
-                    id=uuid7(),
-                    policy_key=key,
-                    policy_type=policy_type,
-                    name=name,
-                    description=name,
-                    implementation_ref=f"app.runtime.policies:{key}",
-                    implementation_version="1",
-                    default_parameters=default_parameters,
-                    parameter_version=1,
-                    enabled=True,
-                )
+            existing = PolicyDefinition(
+                id=uuid7(),
+                policy_key=key,
+                policy_type=policy_type,
+                name=name,
+                description=name,
+                implementation_ref=f"app.runtime.policies:{key}",
+                implementation_version="1",
+                default_parameters=default_parameters,
+                parameter_version=1,
+                enabled=True,
+                status="active",
+                next_version_no=1,
             )
+            db.add(existing)
+            await db.flush()
+        if existing.current_version_id is None:
+            content = {
+                "implementation_ref": existing.implementation_ref,
+                "parameters": existing.default_parameters,
+                "policy_type": existing.policy_type,
+            }
+            version = PolicyVersion(
+                id=uuid7(),
+                policy_definition_id=existing.id,
+                version_no=existing.next_version_no,
+                implementation_ref=existing.implementation_ref,
+                parameters=dict(existing.default_parameters or {}),
+                content_hash=_stable_hash(content),
+                status="published",
+                published_at=utcnow(),
+                version=1,
+            )
+            db.add(version)
+            await db.flush()
+            existing.current_version_id = version.id
+            existing.next_version_no += 1
 
     sandbox = await db.scalar(
         select(SandboxProfile).where(SandboxProfile.profile_key == "local")
     )
     if sandbox is None:
-        db.add(
-            SandboxProfile(
-                id=uuid7(),
-                profile_key="local",
-                type="local",
-                description="Session-scoped local workspace",
-                implementation_ref="app.runtime.sandbox:LocalSandbox",
-                config={},
-                config_version=1,
-                enabled=True,
-            )
+        sandbox = SandboxProfile(
+            id=uuid7(),
+            profile_key="local",
+            type="local",
+            description="Session-scoped local workspace",
+            implementation_ref="app.runtime.sandbox:LocalSandbox",
+            config={},
+            config_version=1,
+            enabled=True,
+            status="active",
+            next_version_no=1,
         )
+        db.add(sandbox)
+        await db.flush()
+    if sandbox.current_version_id is None:
+        content = {
+            "provider_ref": sandbox.implementation_ref,
+            "runtime_class": "local",
+            "workspace_protocol_version": "workspace.v1",
+            "artifact_protocol_version": "artifact.v1",
+            "resource_policy": sandbox.config,
+            "egress_policy": {},
+            "mount_policy": {"private_agent": True, "group_shared": True},
+            "security_level": "dev_directory",
+        }
+        version = SandboxProfileVersion(
+            id=uuid7(),
+            sandbox_profile_id=sandbox.id,
+            version_no=sandbox.next_version_no,
+            provider_ref=sandbox.implementation_ref,
+            runtime_class="local",
+            image_digest=None,
+            workspace_protocol_version="workspace.v1",
+            artifact_protocol_version="artifact.v1",
+            resource_policy=dict(sandbox.config or {}),
+            egress_policy={},
+            mount_policy={"private_agent": True, "group_shared": True},
+            security_level="dev_directory",
+            content_hash=_stable_hash(content),
+            status="published",
+            published_at=utcnow(),
+            version=1,
+        )
+        db.add(version)
+        await db.flush()
+        sandbox.current_version_id = version.id
+        sandbox.next_version_no += 1
     await db.flush()
 
 

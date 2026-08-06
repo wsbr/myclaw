@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 from pydantic import BaseModel, Field
 
 
@@ -15,6 +16,8 @@ class AgentDraftInput(BaseModel):
     memory_write_policy_id: str | None = None
     memory_recall_policy_id: str | None = None
     group_enabled: bool = False
+    discovery_config: dict[str, Any] = Field(default_factory=dict)
+    collaboration_config: dict[str, Any] = Field(default_factory=dict)
     tool_ids: list[str] = Field(default_factory=list)
     skill_ids: list[str] = Field(default_factory=list)
     bound_agent_ids: list[str] = Field(default_factory=list)
@@ -36,6 +39,8 @@ class AgentDraftPatch(BaseModel):
     memory_write_policy_id: str | None = None
     memory_recall_policy_id: str | None = None
     group_enabled: bool | None = None
+    discovery_config: dict[str, Any] | None = None
+    collaboration_config: dict[str, Any] | None = None
     tool_ids: list[str] | None = None
     skill_ids: list[str] | None = None
     bound_agent_ids: list[str] | None = None
@@ -71,10 +76,19 @@ class AgentDraftResponse(AgentDraftInput):
 
 class PublishedVersionResponse(BaseModel):
     id: str
-    version_no: int
+    version_no: int | None
     publication_status: str = "published"
     content_hash: str
-    published_at: datetime
+    published_at: datetime | None
+    model_version_id: str | None
+    context_policy_version_id: str | None
+    history_policy_version_id: str | None
+    memory_write_policy_version_id: str | None
+    memory_recall_policy_version_id: str | None
+    sandbox_profile_version_id: str | None
+    tools: list[dict[str, str]] = Field(default_factory=list)
+    skills: list[dict[str, str]] = Field(default_factory=list)
+    agent_card_content_hash: str | None = None
 
 
 class AgentVersionDetailResponse(AgentDraftInput):
@@ -87,6 +101,21 @@ class AgentVersionDetailResponse(AgentDraftInput):
     published_at: datetime | None
     created_at: datetime
     updated_at: datetime
+    model_version_id: str | None
+    context_policy_version_id: str | None
+    history_policy_version_id: str | None
+    memory_write_policy_version_id: str | None
+    memory_recall_policy_version_id: str | None
+    sandbox_profile_version_id: str | None
+    frozen_tools: list[dict[str, str]] = Field(default_factory=list)
+    frozen_skills: list[dict[str, str]] = Field(default_factory=list)
+    agent_card_content_hash: str | None = None
+
+
+class CapabilityCheckResponse(BaseModel):
+    publishable: bool
+    issues: list[str] = Field(default_factory=list)
+    resolved_dependencies: dict[str, Any] | None = None
 
 
 class AgentDetailV1(BaseModel):

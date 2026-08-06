@@ -13,6 +13,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    JSON,
     String,
     Text,
     UniqueConstraint,
@@ -47,7 +48,7 @@ class AgentBlueprint(Base, TimestampMixin, VersionMixin):
     next_version_no: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
 
 
-class AgentAssemblyVersion(Base, TimestampMixin):
+class AgentAssemblyVersion(Base, TimestampMixin, VersionMixin):
     __tablename__ = "agent_version"
     __table_args__ = (
         UniqueConstraint("agent_id", "version_no", name="uq_agent_version_number"),
@@ -85,22 +86,42 @@ class AgentAssemblyVersion(Base, TimestampMixin):
     description: Mapped[str] = mapped_column(Text, default="", nullable=False)
     instructions: Mapped[str] = mapped_column(Text, default="", nullable=False)
     model_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("model.id"))
+    model_version_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("model_version.id")
+    )
     sandbox_profile_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("sandbox_profile.id")
+    )
+    sandbox_profile_version_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("sandbox_profile_version.id")
     )
     context_policy_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("policy_definition.id")
     )
+    context_policy_version_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("policy_version.id")
+    )
     history_policy_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("policy_definition.id")
+    )
+    history_policy_version_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("policy_version.id")
     )
     memory_write_policy_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("policy_definition.id")
     )
+    memory_write_policy_version_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("policy_version.id")
+    )
     memory_recall_policy_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("policy_definition.id")
     )
+    memory_recall_policy_version_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("policy_version.id")
+    )
     group_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    discovery_config: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    collaboration_config: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     created_by_account_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("platform_account.id"), nullable=False
     )
@@ -121,6 +142,7 @@ class AgentVersionTool(Base):
     platform_tool_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("platform_tool.id"), primary_key=True
     )
+    tool_registration_hash: Mapped[str | None] = mapped_column(String(64))
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
@@ -136,6 +158,10 @@ class AgentVersionSkill(Base):
     skill_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("skill.id"), primary_key=True
     )
+    skill_version_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("skill_version.id")
+    )
+    checksum: Mapped[str | None] = mapped_column(String(64))
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False)
 
 
@@ -152,3 +178,36 @@ class AgentVersionBinding(Base):
         String(36), ForeignKey("agent.id"), primary_key=True
     )
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class AgentCard(Base):
+    """Safe, immutable network projection derived at publish time."""
+
+    __tablename__ = "agent_card"
+    __table_args__ = (
+        UniqueConstraint("agent_version_id", name="uq_agent_card_version"),
+        Index(
+            "ix_agent_card_discovery", "visibility", "availability", "group_enabled"
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
+    agent_id: Mapped[str] = mapped_column(String(36), ForeignKey("agent.id"), nullable=False)
+    agent_version_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("agent_version.id"), nullable=False
+    )
+    visibility: Mapped[str] = mapped_column(String(20), nullable=False)
+    name: Mapped[str] = mapped_column(String(191), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    identity_kind: Mapped[str] = mapped_column(String(64), default="agent", nullable=False)
+    domain_tags: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    supported_outcomes: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    accepted_request_summary: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    capabilities_summary: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    collaboration_summary: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    declaration: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    attestation: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    availability: Mapped[str] = mapped_column(String(20), default="available", nullable=False)
+    group_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)

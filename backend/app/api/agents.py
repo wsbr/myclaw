@@ -14,6 +14,7 @@ from app.deps import CurrentAccount, get_current_account, get_current_builder
 from app.models.agent_v1 import (
     AgentAssemblyVersion,
     AgentBlueprint,
+    AgentCard,
     AgentVersionBinding,
     AgentVersionSkill,
     AgentVersionTool,
@@ -36,6 +37,7 @@ from app.schemas.agent_v1 import (
     AgentApiKeyCreate,
     AgentApiKeyResponse,
     DraftTestRunRequest,
+    CapabilityCheckResponse,
 )
 from app.services.agent_assembly_service import (
     AgentDraftConflict,
@@ -45,6 +47,7 @@ from app.services.agent_assembly_service import (
     publish_agent as publish_agent_domain,
     update_agent_draft,
     create_draft_test_snapshot,
+    check_publish_capabilities,
 )
 from app.services.agent_api_key_service import create_api_key, revoke_api_key
 from app.services.chat_service import create_user_session, enqueue_chat_message
@@ -101,10 +104,58 @@ async def _detail(db: AsyncSession, agent: AgentBlueprint) -> AgentDetailV1:
         sandbox_profile_id=draft.sandbox_profile_id, context_policy_id=draft.context_policy_id,
         history_policy_id=draft.history_policy_id, memory_write_policy_id=draft.memory_write_policy_id,
         memory_recall_policy_id=draft.memory_recall_policy_id, group_enabled=draft.group_enabled,
+        discovery_config=dict(draft.discovery_config or {}),
+        collaboration_config=dict(draft.collaboration_config or {}),
         tool_ids=list(selected.tool_ids), skill_ids=list(selected.skill_ids),
         bound_agent_ids=list(selected.bound_agent_ids), updated_at=draft.updated_at,
     )
     return AgentDetailV1(agent=summary, draft=draft_response)
+
+
+async def _published_version_response(
+    db: AsyncSession, version: AgentAssemblyVersion,
+) -> PublishedVersionResponse:
+    tools = list(await db.execute(
+        select(
+            AgentVersionTool.platform_tool_id,
+            AgentVersionTool.tool_registration_hash,
+        )
+        .where(AgentVersionTool.agent_version_id == version.id)
+        .order_by(AgentVersionTool.sort_order)
+    ))
+    skills = list(await db.execute(
+        select(
+            AgentVersionSkill.skill_id,
+            AgentVersionSkill.skill_version_id,
+            AgentVersionSkill.checksum,
+        )
+        .where(AgentVersionSkill.agent_version_id == version.id)
+        .order_by(AgentVersionSkill.sort_order)
+    ))
+    card = await db.scalar(
+        select(AgentCard).where(AgentCard.agent_version_id == version.id)
+    )
+    return PublishedVersionResponse(
+        id=version.id,
+        version_no=version.version_no,
+        publication_status=version.publication_status,
+        content_hash=version.content_hash,
+        published_at=version.published_at,
+        model_version_id=version.model_version_id,
+        context_policy_version_id=version.context_policy_version_id,
+        history_policy_version_id=version.history_policy_version_id,
+        memory_write_policy_version_id=version.memory_write_policy_version_id,
+        memory_recall_policy_version_id=version.memory_recall_policy_version_id,
+        sandbox_profile_version_id=version.sandbox_profile_version_id,
+        tools=[
+            {"tool_id": item[0], "registration_hash": item[1]} for item in tools
+        ],
+        skills=[
+            {"skill_id": item[0], "skill_version_id": item[1], "checksum": item[2]}
+            for item in skills
+        ],
+        agent_card_content_hash=card.content_hash if card else None,
+    )
 
 
 async def _summary(
@@ -291,6 +342,23 @@ async def patch_draft(
     return (await _detail(db, await db.get(AgentBlueprint, agent_id))).draft
 
 
+@router.get("/{agent_id}/draft/capability-check", response_model=CapabilityCheckResponse)
+async def check_agent_draft_capabilities(
+    agent_id: str,
+    db: AsyncSession = Depends(get_db),
+    current: CurrentAccount = Depends(get_current_builder),
+):
+    agent = await _get_owned_agent(db, agent_id, current)
+    draft = await db.get(AgentAssemblyVersion, agent.draft_version_id)
+    selection = await _selection(db, draft.id)
+    issues, resolved = await check_publish_capabilities(db, draft, selection)
+    return CapabilityCheckResponse(
+        publishable=not issues,
+        issues=issues,
+        resolved_dependencies=resolved.safe_snapshot() if resolved else None,
+    )
+
+
 @router.post("/{agent_id}/publish", response_model=AgentPublishResponse)
 async def publish_agent(
     agent_id: str, body: PublishAgentRequest,
@@ -341,10 +409,7 @@ async def publish_agent(
     detail = await _detail(db, agent)
     response = AgentPublishResponse(
         agent=detail.agent, draft=detail.draft,
-        published_version=PublishedVersionResponse(
-            id=published.id, version_no=published.version_no,
-            content_hash=published.content_hash, published_at=published.published_at,
-        ),
+        published_version=await _published_version_response(db, published),
     )
     record.resource_type = "agent_version"
     record.resource_id = published.id
@@ -377,10 +442,13 @@ async def list_versions(
         resource=f"agent:{agent_id}:versions",
         filters={"publication_status": publication_status},
     )
-    return {"items": [PublishedVersionResponse(
-        id=v.id, version_no=v.version_no, publication_status=v.publication_status,
-        content_hash=v.content_hash, published_at=v.published_at,
-    ).model_dump(mode="json") for v in versions], "next_cursor": next_cursor}
+    return {
+        "items": [
+            (await _published_version_response(db, version)).model_dump(mode="json")
+            for version in versions
+        ],
+        "next_cursor": next_cursor,
+    }
 
 
 @router.get("/{agent_id}/versions/{version_id}", response_model=AgentVersionDetailResponse)
@@ -393,6 +461,7 @@ async def get_version(
     if version is None or version.agent_id != agent_id or version.publication_status == "draft":
         raise HTTPException(status_code=404, detail="Agent version not found")
     selected = await _selection(db, version.id)
+    frozen = await _published_version_response(db, version)
     return AgentVersionDetailResponse(
         id=version.id, agent_id=version.agent_id, version_no=version.version_no,
         publication_status=version.publication_status, content_hash=version.content_hash,
@@ -405,6 +474,17 @@ async def get_version(
         memory_recall_policy_id=version.memory_recall_policy_id,
         group_enabled=version.group_enabled, tool_ids=list(selected.tool_ids),
         skill_ids=list(selected.skill_ids), bound_agent_ids=list(selected.bound_agent_ids),
+        discovery_config=dict(version.discovery_config or {}),
+        collaboration_config=dict(version.collaboration_config or {}),
+        model_version_id=version.model_version_id,
+        context_policy_version_id=version.context_policy_version_id,
+        history_policy_version_id=version.history_policy_version_id,
+        memory_write_policy_version_id=version.memory_write_policy_version_id,
+        memory_recall_policy_version_id=version.memory_recall_policy_version_id,
+        sandbox_profile_version_id=version.sandbox_profile_version_id,
+        frozen_tools=frozen.tools,
+        frozen_skills=frozen.skills,
+        agent_card_content_hash=frozen.agent_card_content_hash,
     )
 
 

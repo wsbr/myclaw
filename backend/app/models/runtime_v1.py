@@ -76,15 +76,24 @@ class Run(Base, TimestampMixin, VersionMixin):
     mode: Mapped[str] = mapped_column(String(20), nullable=False)
     execution_kind: Mapped[str] = mapped_column(String(32), default="normal", nullable=False)
     lifecycle: Mapped[str] = mapped_column(String(20), default="running", nullable=False)
+    # Agent-native status is the authoritative v2 lifecycle. The legacy
+    # lifecycle/outcome projection is retained until old UAT readers retire.
+    status: Mapped[str] = mapped_column(String(32), default="active", nullable=False)
     wait_reason: Mapped[str | None] = mapped_column(String(32))
     outcome: Mapped[str | None] = mapped_column(String(32))
     entry_agent_id: Mapped[str] = mapped_column(String(36), ForeignKey("agent.id"), nullable=False)
+    root_work_item_id: Mapped[str | None] = mapped_column(String(36))
+    permission_mode: Mapped[str] = mapped_column(
+        String(32), default="standard", nullable=False
+    )
+    hard_budget_snapshot: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     source_run_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("run.id"))
     result_summary: Mapped[str | None] = mapped_column(Text)
     error_code: Mapped[str | None] = mapped_column(String(100))
     cancellation_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
 
 
 class WorkItem(Base, TimestampMixin, VersionMixin):
@@ -114,7 +123,12 @@ class WorkItem(Base, TimestampMixin, VersionMixin):
     group_run_id: Mapped[str | None] = mapped_column(String(36))
     group_node_id: Mapped[str | None] = mapped_column(String(36))
     goal: Mapped[str] = mapped_column(Text, nullable=False)
+    purpose: Mapped[str] = mapped_column(
+        String(64), default="root_request", nullable=False
+    )
     status: Mapped[str] = mapped_column(String(32), default="queued", nullable=False)
+    wait_reason: Mapped[str | None] = mapped_column(String(64))
+    resume_cursor: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     active_runner_id: Mapped[str | None] = mapped_column(String(36))
     execution_epoch: Mapped[int] = mapped_column(BigInteger, default=1, nullable=False)
     attempt_no: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
@@ -141,11 +155,18 @@ class DurableRunner(Base, TimestampMixin, VersionMixin):
     agent_id: Mapped[str] = mapped_column(String(36), ForeignKey("agent.id"), nullable=False)
     agent_version_id: Mapped[str] = mapped_column(String(36), ForeignKey("agent_version.id"), nullable=False)
     execution_epoch: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    fencing_token: Mapped[int] = mapped_column(BigInteger, default=1, nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="queued", nullable=False)
     lease_owner: Mapped[str | None] = mapped_column(String(191))
     lease_token: Mapped[str | None] = mapped_column(String(36))
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
     heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    capability_snapshot_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey(
+            "capability_snapshot.id", use_alter=True,
+            name="fk_runner_capability_snapshot",
+        )
+    )
     principal_snapshot: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     assembly_snapshot: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     prompt_manifest: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
@@ -153,6 +174,9 @@ class DurableRunner(Base, TimestampMixin, VersionMixin):
     result_message_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("message.id"))
     error_code: Mapped[str | None] = mapped_column(String(100))
     error_detail: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    failure_code: Mapped[str | None] = mapped_column(String(100))
 
 
 class RunnerCheckpoint(Base):
@@ -168,9 +192,144 @@ class RunnerCheckpoint(Base):
     sequence_no: Mapped[int] = mapped_column(Integer, nullable=False)
     checkpoint_type: Mapped[str] = mapped_column(String(64), nullable=False)
     state_snapshot: Mapped[dict] = mapped_column(JSON, nullable=False)
+    execution_epoch: Mapped[int] = mapped_column(BigInteger, default=1, nullable=False)
+    capability_snapshot_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("capability_snapshot.id")
+    )
+    context_manifest: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    compaction_ref: Mapped[str | None] = mapped_column(String(500))
+    working_plan_revision: Mapped[int | None] = mapped_column(BigInteger)
+    result_cursor: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    pending_refs: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    budget_snapshot: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    content_hash: Mapped[str | None] = mapped_column(String(64))
     last_completed_step: Mapped[str | None] = mapped_column(String(100))
     safe_to_resume: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), default=utcnow, nullable=False)
+
+
+class CapabilitySnapshot(Base):
+    """Immutable effective capability set resolved for one Runner."""
+
+    __tablename__ = "capability_snapshot"
+    __table_args__ = (
+        UniqueConstraint("runner_id", name="uq_capability_snapshot_runner"),
+        Index("ix_capability_snapshot_work_item", "work_item_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
+    runner_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("runner_v1.id"), nullable=False
+    )
+    work_item_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("work_item.id"), nullable=False
+    )
+    agent_version_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("agent_version.id"), nullable=False
+    )
+    execution_principal: Mapped[dict] = mapped_column(JSON, nullable=False)
+    assembled_tool_keys: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    effective_tool_keys: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    denied_capabilities: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    discoverable_agents_scope: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    callable_agents_scope: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    permission_mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    governance_versions: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    budget_snapshot: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    runtime_release_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    harness_policy_versions: Mapped[dict] = mapped_column(JSON, nullable=False)
+    provider_adapter_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    tool_schema_bundle_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    experiment_cohort: Mapped[str | None] = mapped_column(String(100))
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), default=utcnow, nullable=False
+    )
+
+
+class AgentTurn(Base):
+    """One logical model decision, independent from transport retries."""
+
+    __tablename__ = "agent_turn"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('started','waiting_actions','completed','failed')",
+            name="ck_agent_turn_status",
+        ),
+        UniqueConstraint("runner_id", "turn_no", name="uq_agent_turn_number"),
+        Index("ix_agent_turn_work_item", "work_item_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
+    runner_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("runner_v1.id"), nullable=False
+    )
+    work_item_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("work_item.id"), nullable=False
+    )
+    run_id: Mapped[str] = mapped_column(String(36), ForeignKey("run.id"), nullable=False)
+    agent_version_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("agent_version.id"), nullable=False
+    )
+    capability_snapshot_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("capability_snapshot.id"), nullable=False
+    )
+    turn_no: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="started", nullable=False)
+    context_manifest: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    input_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    turn_items: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    stop_reason: Mapped[str | None] = mapped_column(String(64))
+    usage: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    provider_state_ref: Mapped[str | None] = mapped_column(String(500))
+    error_code: Mapped[str | None] = mapped_column(String(100))
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), default=utcnow, nullable=False
+    )
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), default=utcnow, nullable=False
+    )
+
+
+class ProviderAttempt(Base):
+    """Append-oriented transport attempt for an AgentTurn."""
+
+    __tablename__ = "provider_attempt"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('queued','running','succeeded','failed','timed_out','outcome_unknown')",
+            name="ck_provider_attempt_status",
+        ),
+        UniqueConstraint("agent_turn_id", "attempt_no", name="uq_provider_attempt_number"),
+        Index("ix_provider_attempt_status", "status", "started_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
+    agent_turn_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("agent_turn.id"), nullable=False
+    )
+    model_version_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("model_version.id"), nullable=False
+    )
+    attempt_no: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    provider: Mapped[str] = mapped_column(String(191), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="queued", nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    provider_request_id: Mapped[str | None] = mapped_column(String(191))
+    provider_state_ref: Mapped[str | None] = mapped_column(String(500))
+    received_payload: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    tool_call_observed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    side_effect_committed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    stop_reason: Mapped[str | None] = mapped_column(String(64))
+    usage: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    error_code: Mapped[str | None] = mapped_column(String(100))
+    error_detail: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), default=utcnow, nullable=False
+    )
 
 
 class Clarification(Base, TimestampMixin, VersionMixin):
@@ -278,6 +437,10 @@ class ToolInvocation(Base, TimestampMixin, VersionMixin):
     __tablename__ = "tool_invocation"
     __table_args__ = (
         UniqueConstraint("work_item_id", "business_idempotency_key", name="uq_tool_invocation_business_key"),
+        UniqueConstraint(
+            "work_item_id", "source_turn_id", "provider_tool_call_id",
+            name="uq_tool_invocation_provider_call",
+        ),
         CheckConstraint(
             "status IN ('created','waiting_confirmation','waiting_resource','queued','running','succeeded','failed','rejected','cancel_requested','cancelled','outcome_unknown')",
             name="ck_tool_invocation_status",
@@ -293,6 +456,16 @@ class ToolInvocation(Base, TimestampMixin, VersionMixin):
     session_id: Mapped[str] = mapped_column(String(36), ForeignKey("user_session.id"), nullable=False)
     platform_tool_id: Mapped[str] = mapped_column(String(36), ForeignKey("platform_tool.id"), nullable=False)
     tool_key: Mapped[str] = mapped_column(String(191), nullable=False)
+    source_turn_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("agent_turn.id")
+    )
+    provider_tool_call_id: Mapped[str | None] = mapped_column(String(191))
+    operation_key: Mapped[str | None] = mapped_column(String(191))
+    capability_snapshot_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("capability_snapshot.id")
+    )
+    tool_registration_hash: Mapped[str | None] = mapped_column(String(64))
+    authorization_snapshot: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     execution_mode: Mapped[str] = mapped_column(String(20), nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="created", nullable=False)
     arguments: Mapped[dict] = mapped_column(JSON, nullable=False)

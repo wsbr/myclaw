@@ -142,6 +142,11 @@ class UserSession(Base, TimestampMixin, VersionMixin):
     user_id: Mapped[str] = mapped_column(
         String(191), ForeignKey("user_identity.user_id"), nullable=False
     )
+    # account_id is the v2 authority. user_id remains during the UAT
+    # expand/contract period so existing sessions stay readable.
+    account_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("platform_account.id")
+    )
     entry_agent_id: Mapped[str] = mapped_column(String(36), nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="active", nullable=False)
     title: Mapped[str | None] = mapped_column(String(500))
@@ -150,6 +155,10 @@ class UserSession(Base, TimestampMixin, VersionMixin):
     origin_channel_account_id: Mapped[str | None] = mapped_column(String(36))
     origin_external_conversation_id: Mapped[str | None] = mapped_column(String(500))
     next_event_sequence: Mapped[int] = mapped_column(BigInteger, default=1, nullable=False)
+    permission_mode: Mapped[str] = mapped_column(
+        String(32), default="standard", nullable=False
+    )
+    permission_revision: Mapped[int] = mapped_column(BigInteger, default=1, nullable=False)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
 
 

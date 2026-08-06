@@ -23,10 +23,13 @@ class SessionSandboxResponse(BaseModel):
 class SessionResponse(BaseModel):
     id: str
     user_id: str
+    account_id: str | None = None
     entry_agent_id: str
     status: str
     title: str | None
     origin_type: str
+    permission_mode: str = "standard"
+    permission_revision: int = 1
     version: int
     created_at: datetime
     updated_at: datetime
@@ -60,15 +63,19 @@ class RunResponse(BaseModel):
     mode: str
     execution_kind: str
     lifecycle: str
+    status: str = "active"
     wait_reason: str | None
     outcome: str | None
     entry_agent_id: str
+    root_work_item_id: str | None = None
+    permission_mode: str = "standard"
     result_summary: str | None
     error_code: str | None
     cancellation_requested_at: datetime | None
     version: int
     started_at: datetime
     finished_at: datetime | None
+    completed_at: datetime | None = None
 
     model_config = {"from_attributes": True}
 
@@ -84,7 +91,9 @@ class WorkItemResponse(BaseModel):
     owner_agent_id: str
     agent_version_id: str
     goal: str
+    purpose: str = "root_request"
     status: str
+    wait_reason: str | None = None
     active_runner_id: str | None
     execution_epoch: int
     attempt_no: int
@@ -105,8 +114,10 @@ class RunnerResponse(BaseModel):
     agent_id: str
     agent_version_id: str
     execution_epoch: int
+    fencing_token: int = 1
     status: str
     result_message_id: str | None
+    capability_snapshot_id: str | None = None
     error_code: str | None
     version: int
     created_at: datetime

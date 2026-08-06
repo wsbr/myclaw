@@ -16,7 +16,13 @@ from app.models.foundation import (
     UserIdentity,
     UserSession,
 )
-from app.models.registry import PlatformTool, PolicyDefinition, SandboxProfile
+from app.models.registry import (
+    PlatformTool,
+    PolicyDefinition,
+    PolicyVersion,
+    SandboxProfile,
+    SandboxProfileVersion,
+)
 from app.persistence.reliable_writes import ExecutionEventWriter, OutboxWriter
 from app.persistence.reliable_writes import EventRecipient
 from app.services.visible_events import VisibleEventProjection
@@ -41,7 +47,9 @@ async def session_factory():
         PlatformAuditEvent.__table__,
         PlatformTool.__table__,
         PolicyDefinition.__table__,
+        PolicyVersion.__table__,
         SandboxProfile.__table__,
+        SandboxProfileVersion.__table__,
     ]
     async with engine.begin() as connection:
         await connection.run_sync(lambda sync: Base.metadata.create_all(sync, tables=tables))

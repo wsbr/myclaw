@@ -11,21 +11,24 @@ from app.models.foundation import (
     OutboxCommand,
 )
 from app.models.registry import (
-    RegisteredModel,
+    RegisteredModel, ModelVersion, ConformanceRun,
     PlatformTool,
     RegisteredSkill,
     SkillVersion,
-    PolicyDefinition,
-    SandboxProfile,
+    PolicyDefinition, PolicyVersion,
+    SandboxProfile, SandboxProfileVersion,
 )
 from app.models.agent_v1 import (
     AgentBlueprint,
     AgentAssemblyVersion,
     AgentVersionTool,
     AgentVersionSkill,
-    AgentVersionBinding,
+    AgentVersionBinding, AgentCard,
 )
 from app.models.runtime_v1 import (
+    AgentTurn,
+    CapabilitySnapshot,
+    ProviderAttempt,
     Message, Run, WorkItem, DurableRunner, RunnerCheckpoint, Clarification, SessionSandbox, Workspace,
     WorkspaceLock, WorkspaceLockRequest, WorkspaceReadLease,
     ToolInvocation, ToolAttempt, ToolConfirmation, AgentInvocation,
@@ -52,10 +55,12 @@ from app.models.history_v1 import HistorySummary
 __all__ = [
     "UserIdentity", "PlatformAccount", "PlatformAccountRole", "IdempotencyRecord", "AgentApiKey",
     "UserSession", "ExecutionEvent", "ExecutionEventRecipient", "PlatformAuditEvent",
-    "OutboxCommand", "RegisteredModel", "PlatformTool", "RegisteredSkill",
-    "SkillVersion", "PolicyDefinition", "SandboxProfile",
+    "OutboxCommand", "RegisteredModel", "ModelVersion", "ConformanceRun",
+    "PlatformTool", "RegisteredSkill", "SkillVersion", "PolicyDefinition",
+    "PolicyVersion", "SandboxProfile", "SandboxProfileVersion",
     "AgentBlueprint", "AgentAssemblyVersion", "AgentVersionTool",
-    "AgentVersionSkill", "AgentVersionBinding",
+    "AgentVersionSkill", "AgentVersionBinding", "AgentCard",
+    "AgentTurn", "CapabilitySnapshot", "ProviderAttempt",
     "Message", "Run", "WorkItem", "DurableRunner", "RunnerCheckpoint", "Clarification",
     "SessionSandbox", "Workspace", "WorkspaceLock", "WorkspaceLockRequest", "WorkspaceReadLease",
     "ToolInvocation", "ToolAttempt", "ToolConfirmation", "AgentInvocation",

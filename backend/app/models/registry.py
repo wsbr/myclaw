@@ -23,12 +23,23 @@ from app.database import Base
 from app.models.common import TimestampMixin, VersionMixin, utcnow, uuid7
 
 
-class RegisteredModel(Base, TimestampMixin):
+class RegisteredModel(Base, TimestampMixin, VersionMixin):
     __tablename__ = "model"
-    __table_args__ = (Index("ix_model_provider_enabled", "provider", "enabled"),)
+    __table_args__ = (
+        CheckConstraint("status IN ('active','inactive')", name="ck_model_status"),
+        Index("ix_model_provider_enabled", "provider", "enabled"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
     key: Mapped[str] = mapped_column(String(191), unique=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(191), default="", nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="active", nullable=False)
+    current_version_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("model_version.id", use_alter=True, name="fk_model_current_version")
+    )
+    next_version_no: Mapped[int] = mapped_column(BigInteger, default=1, nullable=False)
+    # The fields below remain readable while the expand/contract migration
+    # moves existing UAT registry rows into immutable ModelVersion records.
     provider: Mapped[str] = mapped_column(String(50), nullable=False)
     model_name: Mapped[str] = mapped_column(String(200), nullable=False)
     endpoint: Mapped[str | None] = mapped_column(String(500))
@@ -43,6 +54,74 @@ class RegisteredModel(Base, TimestampMixin):
     )
 
 
+class ModelVersion(Base):
+    """Immutable provider behavior snapshot selected by an AgentVersion."""
+
+    __tablename__ = "model_version"
+    __table_args__ = (
+        UniqueConstraint("model_id", "version_no", name="uq_model_version_number"),
+        UniqueConstraint("model_id", "content_hash", name="uq_model_version_hash"),
+        Index("ix_model_version_model_published", "model_id", "published_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
+    model_id: Mapped[str] = mapped_column(String(36), ForeignKey("model.id"), nullable=False)
+    version_no: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    provider: Mapped[str] = mapped_column(String(191), nullable=False)
+    model_name: Mapped[str] = mapped_column(String(191), nullable=False)
+    endpoint: Mapped[str | None] = mapped_column(String(500))
+    credential_ref: Mapped[str | None] = mapped_column(String(500))
+    default_parameters: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    capabilities: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    adapter_protocol: Mapped[str] = mapped_column(
+        String(64), default="agent_native.v2", nullable=False
+    )
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    published_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), default=utcnow, nullable=False
+    )
+    published_by_account_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("platform_account.id")
+    )
+
+
+class ConformanceRun(Base, TimestampMixin, VersionMixin):
+    """Append-only evidence; a rerun creates a new row instead of overwriting."""
+
+    __tablename__ = "conformance_run"
+    __table_args__ = (
+        CheckConstraint(
+            "subject_type IN ('model_version','platform_tool','channel_plugin','sandbox_profile_version')",
+            name="ck_conformance_subject_type",
+        ),
+        CheckConstraint(
+            "status IN ('queued','running','passed','failed')",
+            name="ck_conformance_status",
+        ),
+        UniqueConstraint(
+            "subject_type", "subject_id", "suite_version", "idempotency_key",
+            name="uq_conformance_run_request",
+        ),
+        Index(
+            "ix_conformance_subject_terminal",
+            "subject_type", "subject_id", "suite_version", "status", "ended_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
+    subject_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    subject_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    suite_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(191), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="queued", nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    result_summary: Mapped[dict | None] = mapped_column(JSON)
+    evidence_artifact_id: Mapped[str | None] = mapped_column(String(36))
+    content_hash: Mapped[str | None] = mapped_column(String(64))
+
+
 class PlatformTool(Base, TimestampMixin):
     __tablename__ = "platform_tool"
     __table_args__ = (
@@ -50,8 +129,12 @@ class PlatformTool(Base, TimestampMixin):
             "execution_mode IN ('inline','durable_async')", name="ck_platform_tool_mode"
         ),
         CheckConstraint(
-            "confirmation_policy IN ('never','always')",
+            "confirmation_policy IN ('never','always','per_call','session_grant')",
             name="ck_platform_tool_confirmation",
+        ),
+        CheckConstraint(
+            "side_effect IN ('none','idempotent','non_idempotent')",
+            name="ck_platform_tool_side_effect",
         ),
         Index("ix_platform_tool_enabled_key", "enabled", "tool_key"),
     )
@@ -65,6 +148,9 @@ class PlatformTool(Base, TimestampMixin):
     implementation_ref: Mapped[str] = mapped_column(String(500), nullable=False)
     implementation_version: Mapped[str] = mapped_column(String(64), nullable=False)
     execution_mode: Mapped[str] = mapped_column(String(20), default="inline", nullable=False)
+    side_effect: Mapped[str] = mapped_column(String(20), default="none", nullable=False)
+    supports_cancel: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    supports_status_lookup: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     confirmation_policy: Mapped[str] = mapped_column(String(20), default="never", nullable=False)
     platform_config: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
@@ -95,7 +181,7 @@ class SkillVersion(Base):
         UniqueConstraint("skill_id", "version_no", name="uq_skill_version_number"),
         UniqueConstraint("skill_id", "checksum", name="uq_skill_version_checksum"),
         CheckConstraint(
-            "status IN ('uploaded','validating','published','rejected','deprecated')",
+            "status IN ('uploaded','validating','published','rejected','deprecated','quarantined')",
             name="ck_skill_version_status",
         ),
         Index("ix_skill_version_status", "skill_id", "status", "version_no"),
@@ -107,6 +193,8 @@ class SkillVersion(Base):
     status: Mapped[str] = mapped_column(String(20), default="uploaded", nullable=False)
     package_uri: Mapped[str] = mapped_column(String(1000), nullable=False)
     checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    manifest: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), default="", nullable=False)
     manifest_name: Mapped[str] = mapped_column(String(200), nullable=False)
     manifest_description: Mapped[str] = mapped_column(Text, nullable=False)
     validation_error: Mapped[str | None] = mapped_column(Text)
@@ -119,7 +207,7 @@ class SkillVersion(Base):
     )
 
 
-class PolicyDefinition(Base, TimestampMixin):
+class PolicyDefinition(Base, TimestampMixin, VersionMixin):
     __tablename__ = "policy_definition"
     __table_args__ = (
         CheckConstraint(
@@ -127,6 +215,7 @@ class PolicyDefinition(Base, TimestampMixin):
             name="ck_policy_definition_type",
         ),
         Index("ix_policy_definition_type_enabled", "policy_type", "enabled"),
+        CheckConstraint("status IN ('active','inactive')", name="ck_policy_definition_status"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
@@ -139,9 +228,43 @@ class PolicyDefinition(Base, TimestampMixin):
     default_parameters: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     parameter_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="active", nullable=False)
+    current_version_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("policy_version.id", use_alter=True, name="fk_policy_current_version")
+    )
+    next_version_no: Mapped[int] = mapped_column(BigInteger, default=1, nullable=False)
 
 
-class SandboxProfile(Base, TimestampMixin):
+class PolicyVersion(Base):
+    __tablename__ = "policy_version"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('published','deprecated')", name="ck_policy_version_status"
+        ),
+        UniqueConstraint(
+            "policy_definition_id", "version_no", name="uq_policy_version_number"
+        ),
+        UniqueConstraint(
+            "policy_definition_id", "content_hash", name="uq_policy_version_hash"
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
+    policy_definition_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("policy_definition.id"), nullable=False
+    )
+    version_no: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    implementation_ref: Mapped[str] = mapped_column(String(500), nullable=False)
+    parameters: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="published", nullable=False)
+    published_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), default=utcnow, nullable=False
+    )
+    version: Mapped[int] = mapped_column(BigInteger, default=1, nullable=False)
+
+
+class SandboxProfile(Base, TimestampMixin, VersionMixin):
     __tablename__ = "sandbox_profile"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
@@ -152,3 +275,53 @@ class SandboxProfile(Base, TimestampMixin):
     config: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     config_version: Mapped[int] = mapped_column(BigInteger, default=1, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="active", nullable=False)
+    current_version_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey(
+            "sandbox_profile_version.id", use_alter=True,
+            name="fk_sandbox_current_version",
+        )
+    )
+    next_version_no: Mapped[int] = mapped_column(BigInteger, default=1, nullable=False)
+
+
+class SandboxProfileVersion(Base):
+    __tablename__ = "sandbox_profile_version"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('published','deprecated')", name="ck_sandbox_version_status"
+        ),
+        CheckConstraint(
+            "security_level IN ('dev_directory','microvm')",
+            name="ck_sandbox_version_security",
+        ),
+        UniqueConstraint(
+            "sandbox_profile_id", "version_no", name="uq_sandbox_version_number"
+        ),
+        UniqueConstraint(
+            "sandbox_profile_id", "content_hash", name="uq_sandbox_version_hash"
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
+    sandbox_profile_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("sandbox_profile.id"), nullable=False
+    )
+    version_no: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    provider_ref: Mapped[str] = mapped_column(String(500), nullable=False)
+    runtime_class: Mapped[str] = mapped_column(String(191), nullable=False)
+    image_digest: Mapped[str | None] = mapped_column(String(191))
+    workspace_protocol_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    artifact_protocol_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    resource_policy: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    egress_policy: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    mount_policy: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    security_level: Mapped[str] = mapped_column(
+        String(32), default="dev_directory", nullable=False
+    )
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="published", nullable=False)
+    published_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), default=utcnow, nullable=False
+    )
+    version: Mapped[int] = mapped_column(BigInteger, default=1, nullable=False)
