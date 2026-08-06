@@ -253,6 +253,27 @@ def assembled_world(phase_api: PhaseOneAPI):
         [],
         set(),
     )
+    product_manager = create_agent(
+        "产品经理",
+        "澄清产品目标、用户价值、范围边界和验收优先级。",
+        "你负责产品需求复核，只依据当前委派内容指出范围、用户价值和验收标准缺口。",
+        [],
+        set(),
+    )
+    developer = create_agent(
+        "开发工程师",
+        "评估实现方案、技术边界、迁移风险和可恢复性。",
+        "你负责开发方案复核，返回实现风险、迁移边界和可验证的技术建议。",
+        [],
+        set(),
+    )
+    test_engineer = create_agent(
+        "测试工程师",
+        "设计验收、失败注入、并发与恢复测试。",
+        "你负责测试方案复核，返回验收样本、失败路径和恢复检查建议。",
+        [],
+        set(),
+    )
     audit_lead = create_agent(
         "退款审计负责人",
         "统筹退款运营、订单风控与审计交付，生成可下载的审计证据。",
@@ -274,4 +295,7 @@ def assembled_world(phase_api: PhaseOneAPI):
         "refund_ops": refund_ops,
         "risk_control": risk_control,
         "external_supplier": external_supplier,
+        "product_manager": product_manager,
+        "developer": developer,
+        "test_engineer": test_engineer,
     }

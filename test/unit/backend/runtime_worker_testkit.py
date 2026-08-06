@@ -21,7 +21,7 @@ from app.models.registry import (
 from app.models.runtime_v1 import (
     AgentInvocation, Approval, Clarification, DurableRunner, Message, Run, RunnerCheckpoint,
     RunnerPolicySnapshot, RunnerSkillSnapshot, RunnerToolSnapshot,
-    ToolAttempt, ToolConfirmation, ToolInvocation, WorkItem, WorkingPlan,
+    PlanUpdate, ToolAttempt, ToolConfirmation, ToolInvocation, WorkItem, WorkingPlan,
 )
 from app.services.chat_service import create_user_session, enqueue_chat_message
 
@@ -47,7 +47,7 @@ async def create_runtime_world(*, content: str = "hello") -> RuntimeWorld:
         Message.__table__, Run.__table__, WorkItem.__table__, DurableRunner.__table__,
         RunnerCheckpoint.__table__, ToolInvocation.__table__, ToolAttempt.__table__,
         ToolConfirmation.__table__, AgentInvocation.__table__, Clarification.__table__,
-        Approval.__table__, WorkingPlan.__table__,
+        Approval.__table__, WorkingPlan.__table__, PlanUpdate.__table__,
         RunnerSkillSnapshot.__table__,
         RunnerToolSnapshot.__table__, RunnerPolicySnapshot.__table__, OutboxCommand.__table__,
         Artifact.__table__, MessageArtifact.__table__, RunnerTrace.__table__,

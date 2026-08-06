@@ -364,74 +364,70 @@ def test_phase_one_acceptance(
             )
     record_property("scene_6_tool_governance", "passed")
 
-    # 3. A real refund-audit Plan is edited, frozen, and runs independent domain nodes in parallel.
+    # 3. Plan is a permission mode: discuss and revise read-only, then resume
+    # the same Run/WorkItem with direct permission for dynamic implementation.
     plan_session = _session(api, audit_lead, "季度退款审计计划")
-    created_plan = api.request(
-        "POST", f"/api/v1/sessions/{plan_session['id']}/plans", idem=True,
+    entered_plan = api.request(
+        "POST", f"/api/v1/sessions/{plan_session['id']}/plan-mode", idem=True,
+        headers={"If-Match": f'W/"{plan_session["version"]}"'},
         json={
-            "goal": "复盘 2026 年第二季度退款异常：分别核对退款运营口径、订单风险和审计结论，"
-                    "最后形成一份标明证据缺口的管理层摘要"
+            "goal": "复杂任务 plan-agent-network：只读复盘 2026 年第二季度退款异常，"
+                    "按需发现专业候选复核，并形成标明证据缺口的动态实施计划。"
         },
-    ).json()["plan"]
-    proposal = api.wait_resource(
-        f"/api/v1/plans/{created_plan['id']}",
-        lambda value: value["definition_status"] == "awaiting_confirmation",
-    )
-    proposal_runners = api.request(
-        "GET", f"/api/v1/runs/{created_plan['run_id']}/runners",
-    ).json()["items"]
-    proposal_harness = [
-        api.request("GET", f"/api/v1/runners/{item['id']}/trace").json()["harness"]
-        for item in proposal_runners
-    ]
-    assert all(item["response_contract"] == "structured.plan_proposal.v1" for item in proposal_harness)
-    assert all(item["structured_output"] in {"json_object", "json_schema"} for item in proposal_harness)
-    nodes = [
-        {
-            "node_key": "audit_summary", "title": "审计口径与交付框架",
-            "goal": "基于已确认的 2026 年第二季度口径，定义退款审计范围、关键指标和管理层摘要结构；"
-                    "本节点只需在消息中返回摘要，不生成文件。",
-            "acceptance_criteria": "消息内明确统计周期、审计口径、证据缺口和交付结构。",
-            "assigned_agent_id": audit_lead,
-        },
-        {
-            "node_key": "refund_reconcile", "title": "退款运营核对",
-            "goal": "基于题面已确认信息核对退款批次、渠道状态与处理时效，在消息中列出差异及业务解释。",
-            "acceptance_criteria": "消息内覆盖批次、渠道、时效三个维度，并标明证据缺口。",
-            "assigned_agent_id": refund_ops,
-        },
-        {
-            "node_key": "risk_review", "title": "异常订单风控复核",
-            "goal": "基于题面已确认信息复核重复退款、账号关联和设备风险，在消息中给出风险分层。",
-            "acceptance_criteria": "消息内输出高、中、低风险判断及每类证据依据。",
-            "assigned_agent_id": risk_control,
-        },
-    ]
-    edited_plan = api.request(
-        "PATCH", f"/api/v1/plans/{proposal['id']}", idem=True,
-        headers={"If-Match": f'W/"{proposal["version"]}"'},
-        json={"goal": proposal["goal"], "deliverable": "季度退款异常复盘与管理层审计摘要", "nodes": nodes,
-              "dependencies": [], "expected_graph_revision": proposal["graph_revision"]},
     ).json()
-    frozen_plan = api.request(
-        "POST", f"/api/v1/plans/{proposal['id']}/confirm", idem=True,
-        headers={"If-Match": f'W/"{edited_plan["version"]}"'},
-        json={"expected_graph_revision": edited_plan["graph_revision"]},
-    ).json()
-    assert frozen_plan["definition_status"] == "frozen"
-    plan_result, plan_actions = _wait_run_with_user_actions(
-        api, frozen_plan["run_id"], plan_session["id"],
-        clarification_answer=(
-            "采用 2026 年第二季度口径；本轮只需基于题面生成消息内摘要，未知数据列为证据缺口。"
-        ),
-        max_actions=6,
+    plan_run_id = entered_plan["run"]["id"]
+    root_work_item_id = entered_plan["run"]["root_work_item_id"]
+    api.wait_resource(
+        f"/api/v1/runs/{plan_run_id}",
+        lambda value: value["status"] == "waiting_approval",
     )
+    proposal = api.request(
+        "GET", f"/api/v1/runs/{plan_run_id}/working-plans",
+    ).json()["items"][0]
+    assert proposal["revision"] == 1 and len(proposal["items"]) >= 3
+    api.request(
+        "POST", f"/api/v1/working-plans/{proposal['id']}/continue-planning",
+        idem=True, headers={"If-Match": f'W/"{proposal["version"]}"'},
+        json={
+            "instruction": "修改方向：先补充失败回滚边界，再准备实施。",
+            "expected_revision": proposal["revision"],
+        },
+    )
+    api.wait_resource(
+        f"/api/v1/runs/{plan_run_id}",
+        lambda value: value["status"] == "waiting_approval",
+    )
+    proposal = api.request(
+        "GET", f"/api/v1/working-plans/{proposal['id']}",
+    ).json()
+    assert proposal["revision"] == 2
+    plan_approval = api.wait_action(plan_session["id"], "plan_implementation")
+    approved = api.request(
+        "POST", f"/api/v1/working-plans/{proposal['id']}/approve-implementation",
+        idem=True, headers={"If-Match": f'W/"{proposal["version"]}"'},
+        json={
+            "expected_revision": proposal["revision"],
+            "subject_hash": plan_approval["subject_hash"],
+        },
+    ).json()
+    assert approved["session"]["permission_mode"] == "direct"
+    assert approved["run"]["id"] == plan_run_id
+    assert approved["run"]["root_work_item_id"] == root_work_item_id
+    plan_result = api.wait_run(plan_run_id)
     assert plan_result["outcome"] == "succeeded"
-    assert sum(plan_actions.values()) <= 6
-    plan_versions = {item["agent_id"]: item["agent_version_id"] for item in frozen_plan["declared_agents"]}
-    plan_work = api.request("GET", f"/api/v1/plans/{proposal['id']}/work-items").json()["items"]
-    assert len(plan_work) == 3 and {item["status"] for item in plan_work} == {"succeeded"}
-    record_property("scene_3_plan_freeze_parallel_settlement", "passed")
+    invocations = api.request(
+        "GET", f"/api/v1/runs/{plan_run_id}/agent-invocations",
+    ).json()["items"]
+    assert invocations and {item["status"] for item in invocations} == {"succeeded"}
+    plan_versions = {
+        item["id"]: item["target_agent_version_id"] for item in invocations
+    }
+    plan_work = api.request(
+        "GET", f"/api/v1/runs/{plan_run_id}/work-items",
+    ).json()["items"]
+    assert len(plan_work) == len(invocations) + 1
+    assert sum(item["id"] == root_work_item_id for item in plan_work) == 1
+    record_property("scene_3_plan_permission_dynamic_settlement", "passed")
 
     # 4. Three-Agent refund Group: clarification, peer review, and confirmed-history reuse.
     group_session = _session(api, audit_lead, "退款异常联合复核组")
@@ -611,12 +607,15 @@ def test_phase_one_acceptance(
 
     record_property("scene_4_group_collaboration", "passed")
 
-    # 5. Publishing new versions changes new Chat only; frozen Plan and Group mappings remain unchanged.
+    # 5. Publishing new versions changes new Chat only; historical dynamic
+    # AgentInvocation and frozen Group mappings remain unchanged.
     new_audit_version = _publish_next(api, audit_lead, "v2")
     new_refund_version = _publish_next(api, refund_ops, "v2")
     assert {
-        item["agent_id"]: item["agent_version_id"]
-        for item in api.request("GET", f"/api/v1/plans/{proposal['id']}").json()["declared_agents"]
+        item["id"]: item["target_agent_version_id"]
+        for item in api.request(
+            "GET", f"/api/v1/runs/{plan_run_id}/agent-invocations",
+        ).json()["items"]
     } == plan_versions
     assert {
         item["group_node_id"]: item["agent_version_id"]

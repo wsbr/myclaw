@@ -102,6 +102,22 @@ def _pending_effect(messages: list[ChatMessage], tool_key: str) -> bool:
     )
 
 
+def _current_request_text(messages: list[ChatMessage]) -> str:
+    platform_continuations = (
+        "the user approved workingplan",
+        "the user rejected workingplan",
+        "the user did not approve the current plan",
+    )
+    for message in reversed(messages):
+        content = (message.content or "").strip()
+        if message.role != "user" or not content:
+            continue
+        if content.lower().startswith(platform_continuations):
+            continue
+        return content
+    return ""
+
+
 def _should_execute_tool(messages: list[ChatMessage], tools: list[dict] | None) -> bool:
     if "execute" not in _tool_names(tools):
         return False
@@ -131,11 +147,58 @@ def _execute_arguments(messages: list[ChatMessage]) -> dict:
 
 
 def _requested_control_tool(messages: list[ChatMessage], tools: list[dict] | None) -> tuple[str, dict] | None:
+    names = _tool_names(tools)
+    text = _current_request_text(messages).lower()
+    tool_results = " ".join(
+        message.content or "" for message in messages if message.role == "tool"
+    )
+    all_text = " ".join(message.content or "" for message in messages)
+    collaboration_settled = (
+        '"agent_invocation_id"' in tool_results
+        or "agentinvocation " in all_text.lower()
+    )
+    if (
+        "ask clarification" in text
+        and '"clarification_id"' not in tool_results
+        and "采用 2026 年第二季度口径" not in all_text
+        and "ask_user" in names
+    ):
+        return "ask_user", {
+            "question": "本轮复核应采用第二季度还是六月单月统计口径？",
+        }
+    if "plan-agent-network" in text:
+        role_queries = {
+            "plan-agent-network-product": "产品经理",
+            "plan-agent-network-development": "开发工程师",
+            "plan-agent-network-test": "测试工程师",
+        }
+        role_query = next(
+            (value for marker, value in role_queries.items() if marker in text),
+            None,
+        )
+        if (
+            '"candidates"' not in tool_results
+            and not collaboration_settled
+            and "discover_agents" in names
+        ):
+            return "discover_agents", {
+                **({"query": role_query} if role_query else {}),
+                "limit": 10,
+            }
+        if (
+            '"candidates"' in tool_results
+            and not collaboration_settled
+            and "invoke_agent" in names
+        ):
+            match = re.search(r'"agent_id"\s*:\s*"([0-9a-f-]{36})"', tool_results)
+            if match:
+                return "invoke_agent", {
+                    "agent_id": match.group(1),
+                    "task": "Perform a bounded read-only specialist review of the proposed rollout.",
+                    "input": {"focus": "risk and test evidence"},
+                }
     if _has_tool_result(messages):
         return None
-    names = _tool_names(tools)
-    user_messages = [m.content or "" for m in messages if m.role == "user"]
-    text = user_messages[-1].lower() if user_messages else ""
     clarification_tool = "ask_user" if "ask_user" in names else "request_clarification"
     if (
         _pending_effect(messages, "request_clarification")
@@ -182,15 +245,17 @@ def _requested_control_tool(messages: list[ChatMessage], tools: list[dict] | Non
 
 def _requested_artifact_tool(messages: list[ChatMessage], tools: list[dict] | None) -> tuple[str, dict] | None:
     names = _tool_names(tools)
-    user_messages = [m.content or "" for m in messages if m.role == "user"]
-    user_text = user_messages[-1].lower() if user_messages else ""
+    user_text = _current_request_text(messages).lower()
+    all_text = " ".join(message.content or "" for message in messages)
     if (
         "publish acceptance artifact" not in user_text
         and not ("可下载" in user_text and "验收报告 2026.txt" in user_text)
     ):
         return None
+    if '"mode": "direct"' not in all_text:
+        return None
     tool_results = " ".join(m.content or "" for m in messages if m.role == "tool")
-    if not tool_results and "write_file" in names:
+    if "验收报告 2026.txt" not in tool_results and "write_file" in names:
         return "write_file", {
             "path": "验收报告 2026.txt",
             "content": "artifact-e2e",
@@ -210,10 +275,13 @@ def _requested_working_plan_tool(
     messages: list[ChatMessage], tools: list[dict] | None,
 ) -> tuple[str, dict] | None:
     names = _tool_names(tools)
-    if "update_plan" not in names or _has_tool_result(messages):
+    all_text = " ".join(message.content or "" for message in messages)
+    if (
+        "update_plan" not in names or _has_tool_result(messages)
+        or ("plan_readonly" not in all_text and "WorkingPlan:" in all_text)
+    ):
         return None
-    user_messages = [m.content or "" for m in messages if m.role == "user"]
-    text = user_messages[-1].lower() if user_messages else ""
+    text = _current_request_text(messages).lower()
     if not any(marker in text for marker in ("复杂任务", "分步骤", "multi-step", "workingplan")):
         return None
     return "update_plan", {

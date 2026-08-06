@@ -12,7 +12,7 @@ pytestmark = pytest.mark.fullstack
 
 
 @pytest.mark.timeout(900)
-def test_browser_chat_plan_group_and_admin_surfaces(
+def test_browser_chat_plan_and_admin_surfaces(
     page: Page, assembled_world: dict, phase_api, record_testsuite_property,
 ):
     """Exercise the current UI against the real API, workers and database."""
@@ -82,67 +82,51 @@ def test_browser_chat_plan_group_and_admin_surfaces(
     expect(page.get_by_text(re.compile(re.escape(visible_excerpt)))).to_be_visible(timeout=15_000)
 
     page.get_by_role("button", name="Plan", exact=True).click()
-    page.get_by_placeholder("描述需要规划的长任务目标", exact=True).fill(
-        "制定第二季度退款异常复盘计划，分别核对退款运营口径和订单风险，最后形成管理层摘要"
+    page.get_by_placeholder("描述需要只读调查与规划的长任务目标", exact=True).fill(
+        "复杂任务 plan-agent-network：先只读调查退款异常，按需调用专业候选复核，"
+        "再把结论写入可下载的《验收报告 2026.txt》，正文只写 artifact-e2e 并正式发布。"
     )
-    page.get_by_role("button", name=re.compile("生成 Plan$")).click()
-    expect(page.get_by_text("awaiting_confirmation", exact=True)).to_be_visible(
+    page.get_by_role("button", name=re.compile("进入只读 Plan$")).click()
+    expect(page.get_by_text("Plan 权限与执行", exact=True)).to_be_visible(timeout=10_000)
+    expect(page.get_by_text(re.compile(r"^plan_readonly · r\d+$")).first).to_be_visible()
+    expect(page.get_by_text("revision 1", exact=True)).to_be_visible(
         timeout=int(phase_api.run_timeout * 1000),
     )
-    page.get_by_role("button", name="确认并冻结", exact=True).click()
-    expect(page.get_by_role("row", name=re.compile("执行状态.*completed.*succeeded"))).to_be_visible(
-        timeout=int(phase_api.run_timeout * 2 * 1000),
+    for section in ("WorkingPlan", "Required Action", "协作者", "Artifacts"):
+        expect(page.get_by_text(section, exact=True)).to_be_visible()
+    expect(page.get_by_text(
+        "Perform a bounded read-only specialist review of the proposed rollout.",
+        exact=True,
+    )).to_be_visible(timeout=int(phase_api.run_timeout * 1000))
+    direction = page.get_by_placeholder(
+        "继续讨论或修改方向，例如：先验证迁移回滚，再实现 UI", exact=True,
     )
-
-    page.get_by_role("button", name="Group", exact=True).click()
-    page.get_by_placeholder("输入 Group Formation 目标、后续 GroupRun 或定向补充", exact=True).fill(
-        "组建退款异常联合复核组，明确审计负责人、退款运营和订单风控的职责并交叉验证结论"
-    )
-    page.get_by_role("button", name=re.compile("生成 Group Formation$")).click()
-    expect(page.get_by_text("awaiting_confirmation", exact=True)).to_be_visible(
+    direction.fill("修改方向：增加失败回滚验证，再实施交付。")
+    page.get_by_role("button", name="修改方向", exact=True).click()
+    expect(page.get_by_text("revision 2", exact=True)).to_be_visible(
         timeout=int(phase_api.run_timeout * 1000),
     )
-    page.get_by_role("button", name="确认并冻结", exact=True).click()
-    page.get_by_role("tab", name="Timeline", exact=True).click()
-    group_completed = page.get_by_text("GroupRun completed", exact=True)
-    group_deadline = time.monotonic() + phase_api.run_timeout * 2
-    confirmations_approved = 0
-    clarifications_answered = 0
-    while time.monotonic() < group_deadline:
-        if group_completed.is_visible():
+    page.get_by_role(
+        "button", name="批准并在同一 Session 实施", exact=True,
+    ).click()
+    expect(page.get_by_text(re.compile(r"^direct · r\d+$")).first).to_be_visible(
+        timeout=15_000,
+    )
+    plan_deadline = time.monotonic() + phase_api.run_timeout * 2
+    plan_approvals = 0
+    artifact_name = page.get_by_text("验收报告 2026.txt", exact=True)
+    download_artifact = page.get_by_role("button", name=re.compile(r"^下\s*载$"))
+    while time.monotonic() < plan_deadline:
+        if download_artifact.count() and download_artifact.first.is_visible():
             break
-        # Ant Design inserts visual spacing between two CJK characters, which is
-        # also reflected in Chromium's accessible name ("批 准"). Match the
-        # semantic button while allowing that presentation-only whitespace.
-        approve = page.get_by_role("button", name=re.compile(r"批\s*准"))
-        if approve.count() and approve.first.is_visible():
-            with page.expect_response(
-                lambda response: "/api/v1/tool-confirmations/" in response.url
-                and response.request.method == "POST",
-                timeout=15_000,
-            ) as decision:
-                approve.first.click()
-            assert decision.value.ok, decision.value.text()
-            confirmations_approved += 1
-        clarification = page.get_by_placeholder(
-            "输入回答；只会恢复提出该问题的 Work Item", exact=True,
-        )
-        submit_answer = page.get_by_role("button", name=re.compile(r"提\s*交\s*回\s*答"))
-        if clarification.count() and clarification.first.is_visible():
-            clarification.first.fill("采用 2026 年第二季度口径，六月数据作为月度切片单列。")
-            with page.expect_response(
-                lambda response: "/api/v1/clarifications/" in response.url
-                and response.url.endswith("/answer")
-                and response.request.method == "POST",
-                timeout=15_000,
-            ) as answer:
-                submit_answer.first.click()
-            assert answer.value.ok, answer.value.text()
-            clarifications_answered += 1
+        approve_tool = page.get_by_role("button", name=re.compile(r"^批\s*准$"))
+        if approve_tool.count() and approve_tool.first.is_visible():
+            approve_tool.first.click()
+            plan_approvals += 1
         page.wait_for_timeout(500)
-    expect(group_completed).to_be_visible(timeout=1_000)
-    assert confirmations_approved <= 4, "GroupRun exceeded the bounded Tool confirmation budget"
-    assert clarifications_answered <= 4, "GroupRun exceeded the bounded Clarification budget"
+    expect(artifact_name.first).to_be_visible(timeout=1_000)
+    expect(download_artifact.first).to_be_visible(timeout=1_000)
+    assert plan_approvals <= 4, "Plan implementation exceeded the bounded Tool approval budget"
 
     assert not browser_errors
-    record_property("chromium_ui_chat_plan_group_admin", "passed")
+    record_property("chromium_ui_chat_plan_admin", "passed")

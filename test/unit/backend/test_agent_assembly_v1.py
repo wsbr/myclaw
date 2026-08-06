@@ -64,6 +64,7 @@ from app.runtime.action_dispatcher import ActionDispatcher
 from app.runtime.agent_loop_coordinator import AgentLoopCoordinator
 from app.runtime.context_assembler import ContextAssembler
 from app.runtime.model_adapter import ModelAdapter
+from app.runtime.protocol import ToolCallItem
 from app.services.registry_reconcile import seed_core_registries
 from app.schemas.agent_v1 import AgentStateCommand
 
@@ -299,8 +300,12 @@ async def test_snapshot_resolver_persists_effective_tools_and_live_governance_de
             db, runner=runner, execution_principal={"account_id": account_id},
             permission_mode="standard", hard_budget={},
         )
-        assert resolved.capability.assembled_tool_keys == ["lookup", "update_plan", "ask_user"]
-        assert resolved.capability.effective_tool_keys == ["lookup", "update_plan", "ask_user"]
+        assert resolved.capability.assembled_tool_keys == [
+            "lookup", "update_plan", "ask_user", "discover_agents", "invoke_agent",
+        ]
+        assert resolved.capability.effective_tool_keys == [
+            "lookup", "update_plan", "ask_user", "discover_agents", "invoke_agent",
+        ]
         assert resolved.tool_definitions[0]["registration_hash"] == "7" * 64
         assert runner.capability_snapshot_id == resolved.capability.id
 
@@ -330,6 +335,54 @@ async def test_snapshot_resolver_persists_effective_tools_and_live_governance_de
         assert provider.requests[0]["tools"] == provider.requests[1]["tools"]
         assert provider.requests[1]["messages"][-1]["role"] == "tool"
 
+        # Plan permission is enforced twice. Snapshot resolution removes the
+        # mutating capability, and Dispatcher still rejects it if a forged
+        # snapshot claims the Tool is effective.
+        tool.side_effect = "idempotent"
+        plan_runner = DurableRunner(
+            id=uuid7(), work_item_id="work-plan", run_id="run-plan",
+            session_id="session-1", agent_id=agent.id,
+            agent_version_id=published.id, execution_epoch=1,
+            status="running", principal_snapshot={}, assembly_snapshot={},
+            prompt_manifest={}, input_snapshot={},
+        )
+        db.add(plan_runner)
+        await db.flush()
+        plan_snapshot = await SnapshotResolver().resolve(
+            db, runner=plan_runner,
+            execution_principal={"account_id": account_id},
+            permission_mode="plan_readonly", hard_budget={},
+        )
+        assert "lookup" not in plan_snapshot.capability.effective_tool_keys
+        assert {"capability": "lookup", "reason_code": "permission_mode_readonly"} \
+            in plan_snapshot.capability.denied_capabilities
+
+        side_effect_successes = 0
+
+        async def forbidden_execute(name, arguments, context, dispatch_db):
+            nonlocal side_effect_successes
+            side_effect_successes += 1
+            return ToolResult(status="succeeded", summary="should not execute")
+
+        forged_definition = {**resolved.tool_definitions[0], "side_effect": "idempotent"}
+        blocked = await ActionDispatcher(
+            [forged_definition], executor=forbidden_execute,
+        ).dispatch(
+            ToolCallItem(
+                index=0, call_id="forged-write", name="lookup",
+                arguments={"key": "alpha"},
+            ),
+            capability_snapshot={"effective_tool_keys": ["lookup"]},
+            runtime_context=RuntimeContext(
+                session_id="session-1", runner_id=plan_runner.id,
+                task_id="work-plan", user_id="builder-1", agent_id=agent.id,
+                account_id=account_id, permission_mode="plan_readonly",
+            ),
+        )
+        assert blocked.result.error.code == "permission_mode_denied"
+        assert side_effect_successes == 0
+
+        tool.side_effect = "none"
         tool.enabled = False
         runner2 = DurableRunner(
             id=uuid7(), work_item_id="work-2", run_id="run-2", session_id="session-1",
@@ -343,8 +396,12 @@ async def test_snapshot_resolver_persists_effective_tools_and_live_governance_de
             db, runner=runner2, execution_principal={"account_id": account_id},
             permission_mode="standard", hard_budget={},
         )
-        assert denied.capability.assembled_tool_keys == ["lookup", "update_plan", "ask_user"]
-        assert denied.capability.effective_tool_keys == ["update_plan", "ask_user"]
+        assert denied.capability.assembled_tool_keys == [
+            "lookup", "update_plan", "ask_user", "discover_agents", "invoke_agent",
+        ]
+        assert denied.capability.effective_tool_keys == [
+            "update_plan", "ask_user", "discover_agents", "invoke_agent",
+        ]
         assert denied.capability.denied_capabilities == [{
             "capability": "lookup", "reason_code": "platform_tool_disabled",
         }]

@@ -140,6 +140,14 @@ async def test_agent_invocation_waits_and_resumes_the_caller():
             arguments=tool.arguments,
         )
         target_work_id = invocation.target_work_item_id
+        with pytest.raises(
+            AgentInvocationRejected, match="business idempotency collision",
+        ):
+            await dispatch_agent_invocation(
+                db, tool_invocation=tool, caller_runner=runner,
+                caller_work=work, run=run,
+                arguments={"agent_id": child_id, "task": "Different request"},
+            )
 
     worker = RuntimeWorker("test-agent-worker")
     fence = RunnerFence(runner_id, work_id, run_id, session_id, 1, lease)

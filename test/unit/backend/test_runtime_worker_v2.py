@@ -5,11 +5,17 @@ from __future__ import annotations
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.exc import OperationalError
 
-from app.models.common import utcnow
-from app.models.foundation import OutboxCommand
-from app.models.runtime_v1 import DurableRunner, RunnerCheckpoint, WorkItem
+from app.models.common import utcnow, uuid7
+from app.models.foundation import OutboxCommand, UserSession
+from app.models.runtime_v1 import (
+    AgentInvocation, Approval, DurableRunner, PlanUpdate, Run, RunnerCheckpoint,
+    WorkItem, WorkingPlan,
+)
+from app.services.plan_mode_service import PlanSubjectChanged, assert_current_plan_subject
+from app.services.working_plan_service import update_working_plan
 from app.workers.runtime_worker import RunnerFenced, RuntimeWorker
 from unit.backend.runtime_worker_testkit import create_runtime_world
 
@@ -19,6 +25,32 @@ pytestmark = pytest.mark.unit
 async def _patch_factory(monkeypatch, factory):
     import app.workers.runtime_worker as module
     monkeypatch.setattr(module, "AsyncSessionLocal", factory)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mysql_code", [1205, 1213])
+async def test_transient_settlement_conflict_retries_without_failing_business_run(
+    monkeypatch, mysql_code,
+):
+    worker = RuntimeWorker("settlement-retry-worker")
+    attempts = 0
+
+    async def flaky(value):
+        nonlocal attempts
+        attempts += 1
+        assert value == "settlement"
+        if attempts < 3:
+            raise OperationalError(
+                "SELECT work_item FOR UPDATE", {},
+                RuntimeError(mysql_code, "lock conflict"),
+            )
+
+    async def no_delay(_seconds):
+        return None
+
+    monkeypatch.setattr("app.workers.runtime_worker.asyncio.sleep", no_delay)
+    await worker._settle_with_retry(flaky, "settlement")
+    assert attempts == 3
 
 
 @pytest.mark.asyncio
@@ -139,4 +171,156 @@ async def test_final_settlement_appends_after_tool_result_checkpoint(monkeypatch
         ).order_by(RunnerCheckpoint.sequence_no)))
         assert [item.sequence_no for item in checkpoints] == [1, 2, 3]
         assert checkpoints[-1].checkpoint_type == "turn_completed"
+    await world.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_plan_proposal_waits_for_exact_revision_approval_without_new_work_item(monkeypatch):
+    world = await create_runtime_world(content="Investigate and plan a safe rollout")
+    await _patch_factory(monkeypatch, world.factory)
+    worker = RuntimeWorker("plan-proposal-worker")
+    async with world.factory.begin() as db:
+        run = await db.get(Run, world.run_id)
+        work = await db.get(WorkItem, world.work_id)
+        runner = await db.get(DurableRunner, world.runner_id)
+        session = await db.get(UserSession, run.session_id)
+        session.interaction_mode = "plan"
+        session.interaction_revision += 1
+        session.permission_mode = "plan_readonly"
+        session.permission_revision += 1
+        run.mode = "plan"
+        run.permission_mode = "plan_readonly"
+        work.mode = "plan"
+        runner.principal_snapshot = {
+            **runner.principal_snapshot,
+            "mode": "plan",
+            "permission_revision": session.permission_revision,
+        }
+    claim = await worker.claim_one()
+    fence = await worker.acquire_runner(claim)
+    assert fence is not None
+    async with world.factory.begin() as db:
+        runner = await db.get(DurableRunner, world.runner_id)
+        view = await update_working_plan(
+            db, session_id=runner.session_id, run_id=runner.run_id,
+            owner_agent_id=runner.agent_id, runner_id=runner.id,
+            source_turn_id=None,
+            arguments={
+                "summary": "Validate then implement",
+                "items": [
+                    {"text": "Read current behavior", "status": "completed"},
+                    {"text": "Implement guarded change", "status": "pending"},
+                    {"text": "Run acceptance tests", "status": "pending"},
+                ],
+            },
+        )
+        assert view["revision"] == 1
+
+    context = type("Context", (), {"manifest": (), "compaction": None})()
+    await worker._settle_completed(fence, "Here is the proposed implementation plan.", context)
+    async with world.factory() as db:
+        run = await db.get(Run, world.run_id)
+        work = await db.get(WorkItem, world.work_id)
+        session = await db.get(UserSession, run.session_id)
+        plan = await db.scalar(select(WorkingPlan).where(WorkingPlan.run_id == run.id))
+        update = await db.scalar(select(PlanUpdate).where(
+            PlanUpdate.working_plan_id == plan.id,
+        ))
+        approval = await db.scalar(select(Approval).where(
+            Approval.kind == "plan_implementation",
+        ))
+        assert run.status == "waiting_approval" and run.lifecycle == "waiting"
+        assert work.status == "waiting_approval" and work.active_runner_id is None
+        assert session.permission_mode == "plan_readonly"
+        assert await db.scalar(select(func.count()).select_from(WorkItem)) == 1
+        assert approval.subject_version == plan.revision == update.revision == 1
+        assert approval.subject_snapshot == {
+            "session_id": session.id,
+            "run_id": run.id,
+            "working_plan_id": plan.id,
+            "plan_revision": 1,
+            "plan_content_hash": update.content_hash,
+            "permission_mode": "plan_readonly",
+            "permission_revision": session.permission_revision,
+            "target_permission_mode": "direct",
+        }
+        assert len(approval.subject_hash) == 64
+    async with world.factory.begin() as db:
+        approval = await db.scalar(select(Approval).where(
+            Approval.kind == "plan_implementation",
+        ))
+        session = await db.get(UserSession, approval.session_id)
+        session.permission_revision += 1
+        await db.flush()
+        with pytest.raises(PlanSubjectChanged, match="permission revision changed"):
+            await assert_current_plan_subject(db, approval=approval)
+    await world.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_failed_agent_invocation_resumes_project_manager_instead_of_failing_run(monkeypatch):
+    world = await create_runtime_world(content="Ask a test specialist")
+    await _patch_factory(monkeypatch, world.factory)
+    worker = RuntimeWorker("agent-result-worker")
+    target_work_id, target_runner_id, invocation_id = uuid7(), uuid7(), uuid7()
+    async with world.factory.begin() as db:
+        run = await db.get(Run, world.run_id)
+        caller_work = await db.get(WorkItem, world.work_id)
+        caller_runner = await db.get(DurableRunner, world.runner_id)
+        caller_runner.status = "succeeded"
+        caller_work.status = "waiting_agent"
+        caller_work.wait_reason = "waiting_agent"
+        caller_work.active_runner_id = None
+        run.status = "waiting_agent"
+        run.lifecycle = "waiting"
+        run.wait_reason = "waiting_agent"
+        target_work = WorkItem(
+            id=target_work_id, run_id=run.id, session_id=run.session_id,
+            user_id=run.user_id, mode=run.mode,
+            owner_agent_id=caller_runner.agent_id,
+            agent_version_id=caller_runner.agent_version_id,
+            parent_work_item_id=caller_work.id, goal="Review tests",
+            purpose="delegation", status="running", active_runner_id=target_runner_id,
+            execution_epoch=1, attempt_no=1,
+        )
+        target_runner = DurableRunner(
+            id=target_runner_id, work_item_id=target_work.id, run_id=run.id,
+            session_id=run.session_id, agent_id=caller_runner.agent_id,
+            agent_version_id=caller_runner.agent_version_id,
+            execution_epoch=1, status="running", principal_snapshot={},
+            assembly_snapshot={}, prompt_manifest={}, input_snapshot={},
+        )
+        invocation = AgentInvocation(
+            id=invocation_id, run_id=run.id,
+            caller_work_item_id=caller_work.id,
+            caller_runner_id=caller_runner.id,
+            caller_agent_id=caller_runner.agent_id,
+            target_work_item_id=target_work.id,
+            target_agent_id=caller_runner.agent_id,
+            target_agent_version_id=caller_runner.agent_version_id,
+            mode=run.mode, return_route="caller", request_text="Review tests",
+            context_snapshot={"provider_call_id": "agent-call", "input": {}},
+            status="running", batch_key=caller_runner.id,
+            idempotency_key="agent-call", operation_key="agent-call",
+            request_hash="a" * 64, authorization_snapshot={},
+        )
+        db.add_all([target_work, target_runner, invocation])
+        await db.flush()
+        await worker._settle_agent_target(
+            db, runner=target_runner, work=target_work, run=run,
+            invocation=invocation, error=RuntimeError("specialist unavailable"),
+        )
+
+    async with world.factory() as db:
+        run = await db.get(Run, world.run_id)
+        caller_work = await db.get(WorkItem, world.work_id)
+        invocation = await db.get(AgentInvocation, invocation_id)
+        runners = list(await db.scalars(select(DurableRunner).where(
+            DurableRunner.work_item_id == caller_work.id,
+        ).order_by(DurableRunner.execution_epoch)))
+        assert invocation.status == "failed"
+        assert run.status == "active" and run.lifecycle == "running"
+        assert caller_work.status == "queued" and caller_work.execution_epoch == 2
+        assert runners[-1].status == "queued"
+        assert "agent_invocation_failed" in runners[-1].input_snapshot["pending_results"][-1]["content"]
     await world.engine.dispose()
