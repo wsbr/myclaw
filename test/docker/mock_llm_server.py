@@ -28,6 +28,7 @@ class ChatCompletionRequest(BaseModel):
     messages: list[ChatMessage] = []
     stream: bool = False
     tools: list[dict] | None = None
+    tool_choice: str | dict | None = None
     response_format: dict | None = None
 
 
@@ -41,6 +42,54 @@ def _tool_names(tools: list[dict] | None) -> set[str]:
         if name:
             names.add(name)
     return names
+
+
+def _forced_tool_name(tool_choice: str | dict | None) -> str | None:
+    if not isinstance(tool_choice, dict):
+        return None
+    function = tool_choice.get("function") or {}
+    return tool_choice.get("name") or function.get("name")
+
+
+def _v2_conformance_call(body: ChatCompletionRequest) -> tuple[str, dict] | None:
+    forced = _forced_tool_name(body.tool_choice)
+    names = _tool_names(body.tools)
+    text = " ".join(message.content or "" for message in body.messages)
+    tool_results = " ".join(
+        message.content or "" for message in body.messages if message.role == "tool"
+    )
+    if forced in {"update_plan", "ask_user", "invoke_agent"}:
+        assert names == {"update_plan", "ask_user", "invoke_agent"}
+        arguments = {
+            "update_plan": {"revision": 2},
+            "ask_user": {"question": "Which region should be used?"},
+            "invoke_agent": {
+                "agent_id": "agent-conformance", "request": "Review the evidence.",
+            },
+        }
+        return forced, arguments[forced]
+    if forced != "myclaw_conformance_echo":
+        return None
+    if "tool_arguments_schema_error" in tool_results:
+        return forced, {"value": "repaired"}
+    if _has_tool_result(body.messages):
+        return None
+    value = "native-v2-repeat" if "native-v2-repeat" in text else "native-v2"
+    return forced, {"value": value}
+
+
+def _v2_goal1_smoke_call(body: ChatCompletionRequest) -> tuple[str, dict] | None:
+    names = _tool_names(body.tools)
+    text = " ".join(message.content or "" for message in body.messages)
+    if "goal1-v2-fullstack-smoke" not in text or _has_tool_result(body.messages):
+        return None
+    if "write_file" not in names:
+        return None
+    return "write_file", {
+        "path": "goal1-v2-smoke.txt",
+        "content": "goal1-v2-fullstack-smoke",
+        "mode": "create",
+    }
 
 
 def _pending_effect(messages: list[ChatMessage], tool_key: str) -> bool:
@@ -479,11 +528,19 @@ def _stream_chunks(content: str, model: str, *, empty: bool = False):
             "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
         }) + "\n\n"
     )
+    yield "data: " + json.dumps({
+        "id": chunk_id,
+        "object": "chat.completion.chunk",
+        "model": model,
+        "choices": [],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
+    }) + "\n\n"
     yield "data: [DONE]\n\n"
 
 
 def _stream_tool_call(model: str, *, name: str, arguments: dict):
     chunk_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
+    call_id = f"call_mock_{name}_{uuid.uuid4().hex[:8]}"
     yield "data: " + json.dumps({
         "id": chunk_id, "object": "chat.completion.chunk", "model": model,
         "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
@@ -491,13 +548,20 @@ def _stream_tool_call(model: str, *, name: str, arguments: dict):
     yield "data: " + json.dumps({
         "id": chunk_id, "object": "chat.completion.chunk", "model": model,
         "choices": [{"index": 0, "delta": {"tool_calls": [{
-            "index": 0, "id": f"call_mock_{name}_1", "type": "function",
+            "index": 0, "id": call_id, "type": "function",
             "function": {"name": name, "arguments": json.dumps(arguments)},
         }]}, "finish_reason": None}],
     }) + "\n\n"
     yield "data: " + json.dumps({
         "id": chunk_id, "object": "chat.completion.chunk", "model": model,
         "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+    }) + "\n\n"
+    yield "data: " + json.dumps({
+        "id": chunk_id,
+        "object": "chat.completion.chunk",
+        "model": model,
+        "choices": [],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
     }) + "\n\n"
     yield "data: [DONE]\n\n"
 
@@ -510,6 +574,44 @@ async def health():
 @app.post("/v1/chat/completions")
 async def chat_completions(body: ChatCompletionRequest):
     request_text = " ".join(m.content or "" for m in body.messages).lower()
+    conformance_call = _v2_conformance_call(body)
+    if conformance_call:
+        name, arguments = conformance_call
+        if body.stream:
+            return StreamingResponse(
+                _stream_tool_call(body.model, name=name, arguments=arguments),
+                media_type="text/event-stream",
+            )
+        return _completion_payload("", body.model, tool_calls=[{
+            "id": f"call_mock_{name}_1", "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }])
+    if (
+        "goal1-v2-fullstack-smoke" in request_text
+        and _has_tool_result(body.messages)
+    ):
+        visible = "write_file" in _tool_names(body.tools)
+        content = (
+            "Agent-native v2 full-stack smoke passed."
+            if visible else "ERROR: write_file disappeared after use."
+        )
+        if body.stream:
+            return StreamingResponse(
+                _stream_chunks(content, body.model), media_type="text/event-stream",
+            )
+        return _completion_payload(content, body.model)
+    smoke_call = _v2_goal1_smoke_call(body)
+    if smoke_call:
+        name, arguments = smoke_call
+        if body.stream:
+            return StreamingResponse(
+                _stream_tool_call(body.model, name=name, arguments=arguments),
+                media_type="text/event-stream",
+            )
+        return _completion_payload("", body.model, tool_calls=[{
+            "id": f"call_mock_{name}_goal1", "type": "function",
+            "function": {"name": name, "arguments": json.dumps(arguments)},
+        }])
     if _is_completion_contract_planning(body.messages):
         return _completion_payload(
             json.dumps(_completion_intent_json(body.messages), ensure_ascii=False),

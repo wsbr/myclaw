@@ -3,6 +3,8 @@ name: myclaw-uat
 x-backend-build: &backend-build
   context: ../backend
   dockerfile: Dockerfile
+  labels:
+    org.opencontainers.image.revision: ${MYCLAW_ACCEPTANCE_COMMIT_SHA:-unbound}
 
 x-app-environment: &app-environment
   MYCLAW_ENVIRONMENT: production
@@ -73,6 +75,8 @@ services:
     build:
       context: ../frontend
       dockerfile: Dockerfile
+      labels:
+        org.opencontainers.image.revision: ${MYCLAW_ACCEPTANCE_COMMIT_SHA:-unbound}
       args:
         VITE_API_BASE_URL: ${UAT_API_PUBLIC_URL:-http://localhost:8101}
     ports:
