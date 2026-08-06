@@ -129,6 +129,32 @@ async def test_stream_forwards_declared_structured_response_format():
 
 
 @pytest.mark.asyncio
+async def test_stream_forwards_immutable_provider_extra_body_parameters():
+    captured = {}
+
+    class Completions:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+
+            async def chunks():
+                yield SimpleNamespace(usage=None, choices=[])
+
+            return chunks()
+
+    model = OpenAILLM("unused-test-key")
+    await model.client.close()
+    model.client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+    extra_body = {"enable_thinking": False}
+    chunks = [chunk async for chunk in model.stream(
+        [{"role": "user", "content": "call a tool"}], None,
+        {"model_id": "model", "extra_body": extra_body},
+    )]
+    assert [chunk.type for chunk in chunks] == ["transport_payload", "done"]
+    assert captured["extra_body"] == extra_body
+    assert captured["extra_body"] is not extra_body
+
+
+@pytest.mark.asyncio
 async def test_stream_exposes_native_tools_without_forcing_a_control_envelope():
     captured = {}
 

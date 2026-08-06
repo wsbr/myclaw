@@ -54,7 +54,7 @@ class Settings(BaseSettings):
     sandbox_worker_poll_seconds: float = Field(default=0.5, gt=0)
     sandbox_outbox_claim_lease_seconds: int = Field(default=30, gt=0)
     sandbox_attempt_stale_seconds: int = Field(default=60, gt=0)
-    provider_conformance_suite_version: str = "agent-native-v2.1"
+    provider_conformance_suite_version: str = "agent-native-v2.2"
     runtime_release_id: str = "agent-native-v2"
     provider_adapter_version: str = "2"
     context_policy_version: str = "context.v2"

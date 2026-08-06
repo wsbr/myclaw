@@ -9,6 +9,7 @@ from fastapi import HTTPException
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from app.config import settings
 from app.database import Base
 from app.core.model_hub.base import BaseLLM, LLMChunk, LLMResponse, TokenUsage, ToolCall
 from app.core.tool_registry.base import RuntimeContext, ToolResult
@@ -142,7 +143,8 @@ async def assembly_db():
         ))
         db.add(ConformanceRun(
             subject_type="model_version", subject_id=model_version_id,
-            suite_version="agent-native-v2.1", idempotency_key="seed-pass",
+            suite_version=settings.provider_conformance_suite_version,
+            idempotency_key="seed-pass",
             request_hash="2" * 64, status="passed", started_at=utcnow(),
             ended_at=utcnow(), result_summary={"passed": True}, content_hash="3" * 64,
         ))

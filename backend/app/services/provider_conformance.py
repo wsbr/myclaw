@@ -363,9 +363,61 @@ class ProviderConformanceSuite:
             "passed": bool(call.call_id and repeat_call and repeat_call.call_id != call.call_id),
             "details": {"call_ids": [call.call_id, repeat_call.call_id if repeat_call else None]},
         })
+        coordination_cases = (
+            (
+                "update_plan", {"revision": 2},
+                "Call update_plan exactly once with revision 2.",
+            ),
+            (
+                "ask_user", {"question": "Which region should be used?"},
+                "Call ask_user exactly once with question: Which region should be used?",
+            ),
+            (
+                "invoke_agent",
+                {"agent_id": "agent-conformance", "request": "Review the evidence."},
+                (
+                    "Call invoke_agent exactly once with agent_id agent-conformance "
+                    "and request Review the evidence."
+                ),
+            ),
+        )
+        coordination_details = []
+        coordination_passed = True
+        for tool_name, expected_arguments, prompt in coordination_cases:
+            coordination_parameters = dict(base_parameters)
+            coordination_parameters["tool_choice"] = {
+                "type": "function", "function": {"name": tool_name},
+            }
+            coordination_result = await self.adapter.invoke(ProviderRequest(
+                messages=({"role": "user", "content": prompt},),
+                tools=COORDINATION_PROBE_TOOLS,
+                parameters=coordination_parameters,
+            ))
+            observed = (
+                coordination_result.tool_calls[0]
+                if len(coordination_result.tool_calls) == 1 else None
+            )
+            case_passed = bool(
+                observed
+                and observed.name == tool_name
+                and observed.arguments == expected_arguments
+                and coordination_result.stop_reason == StopReason.TOOL_USE
+            )
+            coordination_passed = coordination_passed and case_passed
+            coordination_details.append({
+                "tool_name": tool_name,
+                "passed": case_passed,
+                "expected_arguments": expected_arguments,
+                "result": coordination_result.as_dict(),
+            })
         probes.append({
-            "name": "runtime_coordination_tool_schemas", "passed": True,
-            "details": {"tool_names": [item["name"] for item in COORDINATION_PROBE_TOOLS]},
+            "name": "runtime_coordination_tool_schemas",
+            "passed": coordination_passed,
+            "details": {
+                "schema_bundle_hash": _hash(COORDINATION_PROBE_TOOLS),
+                "sent_tool_names": [item["name"] for item in COORDINATION_PROBE_TOOLS],
+                "cases": coordination_details,
+            },
         })
         return ConformanceReport(all(item["passed"] for item in probes), tuple(probes))
 

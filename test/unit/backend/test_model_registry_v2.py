@@ -54,6 +54,19 @@ async def test_model_version_is_append_only_and_latest_conformance_controls_acti
 
         db.add(ConformanceRun(
             subject_type="model_version", subject_id=immutable.id,
+            suite_version="agent-native-v2.1",
+            idempotency_key="superseded-suite-pass", request_hash="0" * 64,
+            status="passed", started_at=utcnow(), ended_at=utcnow(),
+            result_summary={"passed": True}, content_hash="9" * 64,
+        ))
+        await db.flush()
+        with pytest.raises(ModelActivationRejected):
+            await activate_model_version(
+                db, model_id=model.id, model_version_id=immutable.id, expected_version=2,
+            )
+
+        db.add(ConformanceRun(
+            subject_type="model_version", subject_id=immutable.id,
             suite_version=settings.provider_conformance_suite_version,
             idempotency_key="pass-old", request_hash="1" * 64,
             status="passed", started_at=utcnow(), ended_at=utcnow(),

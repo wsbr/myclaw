@@ -113,6 +113,8 @@ class OpenAILLM(BaseLLM):
                 kwargs["tool_choice"] = params["tool_choice"]
         if params.get("response_format"):
             kwargs["response_format"] = params["response_format"]
+        if isinstance(params.get("extra_body"), dict):
+            kwargs["extra_body"] = dict(params["extra_body"])
 
         resp = await self.client.chat.completions.create(**kwargs)
         choice = resp.choices[0]
@@ -156,6 +158,8 @@ class OpenAILLM(BaseLLM):
                 kwargs["tool_choice"] = params["tool_choice"]
         if params.get("response_format"):
             kwargs["response_format"] = params["response_format"]
+        if isinstance(params.get("extra_body"), dict):
+            kwargs["extra_body"] = dict(params["extra_body"])
 
         # Transport retry is intentionally owned by ModelAdapter so each
         # physical request has a durable ProviderAttempt. The provider-specific

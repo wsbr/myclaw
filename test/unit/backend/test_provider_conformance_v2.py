@@ -73,11 +73,30 @@ async def test_openai_family_adapters_pass_conformance_suite(provider_name):
                         function=SimpleNamespace(name=None, arguments=json.dumps(value) + '}'),
                     )])
                     yield _openai_chunk(finish_reason="tool_calls")
-                else:
+                elif calls in {3, 5}:
                     assert kwargs["tools"][0]["function"]["name"] == "myclaw_conformance_echo"
                     assert kwargs["messages"][-1]["role"] == "tool"
                     yield _openai_chunk(content="native-v2")
                     yield _openai_chunk(finish_reason="stop")
+                else:
+                    expected = {
+                        "update_plan": {"revision": 2},
+                        "ask_user": {"question": "Which region should be used?"},
+                        "invoke_agent": {
+                            "agent_id": "agent-conformance",
+                            "request": "Review the evidence.",
+                        },
+                    }
+                    names = [item["function"]["name"] for item in kwargs["tools"]]
+                    assert names == ["update_plan", "ask_user", "invoke_agent"]
+                    name = kwargs["tool_choice"]["function"]["name"]
+                    yield _openai_chunk(tool_calls=[SimpleNamespace(
+                        index=0, id=f"call-coordination-{calls}",
+                        function=SimpleNamespace(
+                            name=name, arguments=json.dumps(expected[name]),
+                        ),
+                    )])
+                    yield _openai_chunk(finish_reason="tool_calls")
                 yield _openai_chunk(usage=SimpleNamespace(
                     prompt_tokens=10, completion_tokens=2,
                 ))
@@ -90,7 +109,7 @@ async def test_openai_family_adapters_pass_conformance_suite(provider_name):
     adapter.client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
     report = await ProviderConformanceSuite(adapter).run(_version(provider_name))
     assert report.passed is True
-    assert calls == 6
+    assert calls == 9
 
 
 class _AnthropicStream:
@@ -141,10 +160,29 @@ async def test_anthropic_adapter_passes_conformance_suite_and_maps_tool_results(
                 )]
                 text = []
                 reason = "tool_use"
-            else:
+            elif index in {3, 5}:
                 content = [SimpleNamespace(type="text", text="native-v2")]
                 text = ["native-v2"]
                 reason = "end_turn"
+            else:
+                expected = {
+                    "update_plan": {"revision": 2},
+                    "ask_user": {"question": "Which region should be used?"},
+                    "invoke_agent": {
+                        "agent_id": "agent-conformance",
+                        "request": "Review the evidence.",
+                    },
+                }
+                assert [item["name"] for item in kwargs["tools"]] == [
+                    "update_plan", "ask_user", "invoke_agent",
+                ]
+                name = kwargs["tool_choice"]["name"]
+                content = [SimpleNamespace(
+                    type="tool_use", id=f"call-coordination-{index}",
+                    name=name, input=expected[name],
+                )]
+                text = []
+                reason = "tool_use"
             final = SimpleNamespace(
                 id=f"anthropic-{index}", model="native-test", content=content,
                 stop_reason=reason,
@@ -158,12 +196,15 @@ async def test_anthropic_adapter_passes_conformance_suite_and_maps_tool_results(
     adapter.client = SimpleNamespace(messages=Messages())
     report = await ProviderConformanceSuite(adapter).run(_version("anthropic"))
     assert report.passed is True
-    assert len(calls) == 6
+    assert len(calls) == 9
     assert calls[1]["tool_choice"] == {
         "type": "tool", "name": "myclaw_conformance_echo",
     }
     assert calls[2]["messages"][-1]["role"] == "user"
     assert calls[2]["messages"][-1]["content"][0]["type"] == "tool_result"
+    assert [call["tool_choice"]["name"] for call in calls[6:9]] == [
+        "update_plan", "ask_user", "invoke_agent",
+    ]
 
 
 def test_anthropic_normalization_separates_system_and_preserves_call_correlation():

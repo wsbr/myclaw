@@ -82,6 +82,57 @@ def _runtime_context():
     )
 
 
+def _conformance_responses(*, invalid_coordination: str | None = None):
+    coordination = [
+        ("update_plan", {"revision": 2}),
+        ("ask_user", {"question": "Which region should be used?"}),
+        ("invoke_agent", {
+            "agent_id": "agent-conformance", "request": "Review the evidence.",
+        }),
+    ]
+    responses = [
+        [LLMChunk(type="text_delta", content="plain"), _done("stop")],
+        [LLMChunk(type="tool_call_delta", tool_call=ToolCall(
+            id="probe-call", name="myclaw_conformance_echo",
+            arguments={"value": "native-v2"},
+        )), _done("tool_calls")],
+        [LLMChunk(type="text_delta", content="native-v2"), _done("stop")],
+        [LLMChunk(type="tool_call_delta", tool_call=ToolCall(
+            id="probe-call-repeat", name="myclaw_conformance_echo",
+            arguments={"value": "native-v2-repeat"},
+        )), _done("tool_calls")],
+        [LLMChunk(type="text_delta", content="native-v2-repeat"), _done("stop")],
+        [LLMChunk(type="tool_call_delta", tool_call=ToolCall(
+            id="probe-call-repair", name="myclaw_conformance_echo",
+            arguments={"value": "repaired"},
+        )), _done("tool_calls")],
+    ]
+    for index, (name, arguments) in enumerate(coordination):
+        if index == 0 and invalid_coordination == "plain_text":
+            responses.append([LLMChunk(type="text_delta", content="not a tool"), _done("stop")])
+            continue
+        if index == 0 and invalid_coordination == "wrong_tool":
+            name = "ask_user"
+        if index == 0 and invalid_coordination == "bad_arguments":
+            arguments = {"revision": "two"}
+        responses.append([LLMChunk(type="tool_call_delta", tool_call=ToolCall(
+            id=f"coordination-{index}", name=name, arguments=arguments,
+        )), _done("tool_calls")])
+    return responses
+
+
+def _conformance_version():
+    return ModelVersion(
+        id="model-version-1", model_id="model-1", version_no=1,
+        provider="scripted", model_name="scripted", default_parameters={},
+        capabilities={
+            "streaming": True, "native_tool_calling": True,
+            "tool_result_continuation": True, "stop_reason": True,
+        },
+        content_hash="f" * 64,
+    )
+
+
 @pytest.mark.asyncio
 async def test_native_tool_result_then_plain_final_and_tool_remains_visible():
     provider = ScriptedProvider([
@@ -298,33 +349,8 @@ def test_context_compaction_never_drops_multiple_pending_results():
 
 @pytest.mark.asyncio
 async def test_target_provider_passes_the_agent_native_conformance_suite():
-    provider = ScriptedProvider([
-        [LLMChunk(type="text_delta", content="plain"), _done("stop")],
-        [LLMChunk(type="tool_call_delta", tool_call=ToolCall(
-            id="probe-call", name="myclaw_conformance_echo",
-            arguments={"value": "native-v2"},
-        )), _done("tool_calls")],
-        [LLMChunk(type="text_delta", content="native-v2"), _done("stop")],
-        [LLMChunk(type="tool_call_delta", tool_call=ToolCall(
-            id="probe-call-repeat", name="myclaw_conformance_echo",
-            arguments={"value": "native-v2-repeat"},
-        )), _done("tool_calls")],
-        [LLMChunk(type="text_delta", content="native-v2-repeat"), _done("stop")],
-        [LLMChunk(type="tool_call_delta", tool_call=ToolCall(
-            id="probe-call-repair", name="myclaw_conformance_echo",
-            arguments={"value": "repaired"},
-        )), _done("tool_calls")],
-    ])
-    version = ModelVersion(
-        id="model-version-1", model_id="model-1", version_no=1,
-        provider="scripted", model_name="scripted", default_parameters={},
-        capabilities={
-            "streaming": True, "native_tool_calling": True,
-            "tool_result_continuation": True, "stop_reason": True,
-        },
-        content_hash="f" * 64,
-    )
-    report = await ProviderConformanceSuite(provider).run(version)
+    provider = ScriptedProvider(_conformance_responses())
+    report = await ProviderConformanceSuite(provider).run(_conformance_version())
     assert report.passed is True
     assert [probe["name"] for probe in report.probes] == [
         "declared_capabilities", "streaming_plain_message_stop_usage",
@@ -336,3 +362,28 @@ async def test_target_provider_passes_the_agent_native_conformance_suite():
         "runtime_coordination_tool_schemas",
     ]
     assert provider.requests[1]["tools"] == provider.requests[2]["tools"]
+    coordination_requests = provider.requests[6:9]
+    assert len(coordination_requests) == 3
+    assert all(
+        [tool["name"] for tool in request["tools"]]
+        == ["update_plan", "ask_user", "invoke_agent"]
+        for request in coordination_requests
+    )
+    coordination_probe = report.probes[-1]
+    assert coordination_probe["passed"] is True
+    assert [case["tool_name"] for case in coordination_probe["details"]["cases"]] == [
+        "update_plan", "ask_user", "invoke_agent",
+    ]
+    assert len(coordination_probe["details"]["schema_bundle_hash"]) == 64
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid", ["plain_text", "wrong_tool", "bad_arguments"])
+async def test_coordination_schema_probe_cannot_pass_without_valid_native_calls(invalid):
+    provider = ScriptedProvider(_conformance_responses(invalid_coordination=invalid))
+    report = await ProviderConformanceSuite(provider).run(_conformance_version())
+    probe = report.probes[-1]
+    assert report.passed is False
+    assert probe["name"] == "runtime_coordination_tool_schemas"
+    assert probe["passed"] is False
+    assert probe["details"]["cases"][0]["passed"] is False
