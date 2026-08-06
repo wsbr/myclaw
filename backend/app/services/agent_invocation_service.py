@@ -12,7 +12,8 @@ from app.models.agent_v1 import AgentBlueprint, AgentVersionBinding
 from app.models.common import utcnow, uuid7
 from app.models.plan_v1 import PlanDeclaredAgent, PlanExecution, PlanWorkItemDependency, PlanWorkItemNode
 from app.models.group_v1 import (
-    GroupAgentNode, GroupCollaborationEdge, GroupRun, GroupRunAgentVersion,
+    GroupAgentNode, GroupCollaborationEdge, GroupMembership, GroupRun,
+    GroupRunAgentVersion, GroupRunMember,
 )
 from app.models.runtime_v1 import AgentInvocation, DurableRunner, Run, ToolInvocation, WorkItem
 from app.persistence.reliable_writes import ExecutionEventWriter, OutboxWriter
@@ -21,7 +22,9 @@ from app.services.agent_directory_service import resolve_callable_agent
 
 
 class AgentInvocationRejected(ValueError):
-    pass
+    def __init__(self, message: str, code: str = "agent_invocation_rejected"):
+        super().__init__(message)
+        self.code = code
 
 
 TERMINAL_WORK = {"succeeded", "failed", "timed_out", "cancelled", "abandoned", "blocked"}
@@ -39,6 +42,7 @@ def _request_hash(*, target_agent_id: str, request_text: str, input_data: dict) 
 async def persist_rejected_agent_invocation(
     db: AsyncSession, *, caller_runner: DurableRunner, caller_work: WorkItem,
     run: Run, arguments: dict, operation_key: str, reason: str,
+    reason_code: str = "agent_invocation_rejected",
 ) -> AgentInvocation | None:
     """Persist a denied call when the requested target is a real Agent.
 
@@ -63,6 +67,7 @@ async def persist_rejected_agent_invocation(
         if existing.request_hash != expected_hash:
             raise AgentInvocationRejected("AgentInvocation business idempotency collision")
         return existing
+    group_run = await db.scalar(select(GroupRun).where(GroupRun.run_id == run.id)) if run.mode == "group" else None
     invocation = AgentInvocation(
         id=uuid7(), run_id=run.id, caller_work_item_id=caller_work.id,
         caller_runner_id=caller_runner.id, caller_agent_id=caller_runner.agent_id,
@@ -72,7 +77,7 @@ async def persist_rejected_agent_invocation(
         request_text=str(arguments.get("task") or arguments.get("request") or "").strip(),
         context_snapshot={}, status="rejected", batch_key=caller_runner.id,
         result_summary=None, result_data=None,
-        error_code="agent_invocation_rejected", error_detail=reason[:4000],
+        error_code=reason_code, error_detail=reason[:4000],
         idempotency_key=operation_key, operation_key=operation_key,
         request_hash=_request_hash(
             target_agent_id=target.id,
@@ -85,6 +90,8 @@ async def persist_rejected_agent_invocation(
             "permission_revision": caller_runner.principal_snapshot.get("permission_revision"),
         },
         completed_at=utcnow(),
+        group_session_id=group_run.group_session_id if group_run else None,
+        group_run_id=group_run.id if group_run else None,
     )
     db.add(invocation)
     await db.flush()
@@ -98,7 +105,7 @@ async def persist_rejected_agent_invocation(
         summary="Agent collaboration request rejected",
         payload={
             "target_agent_id": target.id,
-            "reason_code": "agent_invocation_rejected",
+            "reason_code": reason_code,
         },
         correlation_id=run.id,
     )
@@ -218,21 +225,65 @@ async def dispatch_agent_invocation(
         target_version_id = target.current_published_version_id
     elif run.mode == "group":
         group_run = await db.scalar(select(GroupRun).where(GroupRun.run_id == run.id).with_for_update())
-        caller_node_id = caller_runner.principal_snapshot.get("group_node_id")
-        caller_node = await db.get(GroupAgentNode, caller_node_id) if caller_node_id else None
-        target_node = await db.scalar(select(GroupAgentNode).where(
-            GroupAgentNode.group_session_id == group_run.group_session_id,
-            GroupAgentNode.agent_id == target_agent_id,
-        ).with_for_update()) if group_run else None
-        if caller_node is None or target_node is None or caller_node.group_session_id != group_run.group_session_id:
-            raise AgentInvocationRejected("target Agent is outside the frozen Group participant set")
-        mapping = await db.scalar(select(GroupRunAgentVersion).where(
-            GroupRunAgentVersion.group_run_id == group_run.id,
-            GroupRunAgentVersion.group_node_id == target_node.id,
-        ))
-        if mapping is None or mapping.participation_status != "available" or not mapping.agent_version_id:
-            raise AgentInvocationRejected("target Group node is unavailable in this GroupRun")
-        target_version_id = mapping.agent_version_id
+        if group_run is None:
+            raise AgentInvocationRejected("GroupRun is unavailable")
+        caller_scope_id = (
+            caller_runner.principal_snapshot.get("group_membership_id")
+            or caller_runner.principal_snapshot.get("group_node_id")
+        )
+        is_native_group = bool(
+            caller_runner.principal_snapshot.get("group_membership_id")
+        )
+        native_target = None
+        if is_native_group:
+            native_target = await db.scalar(select(GroupRunMember).where(
+                GroupRunMember.group_run_id == group_run.id,
+                GroupRunMember.agent_id == target_agent_id,
+            ))
+        if is_native_group and native_target is not None:
+            caller_membership = await db.scalar(select(GroupMembership).where(
+                GroupMembership.id == caller_scope_id,
+                GroupMembership.group_session_id == group_run.group_session_id,
+                GroupMembership.agent_id == caller_runner.agent_id,
+                GroupMembership.status == "joined",
+            ))
+            target_membership = await db.get(GroupMembership, native_target.membership_id)
+            if caller_membership is None or target_membership is None:
+                raise AgentInvocationRejected("caller is not a current Group member")
+            if native_target.participation_status != "available" or not native_target.agent_version_id:
+                raise AgentInvocationRejected(
+                    "target Group member is unavailable in this GroupRun",
+                    "group_member_unavailable",
+                )
+            target_version_id = native_target.agent_version_id
+            caller_node = None
+            target_node = None
+            target_group_scope_id = target_membership.id
+            caller_group_scope_id = caller_membership.id
+        elif is_native_group:
+            # A real but graph-external Agent is a durable rejected Invocation
+            # under the first-phase fixed_for_run policy.
+            raise AgentInvocationRejected(
+                "target Agent is outside the fixed GroupRun membership snapshot",
+                "membership_policy_fixed_for_run",
+            )
+        else:
+            caller_node = await db.get(GroupAgentNode, caller_scope_id) if caller_scope_id else None
+            target_node = await db.scalar(select(GroupAgentNode).where(
+                GroupAgentNode.group_session_id == group_run.group_session_id,
+                GroupAgentNode.agent_id == target_agent_id,
+            ).with_for_update())
+            if caller_node is None or target_node is None or caller_node.group_session_id != group_run.group_session_id:
+                raise AgentInvocationRejected("target Agent is outside the frozen Group participant set")
+            mapping = await db.scalar(select(GroupRunAgentVersion).where(
+                GroupRunAgentVersion.group_run_id == group_run.id,
+                GroupRunAgentVersion.group_node_id == target_node.id,
+            ))
+            if mapping is None or mapping.participation_status != "available" or not mapping.agent_version_id:
+                raise AgentInvocationRejected("target Group node is unavailable in this GroupRun")
+            target_version_id = mapping.agent_version_id
+            target_group_scope_id = target_node.id
+            caller_group_scope_id = caller_node.id
     else:
         raise AgentInvocationRejected("unsupported AgentInvocation mode")
 
@@ -262,14 +313,15 @@ async def dispatch_agent_invocation(
         mode=run.mode, owner_agent_id=target_agent_id, agent_version_id=target_version_id,
         parent_work_item_id=caller_work.id, plan_node_id=plan_node.id if plan_node else None,
         group_run_id=group_run.id if run.mode == "group" else None,
-        group_node_id=target_node.id if run.mode == "group" else None,
+        group_node_id=target_group_scope_id if run.mode == "group" else None,
         goal=request_text, purpose="delegation", status="queued", execution_epoch=1, attempt_no=1,
     )
     target_runner = DurableRunner(
         id=target_runner_id, work_item_id=target_work.id, run_id=run.id, session_id=run.session_id,
         agent_id=target_agent_id, agent_version_id=target_version_id, execution_epoch=1, status="queued",
         principal_snapshot={**dict(caller_runner.principal_snapshot), "current_agent_id": target_agent_id,
-                            "group_node_id": target_node.id if run.mode == "group" else caller_runner.principal_snapshot.get("group_node_id"),
+                            "group_node_id": target_group_scope_id if run.mode == "group" else caller_runner.principal_snapshot.get("group_node_id"),
+                            "group_membership_id": target_group_scope_id if run.mode == "group" else None,
                             "delegation_chain": [*chain, caller_runner.agent_id]},
         assembly_snapshot={"agent_version_id": target_version_id}, prompt_manifest={},
         input_snapshot={"agent_invocation_id": invocation_id, "request_text": request_text,
@@ -278,7 +330,8 @@ async def dispatch_agent_invocation(
                         "plan_node_id": plan_node.id if plan_node else None,
                         "group_session_id": group_run.group_session_id if run.mode == "group" else None,
                         "group_run_id": group_run.id if run.mode == "group" else None,
-                        "group_node_id": target_node.id if run.mode == "group" else None},
+                        "group_node_id": target_group_scope_id if run.mode == "group" else None,
+                        "group_membership_id": target_group_scope_id if run.mode == "group" else None},
     )
     agent_invocation = AgentInvocation(
         id=invocation_id, run_id=run.id,
@@ -293,8 +346,8 @@ async def dispatch_agent_invocation(
                           "plan_node_id": plan_node.id if plan_node else None,
                           "group_session_id": group_run.group_session_id if run.mode == "group" else None,
                           "group_run_id": group_run.id if run.mode == "group" else None,
-                          "source_group_node_id": caller_node.id if run.mode == "group" else None,
-                          "target_group_node_id": target_node.id if run.mode == "group" else None},
+                          "source_group_node_id": caller_group_scope_id if run.mode == "group" else None,
+                          "target_group_node_id": target_group_scope_id if run.mode == "group" else None},
         status="queued", batch_key=caller_runner.id,
         idempotency_key=resolved_operation_key, operation_key=resolved_operation_key,
         request_hash=_request_hash(
@@ -309,6 +362,8 @@ async def dispatch_agent_invocation(
             "caller_agent_id": caller_runner.agent_id,
             "target_agent_version_id": target_version_id,
         },
+        group_session_id=group_run.group_session_id if run.mode == "group" else None,
+        group_run_id=group_run.id if run.mode == "group" else None,
     )
     if tool_invocation is not None:
         tool_invocation.status = "waiting_resource"
@@ -319,7 +374,7 @@ async def dispatch_agent_invocation(
     if plan_node:
         plan_node.work_item_id = target_work.id
     await db.flush()
-    if run.mode == "group":
+    if run.mode == "group" and caller_node is not None and target_node is not None:
         edge = await db.scalar(select(GroupCollaborationEdge).where(
             GroupCollaborationEdge.group_session_id == group_run.group_session_id,
             GroupCollaborationEdge.source_node_id == caller_node.id,

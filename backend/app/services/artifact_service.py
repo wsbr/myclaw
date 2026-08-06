@@ -9,11 +9,12 @@ from sqlalchemy import select
 
 from app.models.artifact_v1 import Artifact, GroupArtifact
 from app.models.common import uuid7
-from app.models.group_v1 import GroupAgentNode, GroupRun
+from app.models.group_v1 import GroupAgentNode, GroupMembership, GroupRun
 from app.models.runtime_v1 import DurableRunner, ToolInvocation, WorkItem, Workspace
 from app.persistence.reliable_writes import ExecutionEventWriter
 from app.services.workspace_file_service import (
-    atomic_write, private_agent_root, resolve_read_path, sha256_file, workspace_root,
+    atomic_write, group_shared_root, private_agent_root, resolve_read_path,
+    sha256_file, workspace_root,
 )
 from app.services.workspace_lock_service import assert_workspace_lock
 
@@ -103,6 +104,7 @@ async def publish_artifact(db, *, context, args: dict) -> Artifact:
         version_no = 1
     publish_to_group = bool(args.get("publish_to_group", False))
     node = None
+    membership = None
     group_session_id = context.group_session_id
     if publish_to_group:
         if not group_session_id or not context.group_node_id:
@@ -113,6 +115,13 @@ async def publish_artifact(db, *, context, args: dict) -> Artifact:
             GroupAgentNode.agent_id == context.agent_id,
         ))
         if node is None:
+            membership = await db.scalar(select(GroupMembership).where(
+                GroupMembership.id == context.group_node_id,
+                GroupMembership.group_session_id == group_session_id,
+                GroupMembership.agent_id == context.agent_id,
+                GroupMembership.status == "joined",
+            ))
+        if node is None and membership is None:
             raise ArtifactPublishError("current Agent is not a member of this Group")
         if context.group_run_id:
             valid_run = await db.scalar(select(GroupRun.id).where(
@@ -143,10 +152,13 @@ async def publish_artifact(db, *, context, args: dict) -> Artifact:
             status="publishing", version_no=version_no,
         )
         db.add(artifact)
-        if node is not None:
+        if node is not None or membership is not None:
             db.add(GroupArtifact(
                 group_session_id=group_session_id, artifact_id=artifact.id,
-                published_by_node_id=node.id,
+                published_by_node_id=node.id if node is not None else None,
+                published_by_membership_id=(
+                    membership.id if membership is not None else None
+                ),
             ))
         await db.flush()
         # Durable intent precedes the immutable file snapshot.
@@ -189,13 +201,13 @@ async def publish_artifact(db, *, context, args: dict) -> Artifact:
     await db.flush()
     await ExecutionEventWriter(db).append(
         session_id=context.session_id, run_id=work.run_id,
-        group_session_id=group_session_id if node else None,
-        group_run_id=context.group_run_id if node else None,
+        group_session_id=group_session_id if (node or membership) else None,
+        group_run_id=context.group_run_id if (node or membership) else None,
         event_type="artifact.published",
         event_dedupe_key=f"transition:artifact:{artifact.id}:published",
         actor_type="agent", actor_id=context.agent_id,
         entity_type="artifact", entity_id=artifact.id, entity_version=artifact.version,
-        visibility="group" if node else "user",
+        visibility="group" if (node or membership) else "user",
         summary=f"Artifact published: {name}",
         payload={"artifact_id": artifact.id, "name": name, "version_no": version_no},
         correlation_id=work.run_id,
@@ -227,11 +239,23 @@ async def reconcile_one_publishing_artifact(db) -> bool:
         and sha256_file(target) == artifact.checksum
     )
     if not valid and artifact.source_relative_path:
-        private = await private_agent_root(
-            db, workspace_id=artifact.workspace_id, session_id=artifact.session_id,
-            agent_id=artifact.created_by_agent_id,
+        group_link = await db.scalar(select(GroupArtifact).where(
+            GroupArtifact.artifact_id == artifact.id,
+        ))
+        source_root = (
+            await group_shared_root(
+                db, workspace_id=artifact.workspace_id,
+                session_id=artifact.session_id,
+                group_session_id=group_link.group_session_id,
+            )
+            if group_link is not None else
+            await private_agent_root(
+                db, workspace_id=artifact.workspace_id,
+                session_id=artifact.session_id,
+                agent_id=artifact.created_by_agent_id,
+            )
         )
-        source = private.joinpath(*artifact.source_relative_path.split("/"))
+        source = source_root.joinpath(*artifact.source_relative_path.split("/"))
         if (
             source.is_file() and source.stat().st_size == artifact.size_bytes
             and sha256_file(source) == artifact.checksum and not target.exists()

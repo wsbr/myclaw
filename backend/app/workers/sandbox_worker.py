@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import socket
 from dataclasses import dataclass
 from datetime import timedelta
 
 from sqlalchemy import or_, select
+from sqlalchemy.exc import OperationalError
 
 from app.core.tool_registry.base import RuntimeContext, ToolResult
 from app.core.tool_registry.registry import ToolRegistry
@@ -31,6 +33,9 @@ from app.services.workspace_lock_service import (
     WorkspaceLockConflict, WorkspaceLockGrant, acquire_workspace_lock,
     assert_workspace_lock, release_workspace_lock,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -211,10 +216,34 @@ class SandboxWorker:
         await self.settle(claim, result)
 
     async def settle(self, claim: SandboxClaim, result: ToolResult) -> None:
+        # Tool execution and result persistence are deliberately separate. A
+        # transient database deadlock must retry only the settlement write and
+        # must never execute the external side effect a second time.
+        for attempt_no in range(1, 6):
+            try:
+                await self._settle_once(claim, result)
+                return
+            except OperationalError as error:
+                mysql_code = getattr(getattr(error, "orig", None), "args", (None,))[0]
+                if mysql_code not in {1205, 1213} or attempt_no == 5:
+                    raise
+                logger.warning(
+                    "Retrying Tool settlement after transient MySQL lock error",
+                    extra={
+                        "tool_invocation_id": claim.invocation_id,
+                        "mysql_code": mysql_code,
+                        "attempt_no": attempt_no,
+                    },
+                )
+                await asyncio.sleep(0.05 * attempt_no)
+
+    async def _settle_once(self, claim: SandboxClaim, result: ToolResult) -> None:
         normalized = json.loads(json.dumps(result.data, ensure_ascii=False, default=str)) if result.data is not None else None
         envelope = result.model_copy(update={"data": normalized}).model_dump(mode="json")
         async with AsyncSessionLocal.begin() as db:
             await db.scalar(select(UserSession).where(UserSession.id == claim.session_id).with_for_update())
+            run = await db.scalar(select(Run).where(Run.id == claim.run_id).with_for_update())
+            work = await db.scalar(select(WorkItem).where(WorkItem.id == claim.work_item_id).with_for_update())
             invocation = await db.scalar(select(ToolInvocation).where(
                 ToolInvocation.id == claim.invocation_id, ToolInvocation.status == "running",
             ).with_for_update())
@@ -222,8 +251,6 @@ class SandboxWorker:
                 ToolAttempt.id == claim.attempt_id, ToolAttempt.status == "running",
                 ToolAttempt.lease_token == claim.lease_token,
             ).with_for_update())
-            work = await db.scalar(select(WorkItem).where(WorkItem.id == claim.work_item_id).with_for_update())
-            run = await db.scalar(select(Run).where(Run.id == claim.run_id).with_for_update())
             if invocation is None or attempt is None or work is None or run is None:
                 return
             lock_valid = True
@@ -367,16 +394,23 @@ class SandboxWorker:
     async def run_forever(self, poll_seconds: float | None = None) -> None:
         poll_seconds = settings.sandbox_worker_poll_seconds if poll_seconds is None else poll_seconds
         while True:
-            async with AsyncSessionLocal.begin() as db:
-                if await reconcile_one_publishing_artifact(db):
+            try:
+                async with AsyncSessionLocal.begin() as db:
+                    if await reconcile_one_publishing_artifact(db):
+                        continue
+                if await self.recover_one(stale_seconds=settings.sandbox_attempt_stale_seconds):
                     continue
-            if await self.recover_one(stale_seconds=settings.sandbox_attempt_stale_seconds):
-                continue
-            claim = await self.claim_one()
-            if claim is None:
+                claim = await self.claim_one()
+                if claim is None:
+                    await asyncio.sleep(poll_seconds)
+                    continue
+                await self.execute(claim)
+            except Exception:
+                # A durable attempt remains recoverable from ToolAttempt and
+                # OutboxCommand state. Keep the worker alive so its recovery
+                # loop can fence or resume that work on the next iteration.
+                logger.exception("Sandbox worker iteration failed; durable recovery will retry")
                 await asyncio.sleep(poll_seconds)
-                continue
-            await self.execute(claim)
 
     @staticmethod
     def _complete_command(command: OutboxCommand) -> None:

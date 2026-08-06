@@ -47,7 +47,18 @@ class MessageArtifact(Base):
 
 class GroupArtifact(Base):
     __tablename__ = "group_artifact"
+    __table_args__ = (
+        CheckConstraint(
+            "(published_by_node_id IS NOT NULL) <> (published_by_membership_id IS NOT NULL)",
+            name="ck_group_artifact_publisher_scope",
+        ),
+    )
     group_session_id: Mapped[str] = mapped_column(String(36), ForeignKey("group_session.id"), primary_key=True)
     artifact_id: Mapped[str] = mapped_column(String(36), ForeignKey("artifact.id"), primary_key=True)
-    published_by_node_id: Mapped[str] = mapped_column(String(36), ForeignKey("group_agent_node.id"), nullable=False)
+    published_by_node_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("group_agent_node.id")
+    )
+    published_by_membership_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("group_membership.id")
+    )
     message_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("message.id"))

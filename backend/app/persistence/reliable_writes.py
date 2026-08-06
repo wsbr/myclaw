@@ -83,6 +83,10 @@ class ExecutionEventWriter:
         aggregate = await self.session.scalar(
             select(UserSession)
             .where(UserSession.id == session_id)
+            # The aggregate may already be present in this AsyncSession from an
+            # ownership check. After waiting for another transaction's row lock,
+            # refresh it instead of reusing a stale identity-map sequence value.
+            .execution_options(populate_existing=True)
             .with_for_update()
         )
         if aggregate is None:

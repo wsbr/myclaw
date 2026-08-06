@@ -16,7 +16,9 @@ from app.models.runtime_v1 import (
     Approval, Clarification, DurableRunner, Run, SessionGrant,
     ToolConfirmation, ToolInvocation, WorkItem,
 )
-from app.models.group_v1 import GroupFormationProposal
+from app.models.group_v1 import (
+    GroupFormationProposal, GroupRun, GroupRunMember, GroupSession,
+)
 from app.persistence.reliable_writes import ExecutionEventWriter, OutboxWriter
 from app.persistence.runtime_graph import persist_replacement_runner
 from app.schemas.runtime_v1 import (
@@ -154,6 +156,48 @@ async def list_required_actions(
         "action": {"method": "POST", "href": f"/api/v1/group-formations/{proposal.id}/confirm",
                    "required_fields": ["expected_revision_no"]},
     } for proposal in formations)
+    reporter_rows = list((await db.execute(
+        select(GroupRun, GroupSession, Run)
+        .join(GroupSession, GroupSession.id == GroupRun.group_session_id)
+        .join(Run, Run.id == GroupRun.run_id)
+        .where(
+            GroupSession.user_id == current.account.user_id,
+            GroupSession.initiator_agent_id.is_not(None),
+            Run.status == "waiting_user",
+            Run.wait_reason == "waiting_user",
+        )
+        .order_by(GroupRun.created_at, GroupRun.id)
+    )).all())
+    for group_run, group, run in reporter_rows:
+        reporter = await db.scalar(select(GroupRunMember).where(
+            GroupRunMember.group_run_id == group_run.id,
+            GroupRunMember.agent_id == group_run.reporter_agent_id,
+            GroupRunMember.participation_status == "available",
+        ))
+        if reporter is not None:
+            continue
+        items.append({
+            "id": group_run.id,
+            "type": "reporter_selection",
+            "status": "pending",
+            "session_id": group.parent_session_id,
+            "run_id": run.id,
+            "work_item_id": None,
+            "version": group_run.version,
+            "created_at": group_run.updated_at.isoformat(),
+            "expires_at": None,
+            "presentation": {
+                "title": "Select a replacement Group Reporter",
+                "summary": "The current Reporter is unavailable for natural GroupRun closure",
+                "group_run_id": group_run.id,
+                "reporter_agent_id": group_run.reporter_agent_id,
+            },
+            "action": {
+                "method": "POST",
+                "href": f"/api/v1/group-runs/{group_run.id}/reporter",
+                "required_fields": ["reporter_agent_id"],
+            },
+        })
     if actor.api_key is not None:
         owned_session_ids = set(await db.scalars(select(UserSession.id).where(
             UserSession.account_id == actor.account.id,
@@ -211,12 +255,19 @@ async def decide_approval(
     )
     if replay and record.response_snapshot:
         return record.response_snapshot
+    visible_approval = await db.get(Approval, approval_id)
+    if (
+        visible_approval is None
+        or visible_approval.target_account_id != actor.account.id
+    ):
+        raise HTTPException(status_code=404, detail="Approval not found")
+    await _owned_session(db, visible_approval.session_id, actor)
+    locked_session = await db.scalar(select(UserSession).where(
+        UserSession.id == visible_approval.session_id,
+    ).execution_options(populate_existing=True).with_for_update())
     approval = await db.scalar(select(Approval).where(
         Approval.id == approval_id,
-    ).with_for_update())
-    if approval is None or approval.target_account_id != actor.account.id:
-        raise HTTPException(status_code=404, detail="Approval not found")
-    await _owned_session(db, approval.session_id, actor)
+    ).execution_options(populate_existing=True).with_for_update())
     if approval.version != _expected_version(if_match):
         raise HTTPException(status_code=409, detail={
             "code": "version_conflict", "current_version": approval.version,
@@ -341,9 +392,7 @@ async def decide_approval(
     run = await db.scalar(select(Run).where(
         Run.id == approval.run_id,
     ).with_for_update())
-    session = await db.scalar(select(UserSession).where(
-        UserSession.id == approval.session_id,
-    ).with_for_update())
+    session = locked_session
     if invocation is None or work is None or run is None or session is None:
         raise HTTPException(status_code=409, detail={"code": "approval_subject_changed"})
     if (
@@ -434,6 +483,7 @@ async def decide_approval(
             work.wait_reason = "waiting_tool"
             work.version += 1
             run.status = "waiting_tool"
+            run.lifecycle = "waiting"
             run.wait_reason = "waiting_tool"
             run.version += 1
     elif not await has_pending_actions(db, work_item_id=work.id):
@@ -469,11 +519,25 @@ async def decide_tool_confirmation(
     )
     if replay and record.response_snapshot:
         return ToolConfirmationResponse.model_validate(record.response_snapshot)
+    visible_confirmation = await db.get(ToolConfirmation, confirmation_id)
+    if (
+        visible_confirmation is None
+        or visible_confirmation.user_id != current.account.user_id
+    ):
+        raise HTTPException(status_code=404, detail="Tool confirmation not found")
+    visible_invocation = await db.get(
+        ToolInvocation, visible_confirmation.tool_invocation_id,
+    )
+    if visible_invocation is None:
+        raise HTTPException(status_code=409, detail={"code": "tool_invocation_unavailable"})
+    # Event sequence allocation and Runner settlement use UserSession as the
+    # stream head. Lock it before Run/WorkItem to preserve one global order.
+    await db.scalar(select(UserSession).where(
+        UserSession.id == visible_invocation.session_id,
+    ).execution_options(populate_existing=True).with_for_update())
     confirmation = await db.scalar(select(ToolConfirmation).where(
         ToolConfirmation.id == confirmation_id,
-    ).with_for_update())
-    if confirmation is None or confirmation.user_id != current.account.user_id:
-        raise HTTPException(status_code=404, detail="Tool confirmation not found")
+    ).execution_options(populate_existing=True).with_for_update())
     if confirmation.version != _expected_version(if_match):
         raise HTTPException(status_code=409, detail={"code": "version_conflict", "current_version": confirmation.version})
     if confirmation.status != "pending":
@@ -482,7 +546,7 @@ async def decide_tool_confirmation(
         raise HTTPException(status_code=409, detail={"code": "confirmation_arguments_changed"})
     invocation = await db.scalar(select(ToolInvocation).where(
         ToolInvocation.id == confirmation.tool_invocation_id,
-    ).with_for_update())
+    ).execution_options(populate_existing=True).with_for_update())
     if (
         invocation.arguments_hash != confirmation.arguments_hash
         or invocation.principal_hash != confirmation.principal_hash
@@ -491,7 +555,6 @@ async def decide_tool_confirmation(
         raise HTTPException(status_code=409, detail={"code": "confirmation_snapshot_mismatch"})
     run = await db.scalar(select(Run).where(Run.id == invocation.run_id).with_for_update())
     work = await db.scalar(select(WorkItem).where(WorkItem.id == invocation.work_item_id).with_for_update())
-    await db.scalar(select(UserSession).where(UserSession.id == invocation.session_id).with_for_update())
     if run.lifecycle in {"completed", "cancelled"}:
         raise HTTPException(status_code=409, detail={"code": "run_terminal", "lifecycle": run.lifecycle})
     confirmation.status = "approved" if decision == "approve" else "rejected"

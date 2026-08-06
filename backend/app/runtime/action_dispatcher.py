@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.tool_registry.base import RuntimeContext, ToolError, ToolResult
 from app.core.tool_registry.registry import ToolRegistry
 from app.models.common import utcnow, uuid7
+from app.models.foundation import UserSession
 from app.models.runtime_v1 import Approval, CapabilitySnapshot, SessionGrant, ToolInvocation
 from app.persistence.reliable_writes import ExecutionEventWriter
 from app.runtime.coordination_tools import dispatch_coordination_tool
@@ -166,6 +167,15 @@ class ActionDispatcher:
                     ),
                 ),
             )
+
+        if db is not None and run_id and work_item_id and source_turn_id:
+            # Agent turns run concurrently, but every durable dispatch writes
+            # a Session-scoped event sequence. Acquire that aggregate lock
+            # before Tool/Group rows so all dispatch paths share one lock
+            # order and cannot deadlock against settlement or Sandbox workers.
+            await db.scalar(select(UserSession).where(
+                UserSession.id == runtime_context.session_id,
+            ).execution_options(populate_existing=True).with_for_update())
 
         if definition.get("source") == "runtime":
             if db is None or not all((run_id, work_item_id, source_turn_id)):
@@ -340,6 +350,25 @@ class ActionDispatcher:
             if result.error:
                 invocation.error_code = result.error.code
                 invocation.error_detail = result.error.message
+            invocation.version += 1
+            await ExecutionEventWriter(db).append(
+                session_id=runtime_context.session_id, run_id=run_id,
+                event_type=(
+                    "tool.succeeded" if result.success else "tool.failed"
+                ),
+                event_dedupe_key=(
+                    f"transition:tool_invocation:{invocation.id}:inline:settle"
+                ),
+                actor_type="service", actor_id="runtime-action-dispatcher",
+                entity_type="tool_invocation", entity_id=invocation.id,
+                entity_version=invocation.version, visibility="user",
+                summary=(
+                    f"Tool completed: {call.name}"
+                    if result.success else f"Tool failed: {call.name}"
+                ),
+                payload={"tool_key": call.name, "status": invocation.status},
+                correlation_id=run_id,
+            )
         return DispatchResult(
             call.call_id, call.name, result,
             invocation_id=invocation.id if invocation else None,

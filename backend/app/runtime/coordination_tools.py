@@ -17,6 +17,12 @@ from app.services.agent_invocation_service import (
     AgentInvocationRejected, dispatch_agent_invocation,
     persist_rejected_agent_invocation,
 )
+from app.services.group_collaboration_service import (
+    GroupPolicyError,
+    reject_fixed_run_invitation,
+    send_agent_group_message,
+    update_runtime_shared_task,
+)
 
 
 RUNTIME_COORDINATION_DEFINITIONS = ({
@@ -102,6 +108,63 @@ RUNTIME_COORDINATION_DEFINITIONS = ({
         "additionalProperties": False,
     },
     "source": "runtime",
+}, {
+    "name": "send_group_message",
+    "description": (
+        "Send a real Group message. A direct message wakes only the named member; "
+        "a group message is shared history and does not broadcast-wake every member."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "content": {"type": "string", "minLength": 1, "maxLength": 16000},
+            "visibility": {"type": "string", "enum": ["direct", "group"]},
+            "recipient_agent_id": {"type": "string", "minLength": 1, "maxLength": 191},
+        },
+        "required": ["content", "visibility"],
+        "additionalProperties": False,
+    },
+    "source": "runtime",
+    "side_effect": "idempotent",
+    "group_only": True,
+}, {
+    "name": "invite_agent",
+    "description": (
+        "Propose inviting a governed Agent. In first-phase fixed_for_run Groups, "
+        "out-of-graph proposals return an auditable rejected result."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "agent_id": {"type": "string", "minLength": 1, "maxLength": 191},
+            "reason": {"type": "string", "minLength": 1, "maxLength": 4000},
+        },
+        "required": ["agent_id", "reason"],
+        "additionalProperties": False,
+    },
+    "source": "runtime",
+    "side_effect": "idempotent",
+    "group_only": True,
+}, {
+    "name": "update_shared_task",
+    "description": (
+        "Create or update an optional Group SharedTask collaboration record. "
+        "It never schedules an Agent or imposes an execution DAG."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "task_id": {"type": "string"},
+            "title": {"type": "string", "minLength": 1, "maxLength": 300},
+            "description": {"type": "string", "maxLength": 16000},
+            "status": {"type": "string", "enum": ["pending", "in_progress", "completed", "blocked", "cancelled"]},
+            "assignee_agent_id": {"type": "string"},
+        },
+        "additionalProperties": False,
+    },
+    "source": "runtime",
+    "side_effect": "idempotent",
+    "group_only": True,
 })
 
 for _definition in RUNTIME_COORDINATION_DEFINITIONS:
@@ -118,9 +181,9 @@ for _definition in RUNTIME_COORDINATION_DEFINITIONS:
             separators=(",", ":"),
         ).encode()).hexdigest(),
         "execution_mode": "inline",
-        "side_effect": "none",
         "confirmation_policy": "never",
     })
+    _definition.setdefault("side_effect", "none")
 
 
 async def dispatch_coordination_tool(
@@ -180,18 +243,79 @@ async def dispatch_coordination_tool(
             rejected = await persist_rejected_agent_invocation(
                 db, caller_runner=caller_runner, caller_work=caller_work,
                 run=run, arguments=arguments, operation_key=operation_key,
-                reason=str(error),
+                reason=str(error), reason_code=error.code,
             )
             return ToolResult(
                 status="failed", summary=str(error),
                 data={"agent_invocation_id": rejected.id if rejected else None},
-                error_code="agent_invocation_rejected", error=str(error),
+                error_code=error.code, error=str(error),
                 error_category="authorization",
             ), False, None
         return ToolResult(
             status="succeeded", summary="Waiting for the invoked Agent",
             data={"agent_invocation_id": invocation.id, "status": invocation.status},
         ), True, "agent"
+
+    if name == "send_group_message":
+        try:
+            message, target_runner = await send_agent_group_message(
+                db, context=context, run_id=run_id, work_item_id=work_item_id,
+                content=str(arguments.get("content") or "").strip(),
+                recipient_agent_id=arguments.get("recipient_agent_id"),
+                visibility=str(arguments.get("visibility") or ""),
+                operation_key=operation_key,
+            )
+        except GroupPolicyError as error:
+            return ToolResult(
+                status="failed", summary=str(error), error_code=error.code,
+                error=str(error), error_category="authorization",
+            ), False, None
+        return ToolResult(
+            status="succeeded", summary="Group message persisted",
+            data={
+                "message_id": message.id,
+                "visibility": message.visibility,
+                "recipient_agent_id": message.recipient_agent_id,
+                "recipient_woken": target_runner is not None,
+            },
+        ), False, None
+
+    if name == "invite_agent":
+        try:
+            result = await reject_fixed_run_invitation(
+                db, context=context, run_id=run_id, work_item_id=work_item_id,
+                target_agent_id=str(arguments.get("agent_id") or "").strip(),
+                reason=str(arguments.get("reason") or "").strip(),
+                operation_key=operation_key,
+            )
+        except GroupPolicyError as error:
+            return ToolResult(
+                status="failed", summary=str(error), error_code=error.code,
+                error=str(error), error_category="authorization",
+            ), False, None
+        return ToolResult(
+            status="failed",
+            summary="Invitation rejected by fixed_for_run membership policy",
+            data=result,
+            error_code="membership_policy_fixed_for_run",
+            error="Invitation rejected by fixed_for_run membership policy",
+            error_category="authorization",
+        ), False, None
+
+    if name == "update_shared_task":
+        try:
+            task = await update_runtime_shared_task(
+                db, context=context, run_id=run_id,
+                arguments=arguments, operation_key=operation_key,
+            )
+        except GroupPolicyError as error:
+            return ToolResult(
+                status="failed", summary=str(error), error_code=error.code,
+                error=str(error), error_category="validation",
+            ), False, None
+        return ToolResult(
+            status="succeeded", summary="SharedTask updated", data={"shared_task": task},
+        ), False, None
 
     if name != "ask_user":
         return ToolResult(

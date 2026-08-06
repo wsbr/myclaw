@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, Header, HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.sessions import _idempotency, _owned_session
@@ -12,6 +12,7 @@ from app.models.group_v1 import (
     GroupAgentNode, GroupCollaborationEdge, GroupFormationParticipant, GroupFormationProposal, GroupFormationRevision,
     GroupFormationSuggestedEdge, GroupFormationWorkItem, GroupInitialSuggestedEdge,
     GroupRun, GroupRunAgentVersion, GroupRunReference, GroupSession,
+    GroupMembership, GroupRunMember, GroupSummaryRequest, SharedTask,
 )
 from app.models.runtime_v1 import (
     AgentInvocation, Clarification, DurableRunner, Message, Run, ToolConfirmation,
@@ -23,12 +24,23 @@ from app.services.notification_delivery_service import create_notification_deliv
 from app.schemas.group_v1 import (
     GroupFormationConfirmRequest, GroupFormationCreateRequest, GroupFormationPatchRequest,
     GroupCloseRequest, GroupInitialWorkItemInput, GroupParticipantInput, GroupRunCreateRequest,
-    GroupRunMessageRequest, GroupSuggestedEdgeInput,
+    GroupRunMessageRequest, GroupSuggestedEdgeInput, GroupCreateRequest,
+    GroupReporterReplaceRequest, SharedTaskCreateRequest, SharedTaskPatchRequest,
 )
 from app.services.group_formation_service import (
     GroupFormationValidationError, create_revision, proposal_view, revision_view, validate_formation,
 )
 from app.services.cursor_service import SortKey, paginate_scalars
+from app.services.group_collaboration_service import (
+    GroupPolicyError,
+    create_followup_group_run,
+    create_group_with_initial_run,
+    create_user_group_message,
+    group_run_member_view,
+    group_session_view,
+    membership_view,
+    native_group_run_view,
+)
 
 router = APIRouter(tags=["groups"])
 NON_TERMINAL_WORK = {"queued", "running", "waiting_user", "waiting_agent", "waiting_tool", "waiting_resource"}
@@ -57,6 +69,8 @@ async def owned_group(db: AsyncSession, group_id: str, actor: SessionActor, *, l
 
 
 async def group_run_view(db: AsyncSession, group_run: GroupRun) -> dict:
+    if group_run.owner_node_id is None:
+        return await native_group_run_view(db, group_run)
     run = await db.get(Run, group_run.run_id)
     mappings = list(await db.scalars(select(GroupRunAgentVersion).where(
         GroupRunAgentVersion.group_run_id == group_run.id
@@ -409,12 +423,102 @@ async def cancel_group_formation(
     return await _decline_formation(proposal_id, "cancelled", if_match, idempotency_key, db, actor)
 
 
+def _raise_group_policy(error: GroupPolicyError) -> None:
+    status = 404 if error.code == "agent_not_discoverable" else 422
+    raise HTTPException(
+        status_code=status,
+        detail={"code": error.code, "message": str(error), **error.details},
+    )
+
+
+@router.post("/sessions/{session_id}/groups", status_code=201)
+async def create_group(
+    session_id: str,
+    body: GroupCreateRequest,
+    idempotency_key: str = Header(alias="Idempotency-Key"),
+    db: AsyncSession = Depends(get_db),
+    actor: SessionActor = Depends(get_session_actor),
+):
+    """Create a Group directly from user-selected Agent Network identities."""
+    session = await _owned_session(db, session_id, actor)
+    if actor.account is None:
+        raise HTTPException(status_code=403, detail={"code": "identity_mapping_required"})
+    request = {
+        "session_id": session_id,
+        "member_agent_ids": body.member_agent_ids,
+        "goal": body.goal.strip(),
+        "reporter_agent_id": body.reporter_agent_id,
+        "shared_context_refs": sorted(set(body.shared_context_refs)),
+    }
+    record, replay = await _idempotency(
+        db, actor=actor, operation="create_agent_native_group",
+        key=idempotency_key, request=request,
+    )
+    if replay and record.response_snapshot:
+        return record.response_snapshot
+    try:
+        group, group_run = await create_group_with_initial_run(
+            db,
+            session=session,
+            account_id=actor.account.id,
+            member_agent_ids=body.member_agent_ids,
+            goal=body.goal.strip(),
+            reporter_agent_id=body.reporter_agent_id,
+            shared_context_refs=list(dict.fromkeys(body.shared_context_refs)),
+            event_key=f"create_group:{record.id}",
+        )
+    except GroupPolicyError as error:
+        await db.rollback()
+        _raise_group_policy(error)
+    response = group_session_view(group)
+    # The GroupSession wire contract remains small; the first GroupRun is
+    # discoverable through GET /groups/{id}/runs.
+    record.resource_type = "group_session"
+    record.resource_id = group.id
+    record.http_status = 201
+    record.response_snapshot = response
+    await db.commit()
+    return response
+
+
+@router.get("/sessions/{session_id}/groups")
+async def list_session_groups(
+    session_id: str,
+    db: AsyncSession = Depends(get_db),
+    actor: SessionActor = Depends(get_session_actor),
+):
+    session = await _owned_session(db, session_id, actor)
+    rows = list(await db.scalars(select(GroupSession).where(
+        GroupSession.parent_session_id == session.id,
+        GroupSession.status.in_(("open", "closed", "archived")),
+    ).order_by(GroupSession.created_at.desc(), GroupSession.id.desc())))
+    return {"items": [group_session_view(item) for item in rows], "next_cursor": None}
+
+
 @router.get("/groups/{group_id}")
 async def get_group(group_id: str, db: AsyncSession = Depends(get_db), actor: SessionActor = Depends(get_session_actor)):
     group = await owned_group(db, group_id, actor)
+    legacy_node = await db.scalar(select(GroupAgentNode.id).where(
+        GroupAgentNode.group_session_id == group.id,
+    ).limit(1))
+    if legacy_node is None:
+        return group_session_view(group)
     return {"id": group.id, "parent_session_id": group.parent_session_id, "entry_agent_id": group.entry_agent_id,
             "status": group.status, "goal": group.goal, "bootstrap_context": group.bootstrap_context,
             "frozen_formation_revision_id": group.frozen_formation_revision_id, "version": group.version}
+
+
+@router.get("/groups/{group_id}/memberships")
+async def list_group_memberships(
+    group_id: str,
+    db: AsyncSession = Depends(get_db),
+    actor: SessionActor = Depends(get_session_actor),
+):
+    group = await owned_group(db, group_id, actor)
+    rows = list(await db.scalars(select(GroupMembership).where(
+        GroupMembership.group_session_id == group.id
+    ).order_by(GroupMembership.created_at, GroupMembership.id)))
+    return {"items": [membership_view(item) for item in rows], "next_cursor": None}
 
 
 @router.get("/groups/{group_id}/nodes")
@@ -523,6 +627,66 @@ async def get_group_run(
     return await group_run_view(db, group_run)
 
 
+@router.get("/group-runs/{group_run_id}/members")
+async def list_group_run_members(
+    group_run_id: str,
+    db: AsyncSession = Depends(get_db),
+    actor: SessionActor = Depends(get_session_actor),
+):
+    group_run = await db.get(GroupRun, group_run_id)
+    if group_run is None:
+        raise HTTPException(status_code=404, detail="GroupRun not found")
+    await owned_group(db, group_run.group_session_id, actor)
+    rows = list(await db.scalars(select(GroupRunMember).where(
+        GroupRunMember.group_run_id == group_run.id
+    ).order_by(GroupRunMember.agent_id)))
+    return {"items": [group_run_member_view(item) for item in rows], "next_cursor": None}
+
+
+@router.get("/group-runs/{group_run_id}/interaction-graph")
+async def get_group_interaction_graph(
+    group_run_id: str,
+    db: AsyncSession = Depends(get_db),
+    actor: SessionActor = Depends(get_session_actor),
+):
+    """Project only real directed Message and AgentInvocation facts."""
+    group_run = await db.get(GroupRun, group_run_id)
+    if group_run is None:
+        raise HTTPException(status_code=404, detail="GroupRun not found")
+    await owned_group(db, group_run.group_session_id, actor)
+    members = list(await db.scalars(select(GroupRunMember).where(
+        GroupRunMember.group_run_id == group_run.id
+    ).order_by(GroupRunMember.agent_id)))
+    member_ids = {item.agent_id for item in members}
+    messages = list(await db.scalars(select(Message).where(
+        Message.group_run_id == group_run.id,
+        Message.sender_agent_id.is_not(None),
+        Message.recipient_agent_id.is_not(None),
+        Message.status == "committed",
+    ).order_by(Message.created_at, Message.id)))
+    invocations = list(await db.scalars(select(AgentInvocation).where(
+        AgentInvocation.group_run_id == group_run.id,
+    ).order_by(AgentInvocation.created_at, AgentInvocation.id)))
+    edges = [{
+        "source_agent_id": item.sender_agent_id,
+        "target_agent_id": item.recipient_agent_id,
+        "cause_type": "message",
+        "cause_id": item.id,
+        "status": "committed",
+        "created_at": item.created_at.isoformat(),
+    } for item in messages if item.sender_agent_id in member_ids and item.recipient_agent_id in member_ids]
+    edges.extend({
+        "source_agent_id": item.caller_agent_id,
+        "target_agent_id": item.target_agent_id,
+        "cause_type": "agent_invocation",
+        "cause_id": item.id,
+        "status": item.status,
+        "created_at": item.created_at.isoformat(),
+    } for item in invocations if item.caller_agent_id in member_ids and item.target_agent_id in member_ids)
+    edges.sort(key=lambda item: (item["created_at"], item["cause_id"]))
+    return {"nodes": [group_run_member_view(item) for item in members], "edges": edges}
+
+
 @router.post("/groups/{group_id}/runs", status_code=202)
 async def create_group_run(
     group_id: str, body: GroupRunCreateRequest,
@@ -534,10 +698,38 @@ async def create_group_run(
         db, actor=actor, operation="create_group_run", key=idempotency_key,
         request={"group_id": group_id, "content": content,
                  "recipient_node_id": body.recipient_node_id,
+                 "recipient_agent_id": body.recipient_agent_id,
+                 "reporter_agent_id": body.reporter_agent_id,
                  "reference_run_ids": sorted(set(body.reference_run_ids))},
     )
     if replay and record.response_snapshot: return record.response_snapshot
     visible = await owned_group(db, group_id, actor)
+    legacy_node = await db.scalar(select(GroupAgentNode.id).where(
+        GroupAgentNode.group_session_id == visible.id,
+    ).limit(1))
+    if legacy_node is None:
+        if actor.account is None:
+            raise HTTPException(status_code=403, detail={"code": "identity_mapping_required"})
+        session = await _owned_session(db, visible.parent_session_id, actor)
+        try:
+            group_run = await create_followup_group_run(
+                db, session=session, group=visible, account_id=actor.account.id,
+                content=content,
+                recipient_agent_id=body.recipient_agent_id,
+                reporter_agent_id=body.reporter_agent_id,
+                reference_run_ids=list(dict.fromkeys(body.reference_run_ids)),
+                event_key=f"create_group_run:{record.id}",
+            )
+        except GroupPolicyError as error:
+            await db.rollback()
+            _raise_group_policy(error)
+        response = await native_group_run_view(db, group_run)
+        record.resource_type = "group_run"
+        record.resource_id = group_run.id
+        record.http_status = 202
+        record.response_snapshot = response
+        await db.commit()
+        return response
     await db.scalar(select(UserSession).where(UserSession.id == visible.parent_session_id).with_for_update())
     group = await db.scalar(select(GroupSession).where(GroupSession.id == group_id).with_for_update())
     if group.status != "open": raise HTTPException(status_code=409, detail={"code": "group_not_open"})
@@ -633,11 +825,37 @@ async def create_group_run_message(
     content = body.content.strip()
     record, replay = await _idempotency(db, actor=actor, operation="create_group_run_message",
         key=idempotency_key, request={"group_run_id": group_run_id, "content": content,
-                                      "recipient_node_id": body.recipient_node_id})
+                                      "recipient_node_id": body.recipient_node_id,
+                                      "recipient_agent_id": body.recipient_agent_id})
     if replay and record.response_snapshot: return record.response_snapshot
     visible = await db.get(GroupRun, group_run_id)
     if visible is None: raise HTTPException(status_code=404, detail="GroupRun not found")
     group = await owned_group(db, visible.group_session_id, actor)
+    if visible.owner_node_id is None:
+        session = await _owned_session(db, group.parent_session_id, actor)
+        try:
+            message, _runner = await create_user_group_message(
+                db, session=session, group=group, group_run=visible,
+                content=content, recipient_agent_id=body.recipient_agent_id,
+                event_key=f"group_run_message:{record.id}",
+            )
+        except GroupPolicyError as error:
+            await db.rollback()
+            _raise_group_policy(error)
+        response = {
+            "message": {
+                "id": message.id,
+                "recipient_agent_id": message.recipient_agent_id,
+                "visibility": message.visibility,
+            },
+            "group_run": await native_group_run_view(db, visible),
+        }
+        record.resource_type = "message"
+        record.resource_id = message.id
+        record.http_status = 202
+        record.response_snapshot = response
+        await db.commit()
+        return response
     await db.scalar(select(UserSession).where(UserSession.id == group.parent_session_id).with_for_update())
     group_run = await db.scalar(select(GroupRun).where(GroupRun.id == group_run_id).with_for_update())
     run = await db.scalar(select(Run).where(Run.id == group_run.run_id).with_for_update())
@@ -711,10 +929,241 @@ async def list_group_run_messages(
                        "sender_user_id": row.sender_user_id, "sender_agent_id": row.sender_agent_id,
                        "recipient_type": row.recipient_type,
                        "recipient_group_node_id": row.recipient_group_node_id,
+                       "recipient_agent_id": row.recipient_agent_id,
+                       "visibility": row.visibility,
                        "role": row.role, "content": row.content,
                        "work_item_id": row.work_item_id, "clarification_id": row.clarification_id,
                        "created_at": row.created_at.isoformat()} for row in rows],
             "next_cursor": next_cursor}
+
+
+@router.get("/groups/{group_id}/messages")
+async def list_group_messages(
+    group_id: str, limit: int = 100, cursor: str | None = None,
+    db: AsyncSession = Depends(get_db), actor: SessionActor = Depends(get_session_actor),
+):
+    group = await owned_group(db, group_id, actor)
+    rows, next_cursor = await paginate_scalars(
+        db,
+        select(Message).where(
+            Message.group_session_id == group.id,
+            Message.scope_type == "group",
+            Message.status == "committed",
+            Message.visibility.in_(("group", "direct", "user")),
+        ),
+        sort=(SortKey(Message.created_at, descending=False), SortKey(Message.id, descending=False)),
+        limit=limit, cursor=cursor,
+        principal=f"{actor.principal_type}:{actor.principal_id}",
+        resource=f"group:{group_id}:messages", filters={},
+    )
+    return {"items": [{
+        "id": row.id,
+        "session_id": row.session_id,
+        "group_run_id": row.group_run_id,
+        "sender_kind": "runtime" if row.sender_type == "system" else row.sender_type,
+        "sender_agent_id": row.sender_agent_id,
+        "recipient_agent_id": row.recipient_agent_id,
+        "visibility": row.visibility,
+        "content": row.content,
+        "run_id": row.run_id,
+        "work_item_id": row.work_item_id,
+        "sequence_no": row.sequence_no,
+        "created_at": row.created_at.isoformat(),
+    } for row in rows], "next_cursor": next_cursor}
+
+
+@router.post("/group-runs/{group_run_id}/reporter", status_code=202)
+async def replace_group_reporter(
+    group_run_id: str,
+    body: GroupReporterReplaceRequest,
+    if_match: str | None = Header(default=None, alias="If-Match"),
+    idempotency_key: str = Header(alias="Idempotency-Key"),
+    db: AsyncSession = Depends(get_db),
+    actor: SessionActor = Depends(get_session_actor),
+):
+    record, replay = await _idempotency(
+        db, actor=actor, operation="replace_group_reporter", key=idempotency_key,
+        request={"group_run_id": group_run_id, **body.model_dump()},
+    )
+    if replay and record.response_snapshot:
+        return record.response_snapshot
+    visible = await db.get(GroupRun, group_run_id)
+    if visible is None:
+        raise HTTPException(status_code=404, detail="GroupRun not found")
+    await owned_group(db, visible.group_session_id, actor)
+    group_run = await db.scalar(select(GroupRun).where(
+        GroupRun.id == group_run_id
+    ).with_for_update())
+    if if_match is not None and expected(if_match) != group_run.version:
+        raise HTTPException(status_code=409, detail={"code": "version_conflict"})
+    run = await db.scalar(select(Run).where(Run.id == group_run.run_id).with_for_update())
+    member = await db.scalar(select(GroupRunMember).where(
+        GroupRunMember.group_run_id == group_run.id,
+        GroupRunMember.agent_id == body.reporter_agent_id,
+        GroupRunMember.participation_status == "available",
+    ))
+    if member is None:
+        raise HTTPException(status_code=422, detail={"code": "reporter_unavailable"})
+    if run.status != "waiting_user" or run.lifecycle != "waiting":
+        raise HTTPException(status_code=409, detail={"code": "domain_validation"})
+    group_run.reporter_agent_id = body.reporter_agent_id
+    group_run.version += 1
+    run.status = "active"
+    run.lifecycle = "running"
+    run.wait_reason = None
+    run.version += 1
+    await ExecutionEventWriter(db).append(
+        session_id=run.session_id, run_id=run.id,
+        group_session_id=group_run.group_session_id, group_run_id=group_run.id,
+        event_type="group.reporter_replaced",
+        event_dedupe_key=f"replace_group_reporter:{record.id}",
+        actor_type="user", actor_id=run.user_id,
+        entity_type="group_run", entity_id=group_run.id,
+        entity_version=group_run.version, visibility="group",
+        summary="Group Reporter replaced by user",
+        payload={"reporter_agent_id": body.reporter_agent_id},
+        correlation_id=run.id,
+    )
+    await OutboxWriter(db).enqueue(
+        topic="runtime.control", action="evaluate_group_quiescence",
+        aggregate_type="group_run", aggregate_id=group_run.id,
+        partition_key=run.session_id,
+        dedupe_key=f"reporter_replaced:{record.id}:quiescence",
+        payload_ref={"group_run_id": group_run.id},
+    )
+    response = await native_group_run_view(db, group_run)
+    record.resource_type = "group_run"
+    record.resource_id = group_run.id
+    record.http_status = 202
+    record.response_snapshot = response
+    await db.commit()
+    return response
+
+
+def _shared_task_view(row: SharedTask) -> dict:
+    return {
+        "id": row.id, "group_session_id": row.group_session_id,
+        "group_run_id": row.group_run_id, "title": row.title,
+        "description": row.description, "status": row.status,
+        "assignee_agent_id": row.assignee_agent_id,
+        "depends_on_task_ids": list(row.depends_on_task_ids or []),
+        "result_refs": list(row.result_refs or []), "version": row.version,
+        "created_at": row.created_at.isoformat(),
+        "updated_at": row.updated_at.isoformat(),
+    }
+
+
+@router.get("/groups/{group_id}/shared-tasks")
+async def list_shared_tasks(
+    group_id: str,
+    db: AsyncSession = Depends(get_db), actor: SessionActor = Depends(get_session_actor),
+):
+    group = await owned_group(db, group_id, actor)
+    rows = list(await db.scalars(select(SharedTask).where(
+        SharedTask.group_session_id == group.id
+    ).order_by(SharedTask.created_at, SharedTask.id)))
+    return {"items": [_shared_task_view(item) for item in rows], "next_cursor": None}
+
+
+@router.post("/groups/{group_id}/shared-tasks", status_code=201)
+async def create_shared_task(
+    group_id: str, body: SharedTaskCreateRequest,
+    idempotency_key: str = Header(alias="Idempotency-Key"),
+    db: AsyncSession = Depends(get_db), actor: SessionActor = Depends(get_session_actor),
+):
+    group = await owned_group(db, group_id, actor)
+    record, replay = await _idempotency(
+        db, actor=actor, operation="create_shared_task", key=idempotency_key,
+        request={"group_id": group_id, **body.model_dump()},
+    )
+    if replay and record.response_snapshot:
+        return record.response_snapshot
+    if body.assignee_agent_id:
+        member = await db.scalar(select(GroupMembership).where(
+            GroupMembership.group_session_id == group.id,
+            GroupMembership.agent_id == body.assignee_agent_id,
+            GroupMembership.status == "joined",
+        ))
+        if member is None:
+            raise HTTPException(status_code=422, detail={"code": "group_member_unavailable"})
+    if body.group_run_id:
+        owned_run = await db.scalar(select(GroupRun.id).where(
+            GroupRun.id == body.group_run_id,
+            GroupRun.group_session_id == group.id,
+        ))
+        if owned_run is None:
+            raise HTTPException(status_code=422, detail={"code": "invalid_group_run_reference"})
+    if body.depends_on_task_ids:
+        dependency_count = int(await db.scalar(
+            select(func.count()).select_from(SharedTask).where(
+                SharedTask.group_session_id == group.id,
+                SharedTask.id.in_(set(body.depends_on_task_ids)),
+            )
+        ) or 0)
+        if dependency_count != len(set(body.depends_on_task_ids)):
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "invalid_shared_task_reference"},
+            )
+    task = SharedTask(
+        id=uuid7(), group_session_id=group.id, group_run_id=body.group_run_id,
+        title=body.title.strip(), description=body.description,
+        status="pending", assignee_agent_id=body.assignee_agent_id,
+        depends_on_task_ids=list(dict.fromkeys(body.depends_on_task_ids)),
+        result_refs=[],
+    )
+    if task.id in task.depends_on_task_ids:
+        raise HTTPException(status_code=422, detail={"code": "domain_validation"})
+    db.add(task)
+    await db.flush()
+    response = _shared_task_view(task)
+    record.resource_type = "shared_task"
+    record.resource_id = task.id
+    record.http_status = 201
+    record.response_snapshot = response
+    await db.commit()
+    return response
+
+
+@router.patch("/shared-tasks/{shared_task_id}")
+async def update_shared_task(
+    shared_task_id: str, body: SharedTaskPatchRequest,
+    if_match: str | None = Header(default=None, alias="If-Match"),
+    idempotency_key: str = Header(alias="Idempotency-Key"),
+    db: AsyncSession = Depends(get_db), actor: SessionActor = Depends(get_session_actor),
+):
+    visible = await db.get(SharedTask, shared_task_id)
+    if visible is None:
+        raise HTTPException(status_code=404, detail="SharedTask not found")
+    await owned_group(db, visible.group_session_id, actor)
+    record, replay = await _idempotency(
+        db, actor=actor, operation="update_shared_task", key=idempotency_key,
+        request={"shared_task_id": shared_task_id, **body.model_dump()},
+    )
+    if replay and record.response_snapshot:
+        return record.response_snapshot
+    task = await db.scalar(select(SharedTask).where(SharedTask.id == shared_task_id).with_for_update())
+    if if_match is not None and expected(if_match) != task.version:
+        raise HTTPException(status_code=409, detail={"code": "version_conflict"})
+    values = body.model_dump(exclude_unset=True)
+    if values.get("status") not in {None, "pending", "in_progress", "completed", "blocked", "cancelled"}:
+        raise HTTPException(status_code=422, detail={"code": "domain_validation"})
+    dependencies = values.get("depends_on_task_ids")
+    if dependencies is not None and task.id in dependencies:
+        raise HTTPException(status_code=422, detail={"code": "domain_validation"})
+    for key, value in values.items():
+        if key in {"depends_on_task_ids", "result_refs"} and value is not None:
+            value = list(dict.fromkeys(value if key == "depends_on_task_ids" else [str(item) for item in value])) if key == "depends_on_task_ids" else value
+        setattr(task, key, value)
+    task.version += 1
+    await db.flush()
+    response = _shared_task_view(task)
+    record.resource_type = "shared_task"
+    record.resource_id = task.id
+    record.http_status = 200
+    record.response_snapshot = response
+    await db.commit()
+    return response
 
 
 async def _cancel_group_run_state(
@@ -757,7 +1206,8 @@ async def _cancel_group_run_state(
             invocation.status = "cancelled"; invocation.error_code = "run_cancelled"; invocation.version += 1
         work.status = "cancelled"; work.active_runner_id = None
         work.error_code = "run_cancelled"; work.version += 1
-    run.lifecycle = "cancelled"; run.wait_reason = None; run.outcome = None
+    run.lifecycle = "cancelled"; run.status = "cancelled"
+    run.wait_reason = None; run.outcome = None
     run.cancellation_requested_at = now; run.finished_at = now
     run.error_code = "cancelled_by_user"; run.result_summary = reason; run.version += 1
     cancelled_event = await ExecutionEventWriter(db).append(session_id=run.session_id, run_id=run.id,
@@ -771,7 +1221,7 @@ async def _cancel_group_run_state(
     )
 
 
-@router.post("/group-runs/{group_run_id}/cancel")
+@router.post("/group-runs/{group_run_id}/cancel", status_code=202)
 async def cancel_group_run(
     group_run_id: str, body: GroupCloseRequest,
     if_match: str | None = Header(default=None, alias="If-Match"),
@@ -798,7 +1248,7 @@ async def cancel_group_run(
     record.response_snapshot = response; await db.commit(); return response
 
 
-@router.post("/groups/{group_id}/close")
+@router.post("/groups/{group_id}/close", status_code=202)
 async def close_group(
     group_id: str, body: GroupCloseRequest,
     if_match: str | None = Header(default=None, alias="If-Match"),

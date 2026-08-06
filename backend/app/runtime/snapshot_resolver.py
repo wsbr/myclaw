@@ -117,7 +117,13 @@ class SnapshotResolver:
 
         # Coordination Tools are Runtime-owned. They are injected consistently
         # and cannot be selected, replaced, or disabled through Agent assembly.
+        is_group_runtime = (
+            execution_principal.get("mode") == "group"
+            or bool(execution_principal.get("group_run_id"))
+        )
         for definition in RUNTIME_COORDINATION_DEFINITIONS:
+            if definition.get("group_only") and not is_group_runtime:
+                continue
             name = definition["name"]
             assembled_keys.append(name)
             effective_keys.append(name)

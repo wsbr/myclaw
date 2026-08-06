@@ -17,6 +17,8 @@ router = APIRouter(prefix="/agent-network", tags=["agent-network"])
 async def search_cards(
     query: str | None = None,
     domain_tag: list[str] = Query(default=[]),
+    capability: list[str] = Query(default=[]),
+    governance_label: list[str] = Query(default=[]),
     group_enabled: bool | None = None,
     limit: int = 50,
     db: AsyncSession = Depends(get_db),
@@ -26,7 +28,8 @@ async def search_cards(
         raise HTTPException(status_code=403, detail={"code": "identity_mapping_required"})
     cards = await discover_agent_cards(
         db, account_id=actor.account.id, query=query, domain_tags=domain_tag,
-        group_enabled=group_enabled, limit=limit,
+        group_enabled=group_enabled, capability_keys=capability,
+        governance_labels=governance_label, limit=limit,
     )
     return {"items": [agent_card_view(card) for card in cards], "next_cursor": None}
 

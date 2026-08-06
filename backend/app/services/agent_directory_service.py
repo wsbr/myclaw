@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from sqlalchemy import select
 
-from app.models.agent_v1 import AgentBlueprint, AgentCard
+from app.models.agent_v1 import AgentAssemblyVersion, AgentBlueprint, AgentCard
 
 
 def agent_card_view(card: AgentCard) -> dict:
@@ -31,7 +31,8 @@ def agent_card_view(card: AgentCard) -> dict:
 async def discover_agent_cards(
     db, *, account_id: str | None, actor_agent_id: str | None = None,
     query: str | None = None, domain_tags: list[str] | None = None,
-    group_enabled: bool | None = None, limit: int = 20,
+    group_enabled: bool | None = None, capability_keys: list[str] | None = None,
+    governance_labels: list[str] | None = None, limit: int = 20,
 ) -> list[AgentCard]:
     """Return current published cards visible to the original account.
 
@@ -43,9 +44,12 @@ async def discover_agent_cards(
     statement = (
         select(AgentCard)
         .join(AgentBlueprint, AgentBlueprint.id == AgentCard.agent_id)
+        .join(AgentAssemblyVersion, AgentAssemblyVersion.id == AgentCard.agent_version_id)
         .where(
             AgentBlueprint.status == "published",
             AgentBlueprint.current_published_version_id == AgentCard.agent_version_id,
+            AgentAssemblyVersion.publication_status == "published",
+            AgentAssemblyVersion.immutable_at.is_not(None),
             AgentCard.availability == "available",
         )
         .order_by(AgentCard.name, AgentCard.agent_id)
@@ -72,9 +76,32 @@ async def discover_agent_cards(
     ]
     normalized_query = str(query or "").strip().casefold()
     requested_tags = {str(item).strip().casefold() for item in domain_tags or [] if str(item).strip()}
+    requested_capabilities = {
+        str(item).strip().casefold() for item in capability_keys or [] if str(item).strip()
+    }
+    requested_governance = {
+        str(item).strip().casefold() for item in governance_labels or [] if str(item).strip()
+    }
     filtered: list[AgentCard] = []
     for card in visible:
         tags = {str(item).casefold() for item in card.domain_tags or []}
+        collaboration = dict(card.collaboration_summary or {})
+        governance = collaboration.get("governance") or {}
+        if collaboration.get("discoverable") is False:
+            continue
+        if isinstance(governance, dict) and governance.get("discoverable") is False:
+            continue
+        capabilities = {
+            str(item).casefold()
+            for item in (card.capabilities_summary or {}).get("tool_keys", [])
+        }
+        capabilities.update(
+            str(item).casefold()
+            for item in (card.capabilities_summary or {}).get("capabilities", [])
+        )
+        labels = set()
+        if isinstance(governance, dict):
+            labels = {str(item).casefold() for item in governance.get("labels", [])}
         haystack = " ".join((
             card.name, card.description, card.accepted_request_summary,
             " ".join(str(item) for item in card.supported_outcomes or []),
@@ -83,6 +110,10 @@ async def discover_agent_cards(
         if normalized_query and normalized_query not in haystack:
             continue
         if requested_tags and not requested_tags.issubset(tags):
+            continue
+        if requested_capabilities and not requested_capabilities.issubset(capabilities):
+            continue
+        if requested_governance and not requested_governance.issubset(labels):
             continue
         filtered.append(card)
         if len(filtered) >= limit:
@@ -106,8 +137,20 @@ async def resolve_callable_agent(
     ))
     if card is None:
         raise LookupError("target Agent has no current available AgentCard")
+    version = await db.get(AgentAssemblyVersion, card.agent_version_id)
+    if (
+        version is None or version.publication_status != "published"
+        or version.immutable_at is None
+    ):
+        raise LookupError("target Agent version is not currently published")
     if card.visibility != "enterprise" and (
         account_id is None or target.owner_account_id != account_id
     ):
         raise PermissionError("target Agent is outside the current discovery boundary")
+    collaboration = dict(card.collaboration_summary or {})
+    governance = collaboration.get("governance") or {}
+    if collaboration.get("callable") is False or (
+        isinstance(governance, dict) and governance.get("callable") is False
+    ):
+        raise PermissionError("target Agent is denied by collaboration governance")
     return target, card

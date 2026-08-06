@@ -22,4 +22,9 @@ class PublishArtifactTool(BaseTool):
         if db is None:
             return ToolResult(success=False, error="database connection is required")
         artifact = await publish_artifact(db, context=context, args=args)
-        return ToolResult(success=True, data={"artifact": artifact_view(artifact)})
+        return ToolResult(
+            success=True,
+            data={"artifact": artifact_view(artifact)},
+            summary=f"Artifact published: {artifact.name} ({artifact.id})",
+            artifact_ids=[artifact.id],
+        )

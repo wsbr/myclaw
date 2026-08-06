@@ -8,7 +8,7 @@ from sqlalchemy import and_, exists, func, or_, select
 
 from app.core.tool_registry.base import BaseTool, RuntimeContext, ToolResult
 from app.models.foundation import ExecutionEvent, ExecutionEventRecipient
-from app.models.group_v1 import GroupAgentNode, GroupSession
+from app.models.group_v1 import GroupAgentNode, GroupMembership, GroupSession
 from app.models.runtime_v1 import Message
 from app.models.artifact_v1 import Artifact
 
@@ -62,7 +62,21 @@ class SearchGroupHistoryTool(BaseTool):
             GroupSession.parent_session_id == context.session_id,
             GroupSession.status.in_(("open", "closed")),
         ))
+        # Historical Formation-backed Groups remain readable while all newly
+        # created Groups use immutable GroupMembership principals.
+        membership = None
         if node is None:
+            membership = await db.scalar(select(GroupMembership).join(
+                GroupSession, GroupSession.id == GroupMembership.group_session_id,
+            ).where(
+                GroupMembership.id == context.group_node_id,
+                GroupMembership.group_session_id == context.group_session_id,
+                GroupMembership.agent_id == context.agent_id,
+                GroupMembership.status == "joined",
+                GroupSession.parent_session_id == context.session_id,
+                GroupSession.status.in_(("open", "closed")),
+            ))
+        if membership is None and node is None:
             return ToolResult(success=False, error="current Agent is not a member of this Group")
         query = args.get("query")
         if not isinstance(query, str) or not query.strip() or len(query) > 1000:
@@ -95,12 +109,20 @@ class SearchGroupHistoryTool(BaseTool):
             if not isinstance(to_sequence, int) or isinstance(to_sequence, bool) or to_sequence < 1:
                 return ToolResult(success=False, error="to_sequence must be a positive integer")
             upper = min(upper, to_sequence)
-        direct_to_node = and_(
+        direct_to_principal = and_(
             ExecutionEvent.visibility == "direct",
             exists(select(ExecutionEventRecipient.event_id).where(
                 ExecutionEventRecipient.event_id == ExecutionEvent.id,
-                ExecutionEventRecipient.recipient_type == "group_node",
-                ExecutionEventRecipient.recipient_id == context.group_node_id,
+                or_(
+                    and_(
+                        ExecutionEventRecipient.recipient_type == "agent",
+                        ExecutionEventRecipient.recipient_id == context.agent_id,
+                    ),
+                    and_(
+                        ExecutionEventRecipient.recipient_type == "group_node",
+                        ExecutionEventRecipient.recipient_id == context.group_node_id,
+                    ),
+                ),
             )),
         )
         search_conditions = [or_(
@@ -119,7 +141,7 @@ class SearchGroupHistoryTool(BaseTool):
             ExecutionEvent.group_session_id == context.group_session_id,
             ExecutionEvent.sequence > after,
             ExecutionEvent.sequence <= upper,
-            or_(ExecutionEvent.visibility == "group", direct_to_node),
+            or_(ExecutionEvent.visibility == "group", direct_to_principal),
             *search_conditions,
         )
         agent_ids = args.get("agent_ids")

@@ -32,6 +32,9 @@ class Message(Base, TimestampMixin):
         CheckConstraint("status IN ('committed','superseded','redacted')", name="ck_message_status"),
         Index("ix_message_session_created", "session_id", "created_at", "id"),
         Index("ix_message_run_created", "run_id", "created_at"),
+        UniqueConstraint(
+            "group_run_id", "operation_key", name="uq_group_message_operation_key"
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
@@ -54,6 +57,14 @@ class Message(Base, TimestampMixin):
     clarification_id: Mapped[str | None] = mapped_column(String(36))
     reply_to_message_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("message.id"))
     caused_by_event_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("execution_event.id"))
+    # Agent-native Group routing. Legacy recipient_group_node_id remains
+    # readable, while active paths address the stable Agent identity.
+    visibility: Mapped[str] = mapped_column(String(20), default="user", nullable=False)
+    recipient_agent_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("agent.id")
+    )
+    sequence_no: Mapped[int | None] = mapped_column(BigInteger)
+    operation_key: Mapped[str | None] = mapped_column(String(191))
 
 
 class Run(Base, TimestampMixin, VersionMixin):
@@ -728,6 +739,12 @@ class AgentInvocation(Base, TimestampMixin, VersionMixin):
     authorization_snapshot: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     result_message_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("message.id"))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    group_session_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("group_session.id")
+    )
+    group_run_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("group_run.id")
+    )
 
 
 class RunnerSkillSnapshot(Base):

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from dataclasses import dataclass
 from datetime import timedelta
@@ -23,6 +24,14 @@ from app.core.tool_registry.base import RuntimeContext
 from app.database import AsyncSessionLocal
 from app.models.common import utcnow, uuid7
 from app.models.foundation import OutboxCommand, UserSession
+from app.models.group_v1 import (
+    GroupMembership,
+    GroupRun,
+    GroupRunMember,
+    GroupSession,
+    GroupSummaryRequest,
+    SharedTask,
+)
 from app.models.runtime_v1 import (
     AgentInvocation,
     Approval,
@@ -39,7 +48,7 @@ from app.models.runtime_v1 import (
     Workspace,
 )
 from app.persistence.reliable_writes import ExecutionEventWriter, OutboxWriter
-from app.persistence.runtime_graph import persist_replacement_runner
+from app.persistence.runtime_graph import persist_new_work_runner, persist_replacement_runner
 from app.runtime import (
     ActionDispatcher,
     AgentLoopCoordinator,
@@ -52,6 +61,9 @@ from app.services.provider_conformance import resolve_credential
 from app.services.plan_mode_service import create_plan_approval
 from app.services.runtime_resume_service import queue_work_item_resume
 from app.services.working_plan_service import current_working_plan, working_plan_view
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -78,6 +90,27 @@ class RunnerFenced(RuntimeError):
 class RuntimeWorker:
     def __init__(self, worker_id: str | None = None) -> None:
         self.worker_id = worker_id or f"runtime-v2:{os.getpid()}:{uuid7()}"
+
+    @staticmethod
+    async def _lock_event_session(db, session_id: str) -> UserSession:
+        session = await db.scalar(select(UserSession).where(
+            UserSession.id == session_id,
+        ).execution_options(populate_existing=True).with_for_update())
+        if session is None:
+            raise LookupError(f"session not found: {session_id}")
+        return session
+
+    @staticmethod
+    async def _next_group_message_sequence(db, group_session_id: str) -> int:
+        # Message sequence is Group-wide (including follow-up Runs).  Lock the
+        # Group aggregate before reading MAX so concurrent member settlements
+        # cannot publish duplicate sequence numbers.
+        await db.scalar(select(GroupSession.id).where(
+            GroupSession.id == group_session_id,
+        ).with_for_update())
+        return int(await db.scalar(select(func.max(Message.sequence_no)).where(
+            Message.group_session_id == group_session_id,
+        )) or 0) + 1
 
     @staticmethod
     def _is_transient_settlement_conflict(error: Exception) -> bool:
@@ -203,6 +236,14 @@ class RuntimeWorker:
             if invocation is not None:
                 invocation.status = "running"
                 invocation.version += 1
+            if work.purpose == "group_summary" and work.group_run_id:
+                summary_request = await db.scalar(select(GroupSummaryRequest).where(
+                    GroupSummaryRequest.reporter_work_item_id == work.id,
+                    GroupSummaryRequest.status == "queued",
+                ).with_for_update())
+                if summary_request is not None:
+                    summary_request.status = "running"
+                    summary_request.version += 1
             command.status = "completed"
             command.completed_at = now
             command.dispatch_lease_expires_at = None
@@ -281,6 +322,14 @@ class RuntimeWorker:
                         Message.status == "committed",
                     ).order_by(Message.created_at, Message.id)
                 ))
+                group_run = await db.get(GroupRun, work.group_run_id) if work.group_run_id else None
+                group = await db.get(GroupSession, group_run.group_session_id) if group_run else None
+                group_members: list[GroupRunMember] = []
+                if group_run is not None:
+                    group_members = list(await db.scalars(select(GroupRunMember).where(
+                        GroupRunMember.group_run_id == group_run.id,
+                        GroupRunMember.participation_status == "available",
+                    ).order_by(GroupRunMember.agent_id)))
                 working_plan, plan_update = await current_working_plan(
                     db, run_id=run.id, owner_agent_id=runner.agent_id,
                 )
@@ -304,6 +353,19 @@ class RuntimeWorker:
                         "the WorkingPlan when requirements or test evidence changes; do not treat it "
                         "as a frozen graph or fixed participant list. Choose collaborators on demand."
                     )
+                elif run.mode == "group":
+                    platform_rules = (
+                        "You are one complete, peer Group member. No permanent Supervisor, role DAG, "
+                        "or suggested edge controls your work. Use your own professional judgment. "
+                        "Use send_group_message for direct or shared communication, invoke_agent for "
+                        "bounded work that must return to you, search_group_history whenever prior Group "
+                        "facts are needed, invite_agent when a real capability gap exists, and optional "
+                        "SharedTask records only as a collaboration whiteboard. Directly question, review, "
+                        "or send work back to any member when evidence requires it. A normal final message "
+                        "ends only your current Turn; the persistent Coordinator and Reporter naturally "
+                        "close the GroupRun after all pending work settles. Never claim another member acted "
+                        "unless a real Message or AgentInvocation proves it."
+                    )
                 else:
                     platform_rules = (
                         "Use only the provided native Tool definitions. Tool results are authoritative. "
@@ -313,7 +375,40 @@ class RuntimeWorker:
                         "be planned merely for ceremony. WorkingPlan never creates or schedules work."
                     )
                 initial_message_id = (runner.input_snapshot or {}).get("message_id")
-                if work.parent_work_item_id is None:
+                if run.mode == "group" and group_run is not None:
+                    context_history = [
+                        item for item in history
+                        if item.group_session_id == group_run.group_session_id
+                        and item.status == "committed"
+                        and (
+                            item.visibility in {"group", "user"}
+                            or item.sender_agent_id == runner.agent_id
+                            or item.recipient_agent_id == runner.agent_id
+                            or item.sender_type == "user"
+                        )
+                    ]
+                    current_input = work.goal
+                    current_input += "\n\nFixed GroupRun snapshot (data, not a workflow):\n" + json.dumps({
+                        "group_session_id": group_run.group_session_id,
+                        "group_run_id": group_run.id,
+                        "reporter_agent_id": group_run.reporter_agent_id,
+                        "summary_epoch": group_run.summary_epoch,
+                        "shared_context": group_run.shared_context,
+                        "members": [{
+                            "agent_id": item.agent_id,
+                            "agent_version_id": item.agent_version_id,
+                            "membership_id": item.membership_id,
+                            "capability_boundary": item.capability_boundary,
+                            "is_current": item.agent_id == runner.agent_id,
+                        } for item in group_members],
+                    }, ensure_ascii=False, sort_keys=True)
+                    if work.purpose == "group_summary":
+                        current_input += (
+                            "\n\nThis is the idempotent Reporter summary Turn. Faithfully report "
+                            "delivered Artifacts, verified facts, failures, risks, and material "
+                            "disagreements visible in Group history. Do not invent consensus."
+                        )
+                elif work.parent_work_item_id is None:
                     context_history = [
                         item for item in history
                         if item.run_id != run.id or item.id != initial_message_id
@@ -379,6 +474,12 @@ class RuntimeWorker:
                 authentication_source=str(
                     runner.principal_snapshot.get("authentication_source") or "web_session"
                 ),
+                group_session_id=runner.principal_snapshot.get("group_session_id"),
+                group_run_id=runner.principal_snapshot.get("group_run_id"),
+                group_node_id=(
+                    runner.principal_snapshot.get("group_membership_id")
+                    or runner.principal_snapshot.get("group_node_id")
+                ),
             )
             dispatcher = ActionDispatcher(tool_definitions)
             async with AsyncSessionLocal() as db:
@@ -417,7 +518,16 @@ class RuntimeWorker:
                     self._settle_waiting, fence, wait_reason, context, result,
                 )
         except Exception as error:
-            await self._settle_failed(fence, error)
+            if self._is_transient_settlement_conflict(error):
+                # The provider/tool dispatch transaction rolled back. Leave
+                # the durable Runner fenced as running; its lease recovery
+                # creates a replacement from the last committed checkpoint.
+                logger.warning(
+                    "Runtime transaction hit a transient lock conflict; lease recovery will resume",
+                    extra={"runner_id": fence.runner_id, "run_id": fence.run_id},
+                )
+            else:
+                await self._settle_with_retry(self._settle_failed, fence, error)
         finally:
             stop.set()
             await heartbeat
@@ -435,6 +545,7 @@ class RuntimeWorker:
 
     async def _settle_completed(self, fence: RunnerFence, content: str, context) -> None:
         async with AsyncSessionLocal.begin() as db:
+            session = await self._lock_event_session(db, fence.session_id)
             runner = await self._load_fenced_runner(db, fence)
             work = await db.scalar(select(WorkItem).where(
                 WorkItem.id == fence.work_item_id,
@@ -470,9 +581,6 @@ class RuntimeWorker:
             ).limit(1))
             if pending_tool or pending_clarification or pending_approval:
                 raise RunnerFenced("Run cannot complete while durable actions are pending")
-            session = await db.scalar(select(UserSession).where(
-                UserSession.id == run.session_id,
-            ).with_for_update())
             if (
                 run.mode == "plan" and work.id == run.root_work_item_id
                 and session.permission_mode == "plan_readonly"
@@ -514,6 +622,12 @@ class RuntimeWorker:
                 await self._settle_plan_proposal(
                     db, runner=runner, work=work, run=run, session=session,
                     plan=plan, update=update, content=content, context=context,
+                )
+                return
+            if run.mode == "group" and work.group_run_id:
+                await self._settle_group_completed(
+                    db, runner=runner, work=work, run=run,
+                    content=content, context=context,
                 )
                 return
             message = Message(
@@ -583,6 +697,191 @@ class RuntimeWorker:
                 correlation_id=run.id,
                 caused_by_event_id=event.id,
             )
+
+    async def _group_pending_exists(
+        self, db, *, group_run: GroupRun, exclude_work_item_id: str | None = None,
+    ) -> bool:
+        work_conditions = [
+            WorkItem.group_run_id == group_run.id,
+            WorkItem.status.in_((
+                "queued", "running", "waiting_user", "waiting_approval",
+                "waiting_agent", "waiting_tool", "waiting_resource",
+            )),
+        ]
+        if exclude_work_item_id:
+            work_conditions.append(WorkItem.id != exclude_work_item_id)
+        if await db.scalar(select(WorkItem.id).where(*work_conditions).limit(1)):
+            return True
+        if await db.scalar(select(AgentInvocation.id).where(
+            AgentInvocation.group_run_id == group_run.id,
+            AgentInvocation.status.in_(("created", "queued", "running")),
+        ).limit(1)):
+            return True
+        run_id = group_run.run_id
+        if await db.scalar(select(Clarification.id).where(
+            Clarification.run_id == run_id, Clarification.status == "open",
+        ).limit(1)):
+            return True
+        if await db.scalar(select(Approval.id).where(
+            Approval.run_id == run_id, Approval.status == "pending",
+        ).limit(1)):
+            return True
+        return bool(await db.scalar(select(SharedTask.id).where(
+            SharedTask.group_run_id == group_run.id,
+            SharedTask.status == "in_progress",
+            SharedTask.assignee_agent_id.is_not(None),
+        ).limit(1)))
+
+    async def _enqueue_group_quiescence(
+        self, db, *, group_run: GroupRun, run: Run, cause_event_id: str,
+    ) -> None:
+        await OutboxWriter(db).enqueue(
+            topic="runtime.control", action="evaluate_group_quiescence",
+            aggregate_type="group_run", aggregate_id=group_run.id,
+            partition_key=run.session_id,
+            dedupe_key=f"group-quiescence:{cause_event_id}",
+            payload_ref={
+                "group_run_id": group_run.id,
+                "cause_event_id": cause_event_id,
+            },
+        )
+
+    async def _settle_group_completed(
+        self, db, *, runner: DurableRunner, work: WorkItem, run: Run,
+        content: str, context,
+    ) -> None:
+        group_run = await db.scalar(select(GroupRun).where(
+            GroupRun.id == work.group_run_id,
+        ).with_for_update())
+        if group_run is None:
+            raise RunnerFenced("GroupRun disappeared during settlement")
+        summary_epoch = (runner.input_snapshot or {}).get("summary_epoch")
+        is_summary = work.purpose == "group_summary" and summary_epoch is not None
+        visibility = "user" if is_summary else "group"
+        message = Message(
+            id=uuid7(), session_id=run.session_id, user_id=work.user_id,
+            scope_type="group", group_session_id=group_run.group_session_id,
+            group_run_id=group_run.id, sender_type="agent",
+            sender_agent_id=runner.agent_id,
+            recipient_type="session" if is_summary else "group",
+            visibility=visibility, role="assistant", content=content,
+            content_format="markdown", status="committed", run_id=run.id,
+            work_item_id=work.id,
+            sequence_no=await self._next_group_message_sequence(
+                db, group_run.group_session_id,
+            ),
+        )
+        db.add(message)
+        await db.flush()
+        now = utcnow()
+        runner.status = "succeeded"
+        runner.result_message_id = message.id
+        runner.ended_at = now
+        runner.lease_expires_at = None
+        runner.version += 1
+        work.status = "succeeded"
+        work.result_summary = content[:4000]
+        work.result_data = {"message_id": message.id}
+        work.active_runner_id = None
+        work.version += 1
+        created = await ExecutionEventWriter(db).append(
+            session_id=run.session_id, run_id=run.id,
+            group_session_id=group_run.group_session_id,
+            group_run_id=group_run.id,
+            event_type="group.message_created",
+            event_dedupe_key=f"runner:{runner.id}:group-final-message",
+            actor_type="agent", actor_id=runner.agent_id,
+            entity_type="message", entity_id=message.id,
+            visibility=visibility,
+            summary="Reporter delivered Group summary" if is_summary else "Group member completed a Turn",
+            payload={
+                "message_id": message.id, "agent_id": runner.agent_id,
+                "summary_epoch": summary_epoch,
+            },
+            correlation_id=run.id,
+        )
+        message.caused_by_event_id = created.id
+        previous_checkpoint = await db.scalar(select(
+            func.max(RunnerCheckpoint.sequence_no)
+        ).where(RunnerCheckpoint.runner_id == runner.id)) or 0
+        db.add(RunnerCheckpoint(
+            id=uuid7(), runner_id=runner.id, work_item_id=work.id,
+            sequence_no=int(previous_checkpoint) + 1,
+            checkpoint_type="turn_completed",
+            state_snapshot={
+                "group_run_id": group_run.id,
+                "summary_epoch": summary_epoch,
+                "message_id": message.id,
+            },
+            execution_epoch=runner.execution_epoch,
+            capability_snapshot_id=runner.capability_snapshot_id,
+            context_manifest={"sections": list(context.manifest)},
+            compaction_ref=(context.compaction or {}).get("content_hash"),
+            last_completed_step="group_message_committed", safe_to_resume=False,
+        ))
+        if not is_summary:
+            run.status = "active"
+            run.lifecycle = "running"
+            run.wait_reason = None
+            run.version += 1
+            await self._enqueue_group_quiescence(
+                db, group_run=group_run, run=run, cause_event_id=created.id,
+            )
+            return
+
+        request = await db.scalar(select(GroupSummaryRequest).where(
+            GroupSummaryRequest.group_run_id == group_run.id,
+            GroupSummaryRequest.summary_epoch == int(summary_epoch),
+        ).with_for_update())
+        if request is None or request.reporter_work_item_id != work.id:
+            raise RunnerFenced("Summary epoch no longer owns Reporter settlement")
+        if await self._group_pending_exists(
+            db, group_run=group_run, exclude_work_item_id=work.id,
+        ):
+            request.status = "superseded"
+            request.version += 1
+            await self._enqueue_group_quiescence(
+                db, group_run=group_run, run=run, cause_event_id=created.id,
+            )
+            return
+        request.status = "delivered"
+        request.final_message_id = message.id
+        request.version += 1
+        group_run.delivered_summary_epoch = int(summary_epoch)
+        group_run.version += 1
+        run.status = "completed"
+        run.lifecycle = "completed"
+        run.outcome = "succeeded"
+        run.result_summary = content[:4000]
+        run.completed_at = now
+        run.finished_at = now
+        run.wait_reason = None
+        run.version += 1
+        delivered = await ExecutionEventWriter(db).append(
+            session_id=run.session_id, run_id=run.id,
+            group_session_id=group_run.group_session_id,
+            group_run_id=group_run.id,
+            event_type="group.summary_delivered",
+            event_dedupe_key=f"group-summary:{group_run.id}:epoch:{summary_epoch}:delivered",
+            actor_type="agent", actor_id=runner.agent_id,
+            entity_type="group_summary_request", entity_id=request.id,
+            entity_version=request.version, visibility="user",
+            summary="Group Reporter summary delivered",
+            payload={"summary_epoch": summary_epoch, "message_id": message.id},
+            correlation_id=run.id, caused_by_event_id=created.id,
+        )
+        await ExecutionEventWriter(db).append(
+            session_id=run.session_id, run_id=run.id,
+            group_session_id=group_run.group_session_id,
+            group_run_id=group_run.id,
+            event_type="run.completed",
+            event_dedupe_key=f"run:{run.id}:group-summary:{summary_epoch}:completed",
+            actor_type="service", actor_id="group-run-coordinator",
+            entity_type="run", entity_id=run.id, entity_version=run.version,
+            visibility="user", summary="GroupRun completed after Reporter delivery",
+            payload={"summary_epoch": summary_epoch, "reporter_agent_id": runner.agent_id},
+            correlation_id=run.id, caused_by_event_id=delivered.id,
+        )
 
     async def _settle_plan_proposal(
         self, db, *, runner: DurableRunner, work: WorkItem, run: Run,
@@ -763,9 +1062,12 @@ class RuntimeWorker:
         invocation.error_detail = detail
         invocation.completed_at = now
         invocation.version += 1
+        group_run = await db.get(GroupRun, invocation.group_run_id) if invocation.group_run_id else None
         events = ExecutionEventWriter(db)
         settled = await events.append(
             session_id=run.session_id, run_id=run.id,
+            group_session_id=group_run.group_session_id if group_run else None,
+            group_run_id=group_run.id if group_run else None,
             event_type=(
                 "agent_invocation.succeeded" if succeeded
                 else "agent_invocation.failed"
@@ -787,8 +1089,17 @@ class RuntimeWorker:
         )
         notice = Message(
             id=uuid7(), session_id=run.session_id, user_id=work.user_id,
-            scope_type="chat", sender_type="agent", sender_agent_id=runner.agent_id,
-            recipient_type="session", role="tool_notice",
+            scope_type="group" if group_run else "chat",
+            group_session_id=group_run.group_session_id if group_run else None,
+            group_run_id=group_run.id if group_run else None,
+            sender_type="agent", sender_agent_id=runner.agent_id,
+            recipient_type="agent" if group_run else "session",
+            recipient_agent_id=invocation.caller_agent_id if group_run else None,
+            recipient_group_node_id=(
+                (await db.get(WorkItem, invocation.caller_work_item_id)).group_node_id
+                if group_run else None
+            ),
+            visibility="direct" if group_run else "user", role="tool_notice",
             content=(
                 (
                     f"AgentInvocation {invocation.id} from Agent "
@@ -802,6 +1113,9 @@ class RuntimeWorker:
             ),
             content_format="markdown", status="committed", run_id=run.id,
             work_item_id=work.id, caused_by_event_id=settled.id,
+            sequence_no=(await self._next_group_message_sequence(
+                db, group_run.group_session_id,
+            )) if group_run else None,
         )
         db.add(notice)
         await db.flush()
@@ -817,9 +1131,14 @@ class RuntimeWorker:
                 batch_key=str(invocation.batch_key or invocation.caller_runner_id),
                 caused_by_event_id=settled.id,
             )
+        if group_run is not None:
+            await self._enqueue_group_quiescence(
+                db, group_run=group_run, run=run, cause_event_id=settled.id,
+            )
 
     async def _settle_waiting(self, fence: RunnerFence, reason: str, context, result) -> None:
         async with AsyncSessionLocal.begin() as db:
+            await self._lock_event_session(db, fence.session_id)
             runner = await self._load_fenced_runner(db, fence)
             work = await db.scalar(select(WorkItem).where(
                 WorkItem.id == fence.work_item_id,
@@ -936,6 +1255,7 @@ class RuntimeWorker:
         if isinstance(error, RunnerFenced):
             return
         async with AsyncSessionLocal.begin() as db:
+            await self._lock_event_session(db, fence.session_id)
             runner = await db.scalar(select(DurableRunner).where(
                 DurableRunner.id == fence.runner_id,
                 DurableRunner.status == "running",
@@ -972,6 +1292,74 @@ class RuntimeWorker:
                 work.error_detail = str(error)[:4000]
                 work.active_runner_id = None
                 work.version += 1
+            group_run = (
+                await db.scalar(select(GroupRun).where(
+                    GroupRun.id == work.group_run_id,
+                ).with_for_update())
+                if work is not None and work.group_run_id else None
+            )
+            if group_run is not None and run is not None:
+                is_summary = work.purpose == "group_summary"
+                summary_epoch = (runner.input_snapshot or {}).get("summary_epoch")
+                request = None
+                if is_summary and summary_epoch is not None:
+                    request = await db.scalar(select(GroupSummaryRequest).where(
+                        GroupSummaryRequest.group_run_id == group_run.id,
+                        GroupSummaryRequest.summary_epoch == int(summary_epoch),
+                    ).with_for_update())
+                    if request is not None:
+                        request.status = "failed"
+                        request.version += 1
+                    reporter = await db.scalar(select(GroupRunMember).where(
+                        GroupRunMember.group_run_id == group_run.id,
+                        GroupRunMember.agent_id == runner.agent_id,
+                    ).with_for_update())
+                    if reporter is not None:
+                        reporter.participation_status = "unavailable"
+                    run.status = "waiting_user"
+                    run.lifecycle = "waiting"
+                    run.wait_reason = "waiting_user"
+                else:
+                    # A peer Turn failure is local to that Turn. The GroupRun
+                    # remains live and can still converge through another peer
+                    # and its Reporter; Group is not a fragile all-or-nothing DAG.
+                    run.status = "active"
+                    run.lifecycle = "running"
+                    run.wait_reason = None
+                run.version += 1
+                failed = await ExecutionEventWriter(db).append(
+                    session_id=run.session_id, run_id=run.id,
+                    group_session_id=group_run.group_session_id,
+                    group_run_id=group_run.id,
+                    event_type=(
+                        "group.reporter_unavailable" if is_summary
+                        else "group.member_turn_failed"
+                    ),
+                    event_dedupe_key=f"runner:{runner.id}:group-failed",
+                    actor_type="service", actor_id=self.worker_id,
+                    entity_type=(
+                        "group_summary_request" if request is not None else "work_item"
+                    ),
+                    entity_id=request.id if request is not None else work.id,
+                    entity_version=request.version if request is not None else work.version,
+                    visibility="user" if is_summary else "group",
+                    summary=(
+                        "Group Reporter is unavailable; user replacement is required"
+                        if is_summary else "A Group member Turn failed safely"
+                    ),
+                    payload={
+                        "agent_id": runner.agent_id,
+                        "error_code": code,
+                        "summary_epoch": summary_epoch,
+                    },
+                    correlation_id=run.id,
+                )
+                if not is_summary:
+                    await self._enqueue_group_quiescence(
+                        db, group_run=group_run, run=run,
+                        cause_event_id=failed.id,
+                    )
+                return
             if run is not None:
                 run.status = "failed"
                 run.lifecycle = "completed"
@@ -999,6 +1387,7 @@ class RuntimeWorker:
             ).order_by(DurableRunner.lease_expires_at).with_for_update(skip_locked=True).limit(1))
             if runner is None:
                 return False
+            await self._lock_event_session(db, runner.session_id)
             work = await db.scalar(select(WorkItem).where(
                 WorkItem.id == runner.work_item_id,
             ).with_for_update())
@@ -1105,6 +1494,74 @@ class RuntimeWorker:
                 work.status = "failed"
                 work.error_code = "runner_lost_without_safe_checkpoint"
                 work.version += 1
+                group_run = (
+                    await db.scalar(select(GroupRun).where(
+                        GroupRun.id == work.group_run_id,
+                    ).with_for_update())
+                    if work.group_run_id else None
+                )
+                if group_run is not None and run.status not in {
+                    "completed", "cancelled", "failed",
+                }:
+                    is_summary = work.purpose == "group_summary"
+                    summary_epoch = (runner.input_snapshot or {}).get("summary_epoch")
+                    request = None
+                    if is_summary and summary_epoch is not None:
+                        request = await db.scalar(select(GroupSummaryRequest).where(
+                            GroupSummaryRequest.group_run_id == group_run.id,
+                            GroupSummaryRequest.summary_epoch == int(summary_epoch),
+                        ).with_for_update())
+                        if request is not None:
+                            request.status = "failed"
+                            request.version += 1
+                        reporter = await db.scalar(select(GroupRunMember).where(
+                            GroupRunMember.group_run_id == group_run.id,
+                            GroupRunMember.agent_id == runner.agent_id,
+                        ).with_for_update())
+                        if reporter is not None:
+                            reporter.participation_status = "unavailable"
+                            reporter.version += 1
+                        run.status = "waiting_user"
+                        run.lifecycle = "waiting"
+                        run.wait_reason = "waiting_user"
+                    else:
+                        run.status = "active"
+                        run.lifecycle = "running"
+                        run.wait_reason = None
+                    run.version += 1
+                    recovered = await ExecutionEventWriter(db).append(
+                        session_id=run.session_id, run_id=run.id,
+                        group_session_id=group_run.group_session_id,
+                        group_run_id=group_run.id,
+                        event_type=(
+                            "group.reporter_unavailable" if is_summary
+                            else "group.member_turn_failed"
+                        ),
+                        event_dedupe_key=f"runner:{runner.id}:group-recovery-failed",
+                        actor_type="service", actor_id=self.worker_id,
+                        entity_type=(
+                            "group_summary_request" if request is not None else "work_item"
+                        ),
+                        entity_id=request.id if request is not None else work.id,
+                        entity_version=request.version if request is not None else work.version,
+                        visibility="user" if is_summary else "group",
+                        summary=(
+                            "Group Reporter was lost without a safe checkpoint"
+                            if is_summary else "A Group member Turn was lost safely"
+                        ),
+                        payload={
+                            "agent_id": runner.agent_id,
+                            "error_code": "runner_lost_without_safe_checkpoint",
+                            "summary_epoch": summary_epoch,
+                        },
+                        correlation_id=run.id,
+                    )
+                    if not is_summary:
+                        await self._enqueue_group_quiescence(
+                            db, group_run=group_run, run=run,
+                            cause_event_id=recovered.id,
+                        )
+                    return True
                 run.status = "failed"
                 run.lifecycle = "completed"
                 run.outcome = "failed"
@@ -1148,18 +1605,207 @@ class RuntimeWorker:
             )
             return True
 
+    async def _evaluate_group_quiescence(
+        self, db, *, group_run_id: str, trigger_event_id: str | None,
+    ) -> None:
+        # Settlement takes Run before GroupRun. Use the same order here to
+        # avoid a cross-worker Run <-> GroupRun deadlock.
+        visible_group_run = await db.get(GroupRun, group_run_id)
+        if visible_group_run is None:
+            return
+        visible_run = await db.get(Run, visible_group_run.run_id)
+        if visible_run is None:
+            return
+        await self._lock_event_session(db, visible_run.session_id)
+        run = await db.scalar(select(Run).where(
+            Run.id == visible_group_run.run_id,
+        ).execution_options(populate_existing=True).with_for_update())
+        group_run = await db.scalar(select(GroupRun).where(
+            GroupRun.id == group_run_id,
+        ).execution_options(populate_existing=True).with_for_update())
+        if group_run is None:
+            return
+        if run is None or run.status in {"completed", "cancelled", "failed"}:
+            return
+        if run.cancellation_requested_at is not None:
+            return
+        if await self._group_pending_exists(db, group_run=group_run):
+            return
+        existing = await db.scalar(select(GroupSummaryRequest).where(
+            GroupSummaryRequest.group_run_id == group_run.id,
+            GroupSummaryRequest.status.in_(("queued", "running")),
+        ).limit(1))
+        if existing is not None:
+            return
+        reporter = await db.scalar(select(GroupRunMember).where(
+            GroupRunMember.group_run_id == group_run.id,
+            GroupRunMember.agent_id == group_run.reporter_agent_id,
+            GroupRunMember.participation_status == "available",
+        ))
+        if reporter is None or not reporter.agent_version_id:
+            run.status = "waiting_user"
+            run.lifecycle = "waiting"
+            run.wait_reason = "waiting_user"
+            run.version += 1
+            await ExecutionEventWriter(db).append(
+                session_id=run.session_id, run_id=run.id,
+                group_session_id=group_run.group_session_id,
+                group_run_id=group_run.id,
+                event_type="group.reporter_unavailable",
+                event_dedupe_key=f"group-run:{group_run.id}:reporter-unavailable:v{group_run.version}",
+                actor_type="service", actor_id="group-run-coordinator",
+                entity_type="group_run", entity_id=group_run.id,
+                entity_version=group_run.version, visibility="user",
+                summary="Group Reporter requires user replacement",
+                payload={"reporter_agent_id": group_run.reporter_agent_id},
+                correlation_id=run.id,
+            )
+            return
+        membership = await db.get(GroupMembership, reporter.membership_id)
+        group = await db.get(GroupSession, group_run.group_session_id)
+        session = await db.get(UserSession, run.session_id)
+        if membership is None or group is None or session is None:
+            raise RuntimeError("Reporter membership snapshot is incomplete")
+        group_run.summary_epoch += 1
+        group_run.version += 1
+        epoch = group_run.summary_epoch
+        work = WorkItem(
+            id=uuid7(), run_id=run.id, session_id=run.session_id, user_id=run.user_id,
+            mode="group", owner_agent_id=reporter.agent_id,
+            agent_version_id=reporter.agent_version_id,
+            group_run_id=group_run.id, group_node_id=membership.id,
+            goal="Deliver the natural GroupRun summary from visible collaboration facts",
+            purpose="group_summary", status="queued", execution_epoch=1, attempt_no=1,
+        )
+        runner = DurableRunner(
+            id=uuid7(), work_item_id=work.id, run_id=run.id,
+            session_id=run.session_id, agent_id=reporter.agent_id,
+            agent_version_id=reporter.agent_version_id,
+            execution_epoch=1, status="queued",
+            principal_snapshot={
+                "user_id": run.user_id, "account_id": session.account_id,
+                "session_id": run.session_id,
+                "entry_agent_id": group.initiator_agent_id or group.entry_agent_id,
+                "current_agent_id": reporter.agent_id,
+                "permission_mode": "direct",
+                "permission_revision": session.permission_revision,
+                "mode": "group", "group_session_id": group.id,
+                "group_run_id": group_run.id,
+                "group_membership_id": membership.id,
+                "group_node_id": membership.id,
+                "delegation_chain": [],
+            },
+            assembly_snapshot={"agent_version_id": reporter.agent_version_id},
+            prompt_manifest={},
+            input_snapshot={
+                "group_session_id": group.id,
+                "group_run_id": group_run.id,
+                "group_membership_id": membership.id,
+                "group_node_id": membership.id,
+                "group_summary": True,
+                "summary_epoch": epoch,
+            },
+        )
+        await persist_new_work_runner(db, work, runner)
+        request = GroupSummaryRequest(
+            id=uuid7(), group_run_id=group_run.id, summary_epoch=epoch,
+            reporter_work_item_id=work.id, trigger_event_id=trigger_event_id,
+            status="queued",
+        )
+        db.add(request)
+        run.status = "active"
+        run.lifecycle = "running"
+        run.wait_reason = None
+        run.version += 1
+        await db.flush()
+        requested = await ExecutionEventWriter(db).append(
+            session_id=run.session_id, run_id=run.id,
+            group_session_id=group.id, group_run_id=group_run.id,
+            event_type="group.summary_requested",
+            event_dedupe_key=f"group-summary:{group_run.id}:epoch:{epoch}:requested",
+            actor_type="service", actor_id="group-run-coordinator",
+            entity_type="group_summary_request", entity_id=request.id,
+            entity_version=request.version, visibility="group",
+            summary="Group Reporter summary requested",
+            payload={"summary_epoch": epoch, "reporter_agent_id": reporter.agent_id},
+            correlation_id=run.id, caused_by_event_id=trigger_event_id,
+        )
+        queued = await ExecutionEventWriter(db).append(
+            session_id=run.session_id, run_id=run.id,
+            group_session_id=group.id, group_run_id=group_run.id,
+            event_type="runner.queued",
+            event_dedupe_key=f"group-summary:{group_run.id}:epoch:{epoch}:runner",
+            actor_type="service", actor_id="group-run-coordinator",
+            entity_type="runner", entity_id=runner.id,
+            entity_version=runner.version, visibility="private",
+            private_owner=("runner", runner.id),
+            summary="Group Reporter Runner queued",
+            payload={"summary_epoch": epoch, "reporter_agent_id": reporter.agent_id},
+            correlation_id=run.id, caused_by_event_id=requested.id,
+        )
+        await OutboxWriter(db).enqueue(
+            topic="runtime.runner", action="execute", aggregate_type="runner",
+            aggregate_id=runner.id, partition_key=run.session_id,
+            dedupe_key=f"event:{queued.id}:execute",
+            payload_ref={
+                "runner_id": runner.id, "group_run_id": group_run.id,
+                "summary_epoch": epoch,
+            },
+        )
+
+    async def process_one_group_control(self) -> bool:
+        try:
+            async with AsyncSessionLocal.begin() as db:
+                command = await db.scalar(select(OutboxCommand).where(
+                    OutboxCommand.topic == "runtime.control",
+                    OutboxCommand.action == "evaluate_group_quiescence",
+                    OutboxCommand.status.in_(("pending", "retry_wait")),
+                    OutboxCommand.available_at <= utcnow(),
+                ).order_by(OutboxCommand.priority.desc(), OutboxCommand.created_at)
+                 .with_for_update(skip_locked=True).limit(1))
+                if command is None:
+                    return False
+                command.status = "claimed"
+                command.dispatch_lease_owner = self.worker_id
+                command.dispatch_lease_token = uuid7()
+                command.attempt_count += 1
+                await self._evaluate_group_quiescence(
+                    db,
+                    group_run_id=str(command.payload_ref.get("group_run_id") or command.aggregate_id),
+                    trigger_event_id=command.payload_ref.get("cause_event_id"),
+                )
+                command.status = "completed"
+                command.completed_at = utcnow()
+                command.dispatch_lease_owner = None
+                command.dispatch_lease_token = None
+                return True
+        except Exception:
+            # The transaction rolled back, leaving the command claimable. A
+            # later poll or another worker retries the same idempotent command.
+            logger.exception("Group quiescence command failed and will retry")
+            return False
+
     async def run_forever(self, poll_seconds: float | None = None) -> None:
         interval = settings.runtime_worker_poll_seconds if poll_seconds is None else poll_seconds
         while True:
-            if await self.recover_one_expired_runner():
-                continue
-            claim = await self.claim_one()
-            if claim is None:
+            try:
+                if await self.recover_one_expired_runner():
+                    continue
+                if await self.process_one_group_control():
+                    continue
+                claim = await self.claim_one()
+                if claim is None:
+                    await asyncio.sleep(interval)
+                    continue
+                fence = await self.acquire_runner(claim)
+                if fence is not None:
+                    await self.execute(fence)
+            except Exception:
+                # Claims and Runner leases are durable. An unexpected poll
+                # failure must not terminate the worker process; expired state
+                # is reclaimed by the next loop or a peer replica.
+                logger.exception("Runtime worker iteration failed; durable recovery will retry")
                 await asyncio.sleep(interval)
-                continue
-            fence = await self.acquire_runner(claim)
-            if fence is not None:
-                await self.execute(fence)
 
 
 async def main() -> None:

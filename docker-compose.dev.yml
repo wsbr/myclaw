@@ -17,7 +17,7 @@ services:
       - WATCHFILES_FORCE_POLLING=true
 
   runtime-worker:
-    command: python -m app.workers.runtime_worker_v1
+    command: python -m app.workers.runtime_worker
     volumes:
       - ./backend:/app
 

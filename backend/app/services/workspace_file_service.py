@@ -68,11 +68,45 @@ async def private_agent_root(
     return private
 
 
+async def group_shared_root(
+    db, *, workspace_id: str | None, session_id: str, group_session_id: str,
+) -> Path:
+    root = await workspace_root(
+        db, workspace_id=workspace_id, session_id=session_id,
+    )
+    if (
+        not isinstance(group_session_id, str) or not group_session_id
+        or "/" in group_session_id or "\\" in group_session_id
+    ):
+        raise WorkspaceFileError("a valid Group identity is required for shared Workspace access")
+    shared = _inside(root, root / "groups" / group_session_id)
+    shared.mkdir(parents=True, exist_ok=True)
+    return shared
+
+
+async def execution_workspace_root(db, *, context) -> Path:
+    if context.group_session_id:
+        return await group_shared_root(
+            db, workspace_id=context.workspace_id, session_id=context.session_id,
+            group_session_id=context.group_session_id,
+        )
+    return await private_agent_root(
+        db, workspace_id=context.workspace_id, session_id=context.session_id,
+        agent_id=context.agent_id,
+    )
+
+
 async def resolve_workspace_path(
     db, *, workspace_id: str | None, session_id: str, relative_path: str,
-    agent_id: str | None = None, allow_dot: bool = False,
+    agent_id: str | None = None, group_session_id: str | None = None,
+    allow_dot: bool = False,
 ) -> tuple[Path, Path, str]:
     root = (
+        await group_shared_root(
+            db, workspace_id=workspace_id, session_id=session_id,
+            group_session_id=group_session_id,
+        )
+        if group_session_id else
         await private_agent_root(
             db, workspace_id=workspace_id, session_id=session_id, agent_id=agent_id,
         )
@@ -108,6 +142,7 @@ async def resolve_read_path(db, *, context, value: str) -> tuple[Path, str]:
     _, candidate, relative = await resolve_workspace_path(
         db, workspace_id=context.workspace_id, session_id=context.session_id,
         relative_path=value, agent_id=context.agent_id,
+        group_session_id=context.group_session_id,
     )
     return candidate, relative
 

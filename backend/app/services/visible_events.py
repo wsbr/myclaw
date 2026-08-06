@@ -8,7 +8,7 @@ from sqlalchemy import and_, exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.foundation import ExecutionEvent, ExecutionEventRecipient, UserSession
-from app.models.group_v1 import GroupAgentNode, GroupSession
+from app.models.group_v1 import GroupAgentNode, GroupMembership, GroupSession
 from app.models.runtime_v1 import Message
 
 
@@ -99,17 +99,34 @@ class VisibleEventProjection:
                     GroupSession.user_id == user_id,
                 )
             )
+            membership = None
             if node is None:
+                membership = await self.db.scalar(select(GroupMembership).join(
+                    GroupSession, GroupSession.id == GroupMembership.group_session_id,
+                ).where(
+                    GroupMembership.id == group_node_id,
+                    GroupMembership.status == "joined",
+                    GroupSession.parent_session_id == session_id,
+                    GroupSession.user_id == user_id,
+                ))
+            if membership is None and node is None:
                 raise LookupError("group node not found")
+            group_session_id = (
+                membership.group_session_id if membership is not None
+                else node.group_session_id
+            )
+            agent_id = membership.agent_id if membership is not None else node.agent_id
             return list(await self.db.scalars(
                 select(Message).where(
                     Message.session_id == session_id,
                     Message.scope_type == "group",
-                    Message.group_session_id == node.group_session_id,
+                    Message.group_session_id == group_session_id,
                     Message.status == "committed",
                     or_(
-                        Message.sender_agent_id == node.agent_id,
-                        Message.recipient_group_node_id == node.id,
+                        Message.visibility == "group",
+                        Message.sender_agent_id == agent_id,
+                        Message.recipient_agent_id == agent_id,
+                        Message.recipient_group_node_id == group_node_id,
                     ),
                 ).order_by(Message.created_at.desc(), Message.id.desc()).limit(hard_limit)
             ))[::-1]

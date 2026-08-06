@@ -43,6 +43,7 @@ from app.models.group_v1 import (
     GroupSession, GroupFormationProposal, GroupFormationRevision, GroupFormationParticipant,
     GroupFormationWorkItem, GroupFormationSuggestedEdge, GroupAgentNode,
     GroupInitialSuggestedEdge, GroupRun, GroupRunAgentVersion, GroupRunReference, GroupCollaborationEdge,
+    GroupMembership, GroupRunMember, GroupSummaryRequest, SharedTask,
 )
 from app.models.artifact_v1 import Artifact, MessageArtifact, GroupArtifact
 from app.models.memory_v1 import (
@@ -74,6 +75,7 @@ __all__ = [
     "GroupSession", "GroupFormationProposal", "GroupFormationRevision", "GroupFormationParticipant",
     "GroupFormationWorkItem", "GroupFormationSuggestedEdge", "GroupAgentNode",
     "GroupInitialSuggestedEdge", "GroupRun", "GroupRunAgentVersion", "GroupRunReference", "GroupCollaborationEdge",
+    "GroupMembership", "GroupRunMember", "GroupSummaryRequest", "SharedTask",
     "Artifact", "MessageArtifact", "GroupArtifact",
     "MemoryHead", "MemoryRecord", "MemorySourceMessage", "RunnerMemorySnapshot",
     "MemoryWriteCandidate", "MemoryCandidateSourceMessage",
