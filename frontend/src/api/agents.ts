@@ -36,6 +36,27 @@ export interface AgentDraft {
 
 export interface AgentDetail { agent: AgentSummary; draft: AgentDraft }
 export interface AgentOption { id: string; key?: string; name: string; description?: string }
+export interface AgentPublishedVersion {
+  id: string
+  version_no: number
+  publication_status: 'published' | 'deprecated'
+  content_hash: string
+  published_at: string | null
+  model_version_id: string
+  context_policy_version_id: string
+  history_policy_version_id: string
+  memory_write_policy_version_id: string
+  memory_recall_policy_version_id: string
+  sandbox_profile_version_id: string
+  tools: Array<{ tool_id: string; registration_hash: string }>
+  skills: Array<{ skill_id: string; skill_version_id: string; checksum: string }>
+  agent_card_content_hash: string | null
+}
+export interface CapabilityCheck {
+  publishable: boolean
+  issues: string[]
+  resolved_dependencies: Record<string, unknown> | null
+}
 export interface AgentApiKey {
   id: string
   agent_id: string
@@ -71,7 +92,10 @@ export const agentsApi = {
     client.post<AgentSummary>(`/agents/${id}/${target}`, { reason }, {
       headers: { 'Idempotency-Key': crypto.randomUUID() },
     }).then(r => r.data),
-  listVersions: (id: string) => client.get(`/agents/${id}/versions`).then(r => r.data.items),
+  checkCapabilities: (id: string) =>
+    client.get<CapabilityCheck>(`/agents/${id}/draft/capability-check`).then(r => r.data),
+  listVersions: (id: string) =>
+    client.get<{ items: AgentPublishedVersion[] }>(`/agents/${id}/versions`).then(r => r.data.items),
   listApiKeys: (id: string) => client.get<{ items: AgentApiKey[] }>(`/agents/${id}/api-keys`).then(r => r.data.items),
   createApiKey: (id: string, values: { name: string; caller_label: string; expires_at?: string | null }) =>
     client.post<AgentApiKey>(`/agents/${id}/api-keys`, values, {

@@ -3,7 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Alert, Button, Card, Form, Input, Modal, Radio, Select, Space, Spin, Switch, Table, Tabs, Tag, Typography, message } from 'antd'
 import { ArrowLeftOutlined, CloudUploadOutlined, ExperimentOutlined, KeyOutlined, PauseCircleOutlined, PlayCircleOutlined, SaveOutlined } from '@ant-design/icons'
-import { agentsApi, AgentApiKey, AgentDraft, AgentOption } from '@/api/agents'
+import { agentsApi, AgentApiKey, AgentDraft, AgentOption, AgentPublishedVersion } from '@/api/agents'
 import PromptEditor from '@/components/PromptEditor'
 
 const policyTypes = ['context', 'history', 'memory_write', 'memory_recall'] as const
@@ -47,7 +47,10 @@ export default function AgentConfigPage() {
       message.success('草稿已保存')
       queryClient.invalidateQueries({ queryKey: ['agents'] })
       if (isNew) navigate(`/agents/${result.agent.id}/config`, { replace: true })
-      else queryClient.invalidateQueries({ queryKey: ['agent', id] })
+      else {
+        queryClient.invalidateQueries({ queryKey: ['agent', id] })
+        queryClient.invalidateQueries({ queryKey: ['agent-capability-check', id] })
+      }
     },
     onError: (error: any) => message.error(error?.response?.status === 409 ? '草稿已在别处更新，请重新载入' : '保存失败'),
   })
@@ -57,6 +60,8 @@ export default function AgentConfigPage() {
       message.success('已发布不可变版本')
       queryClient.invalidateQueries({ queryKey: ['agent', id] })
       queryClient.invalidateQueries({ queryKey: ['agents'] })
+      queryClient.invalidateQueries({ queryKey: ['agent-capability-check', id] })
+      queryClient.invalidateQueries({ queryKey: ['agent-versions', id] })
     },
     onError: (error: any) => {
       const issues = error?.response?.data?.error?.details?.issues
@@ -86,6 +91,12 @@ export default function AgentConfigPage() {
   })
   const apiKeys = useQuery({
     queryKey: ['agent-api-keys', id], queryFn: () => agentsApi.listApiKeys(id!), enabled: !isNew,
+  })
+  const capabilityCheck = useQuery({
+    queryKey: ['agent-capability-check', id], queryFn: () => agentsApi.checkCapabilities(id!), enabled: !isNew,
+  })
+  const versions = useQuery({
+    queryKey: ['agent-versions', id], queryFn: () => agentsApi.listVersions(id!), enabled: !isNew,
   })
   const showSecret = (key: AgentApiKey) => Modal.success({
     title: 'API Key 仅显示一次',
@@ -152,6 +163,12 @@ export default function AgentConfigPage() {
       </div>
 
       <Alert className="mb-4" type="info" showIcon message="Chat 新 Run 使用最新发布版本；已确认的 Plan / Group 不会随草稿变化。" />
+      {!isNew && capabilityCheck.data && <Alert className="mb-4" showIcon
+        type={capabilityCheck.data.publishable ? 'success' : 'error'}
+        message={capabilityCheck.data.publishable ? '当前已保存草稿通过发布前能力检查' : '当前已保存草稿不可发布'}
+        description={capabilityCheck.data.publishable
+          ? '发布时会冻结精确 Model、Tool 注册哈希、SkillVersion/checksum、Policy、Sandbox 与 AgentCard。'
+          : capabilityCheck.data.issues.join('；')} />}
       <Form form={form} layout="vertical" initialValues={{ visibility: 'private', group_enabled: false, tool_ids: [], skill_ids: [], bound_agent_ids: [] }}>
         <Tabs tabPosition="left" items={[
           { key: 'basic', label: '基础信息', children: <Card>
@@ -180,6 +197,24 @@ export default function AgentConfigPage() {
             <Form.Item name="group_enabled" label="允许加入 Group" valuePropName="checked"><Switch /></Form.Item>
             <Typography.Text type="secondary">绑定只授予发现与调用范围，不提升原始用户权限。</Typography.Text>
           </Card> },
+          ...(!isNew ? [{ key: 'versions', label: '版本历史', children: <Card>
+            <Table rowKey="id" loading={versions.isLoading} dataSource={versions.data ?? []} pagination={false}
+              expandable={{ expandedRowRender: (version: AgentPublishedVersion) => <div className="space-y-2">
+                <Typography.Paragraph copyable={{ text: version.content_hash }}><Typography.Text strong>完整快照哈希：</Typography.Text> {version.content_hash}</Typography.Paragraph>
+                <Typography.Paragraph copyable={{ text: version.model_version_id }}><Typography.Text strong>ModelVersion：</Typography.Text> {version.model_version_id}</Typography.Paragraph>
+                <Typography.Paragraph><Typography.Text strong>PolicyVersions：</Typography.Text> {[version.context_policy_version_id, version.history_policy_version_id, version.memory_write_policy_version_id, version.memory_recall_policy_version_id].join(' · ')}</Typography.Paragraph>
+                <Typography.Paragraph><Typography.Text strong>SandboxProfileVersion：</Typography.Text> {version.sandbox_profile_version_id}</Typography.Paragraph>
+                <Typography.Paragraph><Typography.Text strong>Tools：</Typography.Text> {version.tools.map(tool => `${tool.tool_id}@${tool.registration_hash.slice(0, 12)}`).join(' · ') || '无'}</Typography.Paragraph>
+                <Typography.Paragraph><Typography.Text strong>Skills：</Typography.Text> {version.skills.map(skill => `${skill.skill_version_id}@${skill.checksum.slice(0, 12)}`).join(' · ') || '无'}</Typography.Paragraph>
+                <Typography.Paragraph copyable={{ text: version.agent_card_content_hash || '' }}><Typography.Text strong>AgentCard：</Typography.Text> {version.agent_card_content_hash || '—'}</Typography.Paragraph>
+              </div> }}
+              columns={[
+                { title: '版本', dataIndex: 'version_no', render: (value: number) => `v${value}` },
+                { title: '状态', dataIndex: 'publication_status', render: (value: string) => <Tag color={value === 'published' ? 'success' : 'default'}>{value}</Tag> },
+                { title: '快照哈希', dataIndex: 'content_hash', render: (value: string) => <Typography.Text code copyable>{value.slice(0, 16)}</Typography.Text> },
+                { title: '发布时间', dataIndex: 'published_at', render: (value: string | null) => value ? new Date(value).toLocaleString() : '—' },
+              ]} />
+          </Card> }] : []),
           ...(!isNew ? [{ key: 'api', label: 'API 接入', children: <Card title="Agent API Keys"
             extra={<Button type="primary" icon={<KeyOutlined />} onClick={() => setKeyOpen(true)}>创建 Key</Button>}>
             <Alert className="mb-4" type="info" showIcon message="外部系统使用 AgentApiKey + userId 调用；Key 不代表新的用户身份。" />
