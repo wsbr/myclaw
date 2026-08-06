@@ -218,7 +218,7 @@ UAT 模型 `uat-primary-qwen` 保持原 Provider、Endpoint、Credential Ref 和
 
 ## 9. 导航
 
-- [三模式 Agent Harness 稳定性优化方案](../technical/agent-harness-stability-plan.md)
+- 三模式 Agent Harness 稳定性优化方案（已从活动设计文档删除；需要时通过本报告对应的 Git 历史追溯）
 - [修复候选证据索引](evidence/harness-remediation-2026-08-03/index.md)
 - [历史 UAT 修复复验报告](phase-one-uat-revalidation-2026-08-03.md)
 - [本地持久 UAT 运维说明](../../deploy/uat/README.md)

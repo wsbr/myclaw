@@ -54,9 +54,7 @@ Group = Loop + Agent Network membership / messaging policy
 | 生产准入 | [生产就绪要求](../operations/production-readiness.md) | SLO、RPO/RTO、安全、演练与证据 Gate |
 | 生产运维 | [企业生产运行手册](../operations/production-runbook.md) | 发布、回滚、failover、DR、安全事件与演练步骤 |
 | 设计依据 | [Harness 调研](agent-native-harness-research.md) | 外部研究、UAT事实和取舍 |
-| 历史 V1 实现 | 下列仍带历史标识的 architecture/runtime/frontend 文档 | 当前代码证据与可靠工程迁移参考，非目标设计 |
-| 历史补丁 | [旧 Harness 稳定性方案](agent-harness-stability-plan.md) | 2026-08-03 历史分析，非目标设计 |
-| 交付证据 | `../acceptance/*`、[旧交付状态](phase-one-delivery-status.md) | 历史实现与UAT证据 |
+| 验收证据 | `../acceptance/*` | 历史实现与 UAT 事实，不定义当前架构 |
 
 ## 实施契约覆盖矩阵
 
@@ -75,34 +73,11 @@ Group = Loop + Agent Network membership / messaging policy
 
 矩阵中的每一行都必须有实现 Owner 和测试证据；若新增产品能力无法落入某行，先补产品/数据/状态/API/生产五个维度再编码。`public federation`、通用 MCP、动态组织审批和自动 Agent 进化不属于 `enterprise_production_v1`，不得因本矩阵未展开而被误认为当前缺口。
 
-## 历史 V1 文档如何使用
+## 历史资料边界
 
-V1 文档只可复用已经经过测试、并被当前综合方案明确保留的工程设计：
+已被 Agent-native v2 取代的 V1 架构、流程、前端、补丁方案和迁移草案不保留在活动文档树中。仍然有效的 MySQL、Outbox、lease/fencing、Tool 副作用、Workspace/Artifact、SSE、OTel、CAS 等机制已经写入当前权威契约；实现不得从 Git 历史恢复旧 Completion Contract、Effect Ledger、冻结 Plan DAG、Group Formation、固定 Group 图或 Tool 类型消费语义。
 
-- MySQL 领域事实；
-- Database Outbox；
-- Runner lease、heartbeat、execution epoch 和 fencing；
-- ToolInvocation / ToolAttempt 副作用边界；
-- Session Workspace、Artifact 和 checksum；
-- SSE 可靠事件续读；
-- Redis provisional token bridge；
-- OTel Runner Trace 和 Span Link；
-- UTC 时间、UUIDv7、CAS 和唯一约束。
-
-V1 文档中与以下主题有关的内容均被新方案覆盖：Completion Contract、Effect Ledger、冻结 Plan DAG、Group Formation、固定 Group 图、structured conversation completion 和 Tool 类型消费。
-
-| 文档 | 可复用重点 | 按新方案改造重点 |
-| --- | --- | --- |
-| [物理架构](architecture.md) | Compose、进程、MySQL/Redis/FS、Outbox | 三模式共用 AgentLoopCoordinator，无 Evaluator Worker |
-| [一致性](consistency-concurrency.md) | 事务、幂等、lease、fencing、Workspace lock | Tool持续可见、Run级预算、Approval恢复 |
-| [事件与可见性](events-audit-visibility.md) | Event/Audit分层和脱敏 | mode/plan/membership/message/verification事件 |
-| [Runtime流程](runtime-flows.md) | Worker切点、Checkpoint、Tool恢复 | 普通message+native tool loop |
-| [Context/History/Memory](context-history-memory.md) | Policy接口、历史和Memory边界 | WorkingPlan、Group按需共享、Compaction |
-| [Tool与Skill](tools-skills.md) | Registry、Invocation、Skill包 | 无finalize、具体Invocation幂等 |
-| [前端](frontend.md) | 后台运行、断线恢复、Required Action | Plan只读批准、工作网选人、真实Interaction Graph |
-| [审计迁移计划](audit-migration-plan.md) | 测试和旧代码定位方法 | 实施顺序以新综合方案为准 |
-
-仍属于 V1 的文档开头必须保持“历史实现参考，非目标设计”标识；它们不能覆盖当前产品模块、数据库、状态机、API 或综合方案。
+`../acceptance/` 中的报告与原始证据继续保留，用于说明历史实现和测试事实，但不能作为当前架构或完成状态的依据。需要考古旧方案时使用 Git 历史，不在活动导航中建立第二套设计来源。
 
 ## 部署 Profile
 
@@ -131,7 +106,7 @@ V1 文档中与以下主题有关的内容均被新方案覆盖：Completion Con
 
 - 目标变化先更新产品模块，再更新综合技术方案；
 - 新抽象必须证明无法由现有 Agent Loop 原语解决；
-- 历史文档冲突时，以产品模块和当前综合方案为准并在相应 Stage 删除冲突代码；
+- 历史验收材料与当前契约冲突时，以产品模块和当前综合方案为准；
 - UAT 报告记录事实，不反向定义产品；
 - 完成度只来自 clean SHA、部署、测试和可访问证据；
 - 每个实施 PR 必须检查是否重新引入 Workflow、模板或通用完成合同；

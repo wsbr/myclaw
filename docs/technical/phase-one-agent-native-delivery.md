@@ -23,7 +23,7 @@ Group = Agent Loop + network membership / messaging policy
 - [Runtime 执行](../modules/runtime-execution.md)；
 - [Agent-native Harness 调研](agent-native-harness-research.md)。
 
-旧[三模式 Agent Harness 稳定性优化方案](agent-harness-stability-plan.md)保留为补丁阶段历史分析，其中的 `finalize_response`、模型声明 `required_tool_keys`、Tool 类型一次性消费和冻结 Plan DAG 不得进入新实现。
+V1 补丁阶段曾使用 `finalize_response`、模型声明 `required_tool_keys`、Tool 类型一次性消费和冻结 Plan DAG；这些设计已失效，不得进入新实现。旧方案只通过 Git 历史和对应验收报告追溯，不再保留在活动设计文档树中。
 
 ## 2. 架构决策摘要
 

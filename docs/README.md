@@ -12,9 +12,7 @@
 6. [数据库契约](technical/database-schema.md)、[状态机](technical/state-machines.md)、[API 与 SSE](technical/api-sse.md)和 [OpenAPI 3.1](technical/openapi-v1.yaml)：字段、约束、状态与 wire contract 的详细技术权威。
 7. [企业生产参考架构](technical/production-reference-architecture.md)与[生产就绪要求](operations/production-readiness.md)：生产拓扑、安全、SLO、RPO/RTO、发布和证据权威。
 8. [Agent-native Harness 调研与架构判断](technical/agent-native-harness-research.md)：外部产品机制、UAT 证据与设计取舍依据，不覆盖产品权威。
-9. `technical/` 下仍标记“历史 V1 实现参考”的文档：只用于迁移时复用可靠工程机制，不属于当前目标设计。
-
-[待确认旧设计](pending/legacy-designs-to-review.md) 不是当前设计，不能作为实现依据。它只保存尚未重新讨论的历史设想。
+9. 历史 V1 验收报告和证据只记录当时事实，不属于当前目标设计；已失效的 V1 设计文档不保留在活动文档树中，需要追溯时使用 Git 历史。
 
 若摘要与模块文档冲突，以模块文档为准；若模块规则与设计原则冲突，应先修订设计并显式记录决策，不能在实现中自行绕过原则。
 
@@ -56,21 +54,6 @@
 - [企业生产就绪要求](operations/production-readiness.md)
 - [企业生产运行手册](operations/production-runbook.md)
 
-## 历史实现与迁移参考
-
-以下文档保留 V1 的物理结构、接口和工程证据，其中的冻结 Plan DAG、Group Formation、Completion Contract 等语义已经失效。新实现只能复用其被当前综合技术方案明确确认的机制：
-
-- [V1 物理架构](technical/architecture.md)
-- [V1 事务、一致性与并发](technical/consistency-concurrency.md)
-- [V1 事件、审计与可见性](technical/events-audit-visibility.md)
-- [V1 Runtime 流程](technical/runtime-flows.md)
-- [V1 Context、History 与 Memory](technical/context-history-memory.md)
-- [V1 Tool 与 Skill 接口](technical/tools-skills.md)
-- [V1 前端设计](technical/frontend.md)
-- [旧三模式 Agent Harness 方案](technical/agent-harness-stability-plan.md)
-- [历史代码审计与迁移计划](technical/audit-migration-plan.md)
-- [历史交付状态](technical/phase-one-delivery-status.md)
-
 ## 验收报告
 
 - [首次测试基线：一期真实业务 UAT 报告（2026-08-03）](acceptance/phase-one-uat-2026-08-03.md)
@@ -83,11 +66,11 @@
 
 - 一个术语只在其所属模块完整定义；其他文档只做摘要并链接。
 - 权威文档只描述目标设计，不记录代码完成度。
-- 尚未达成决策的主题进入 `pending/`，不得用模糊措辞写成正式承诺。
+- 尚未达成决策的主题只记录在所属权威模块的“后续能力”边界中，不建立可被误读为实施依据的平行设计文档。
 - 新设计先验证是否满足 [设计哲学](DESIGN_PHILOSOPHY.md)，再进入所属模块。
 - 文档和代码的完成度评估应另行形成审计报告，不反向污染目标设计。
 - 现有代码差距和处置只写入技术审计文档，不写入产品权威模块。
-- 历史文档不得使用“当前基线”“当前契约”等措辞；引用历史机制时必须链接回当前综合技术方案中的对应决策。
+- 历史验收材料不得使用“当前基线”“当前契约”等措辞，也不得反向定义当前实现。
 
 ## 可追溯设计基线
 

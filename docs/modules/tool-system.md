@@ -160,7 +160,7 @@ Runtime 在底层执行前必须重新读取 Tool 当前启停和 Confirmation P
 | Local Workspace 的 `write_file`、`execute` | `session_grant` |
 | 外部不可逆副作用 Tool | `per_call` |
 
-管理员可以在 Tool 列表页根据部署环境调整。后期动态风险判断和垂类审批边界保留在 [待确认旧设计](../pending/legacy-designs-to-review.md)。
+管理员可以在 Tool 列表页根据部署环境调整。后期若增加动态风险判断或垂类审批，必须先在本模块定义确定的裁决输入、优先级、失败语义和审计合同，再同步数据库、状态机与 API；不能通过非权威待办文档隐式扩展当前权限模型。
 
 `invoke_agent` 的允许与否由 Agent Network 可发现范围、Group Membership、当前 Collaboration Policy 和预算决定，不套用 Platform Tool 的 Confirmation Policy；若未来某类跨组织邀请需要人工审批，应创建明确的 Approval，而不是把它伪装成 Tool 装配配置。
 
