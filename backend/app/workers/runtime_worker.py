@@ -14,7 +14,7 @@ import os
 from dataclasses import dataclass
 from datetime import timedelta
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import func, or_, select, update
 
 from app.config import settings
 from app.core.model_hub.registry import ModelHub
@@ -363,9 +363,13 @@ class RuntimeWorker:
             run.completed_at = runner.ended_at
             run.finished_at = runner.ended_at
             run.version += 1
+            previous_checkpoint = await db.scalar(select(
+                func.max(RunnerCheckpoint.sequence_no)
+            ).where(RunnerCheckpoint.runner_id == runner.id)) or 0
             db.add(RunnerCheckpoint(
                 id=uuid7(), runner_id=runner.id, work_item_id=work.id,
-                sequence_no=2, checkpoint_type="turn_completed",
+                sequence_no=int(previous_checkpoint) + 1,
+                checkpoint_type="turn_completed",
                 state_snapshot={"run_status": "completed", "message_id": message.id},
                 execution_epoch=fence.execution_epoch,
                 capability_snapshot_id=runner.capability_snapshot_id,
@@ -422,9 +426,13 @@ class RuntimeWorker:
                 ToolInvocation.work_item_id == work.id,
                 ToolInvocation.status.in_(("waiting_confirmation", "queued", "running")),
             )))
+            previous_checkpoint = await db.scalar(select(
+                func.max(RunnerCheckpoint.sequence_no)
+            ).where(RunnerCheckpoint.runner_id == runner.id)) or 0
             db.add(RunnerCheckpoint(
                 id=uuid7(), runner_id=runner.id, work_item_id=work.id,
-                sequence_no=2, checkpoint_type="durable_wait",
+                sequence_no=int(previous_checkpoint) + 1,
+                checkpoint_type="durable_wait",
                 state_snapshot={"wait_reason": reason},
                 execution_epoch=fence.execution_epoch,
                 capability_snapshot_id=runner.capability_snapshot_id,

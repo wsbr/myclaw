@@ -113,3 +113,30 @@ async def test_recovery_carries_latest_persisted_tool_continuation(monkeypatch):
         ).order_by(DurableRunner.execution_epoch)))
         assert runners[-1].input_snapshot["pending_results"] == continuation
     await world.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_final_settlement_appends_after_tool_result_checkpoint(monkeypatch):
+    world = await create_runtime_world()
+    await _patch_factory(monkeypatch, world.factory)
+    worker = RuntimeWorker("settlement-worker")
+    claim = await worker.claim_one()
+    fence = await worker.acquire_runner(claim)
+    assert fence is not None
+    async with world.factory.begin() as db:
+        db.add(RunnerCheckpoint(
+            runner_id=world.runner_id, work_item_id=world.work_id,
+            sequence_no=2, checkpoint_type="tool_results_persisted",
+            state_snapshot={"pending_results": []}, execution_epoch=1,
+            context_manifest={}, result_cursor={}, pending_refs={}, budget_snapshot={},
+            last_completed_step="tool_results_persisted", safe_to_resume=True,
+        ))
+    context = type("Context", (), {"manifest": (), "compaction": None})()
+    await worker._settle_completed(fence, "ordinary final", context)
+    async with world.factory() as db:
+        checkpoints = list(await db.scalars(select(RunnerCheckpoint).where(
+            RunnerCheckpoint.runner_id == world.runner_id,
+        ).order_by(RunnerCheckpoint.sequence_no)))
+        assert [item.sequence_no for item in checkpoints] == [1, 2, 3]
+        assert checkpoints[-1].checkpoint_type == "turn_completed"
+    await world.engine.dispose()
