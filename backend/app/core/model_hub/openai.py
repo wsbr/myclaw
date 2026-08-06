@@ -1,9 +1,9 @@
 from typing import AsyncIterator
-import asyncio
 import json
 import openai as oai
 from app.core.model_hub.base import BaseLLM, LLMResponse, LLMChunk, ToolCall, TokenUsage
 from app.core.model_hub.tool_wire import to_openai_tools
+from app.runtime.protocol import ProviderSchemaError
 
 
 def normalize_messages_for_openai(messages: list[dict]) -> list[dict]:
@@ -11,6 +11,31 @@ def normalize_messages_for_openai(messages: list[dict]) -> list[dict]:
     normalized: list[dict] = []
     for msg in messages:
         role = msg.get("role")
+        if role == "assistant" and msg.get("turn_items"):
+            content_parts = []
+            tool_calls = []
+            for item in msg["turn_items"]:
+                if item.get("type") == "assistant_message":
+                    content_parts.extend(
+                        str(part.get("value", ""))
+                        for part in item.get("content_parts", [])
+                        if part.get("type") == "text"
+                    )
+                elif item.get("type") == "tool_call":
+                    tool_calls.append({
+                        "id": item["call_id"], "type": "function",
+                        "function": {
+                            "name": item["name"],
+                            "arguments": json.dumps(
+                                item.get("arguments") or {}, ensure_ascii=False,
+                            ),
+                        },
+                    })
+            normalized.append({
+                "role": "assistant", "content": "".join(content_parts),
+                "tool_calls": tool_calls,
+            })
+            continue
         if role == "assistant" and msg.get("tool_calls"):
             tool_calls = []
             for tc in msg["tool_calls"]:
@@ -95,7 +120,13 @@ class OpenAILLM(BaseLLM):
         tool_calls = []
         if msg.tool_calls:
             for tc in msg.tool_calls:
-                tool_calls.append(ToolCall(id=tc.id, name=tc.function.name, arguments=json.loads(tc.function.arguments)))
+                try:
+                    arguments = json.loads(tc.function.arguments)
+                except json.JSONDecodeError as error:
+                    raise ProviderSchemaError("Provider returned malformed Tool arguments") from error
+                if not isinstance(arguments, dict):
+                    raise ProviderSchemaError("Provider Tool arguments must be a JSON object")
+                tool_calls.append(ToolCall(id=tc.id, name=tc.function.name, arguments=arguments))
 
         return LLMResponse(
             content=msg.content or "",
@@ -126,60 +157,78 @@ class OpenAILLM(BaseLLM):
         if params.get("response_format"):
             kwargs["response_format"] = params["response_format"]
 
-        # OpenAI 流式工具调用是按 index 分片到达的（id/name 只在首个分片出现，
-        # arguments 是需要跨多个 chunk 拼接的 JSON 字符串片段），流结束后统一解析。
-        # A provider timeout is retried once only before any user-visible/model
-        # payload arrives. Retrying after a delta could duplicate SSE or a Tool.
-        for attempt in range(2):
-            tool_call_acc: dict[int, dict] = {}
-            usage = None
-            received_payload = False
-            try:
-                async for chunk in await self.client.chat.completions.create(**kwargs):
-                    if chunk.usage:
-                        usage = chunk.usage
-                    if not chunk.choices:
-                        continue
-                    delta = chunk.choices[0].delta
-                    if delta and delta.content:
-                        received_payload = True
-                        yield LLMChunk(type="text_delta", content=delta.content)
-                    if delta and delta.tool_calls:
-                        received_payload = True
-                        for tc_delta in delta.tool_calls:
-                            entry = tool_call_acc.setdefault(
-                                tc_delta.index, {"id": None, "name": None, "arguments": ""},
-                            )
-                            if tc_delta.id:
-                                entry["id"] = tc_delta.id
-                            if tc_delta.function:
-                                if tc_delta.function.name:
-                                    entry["name"] = tc_delta.function.name
-                                if tc_delta.function.arguments:
-                                    entry["arguments"] += tc_delta.function.arguments
-                break
-            except Exception as error:
-                if attempt == 0 and not received_payload and _is_retryable_zero_output_error(error):
-                    await asyncio.sleep(0.25)
-                    continue
-                raise
+        # Transport retry is intentionally owned by ModelAdapter so each
+        # physical request has a durable ProviderAttempt. The provider-specific
+        # layer only assembles wire chunks.
+        tool_call_acc: dict[int, dict] = {}
+        usage = None
+        finish_reason = None
+        response_model = None
+        provider_request_id = None
+        next_item_index = 0
+        text_item_index = None
+        async for chunk in await self.client.chat.completions.create(**kwargs):
+            # Any SDK chunk is response payload. This marker reaches
+            # ModelAdapter before buffered Tool JSON is complete, preventing a
+            # transport retry after a Provider has begun an action response.
+            yield LLMChunk(type="transport_payload")
+            response_model = getattr(chunk, "model", None) or response_model
+            provider_request_id = getattr(chunk, "id", None) or provider_request_id
+            if chunk.usage:
+                usage = chunk.usage
+            if not chunk.choices:
+                continue
+            choice = chunk.choices[0]
+            finish_reason = getattr(choice, "finish_reason", None) or finish_reason
+            delta = choice.delta
+            if delta and delta.content:
+                if text_item_index is None:
+                    text_item_index = next_item_index
+                    next_item_index += 1
+                yield LLMChunk(
+                    type="text_delta", content=delta.content,
+                    item_index=text_item_index,
+                )
+            if delta and delta.tool_calls:
+                for tc_delta in delta.tool_calls:
+                    if tc_delta.index not in tool_call_acc:
+                        tool_call_acc[tc_delta.index] = {
+                            "id": None, "name": None, "arguments": "",
+                            "item_index": next_item_index,
+                        }
+                        next_item_index += 1
+                    entry = tool_call_acc[tc_delta.index]
+                    if tc_delta.id:
+                        entry["id"] = tc_delta.id
+                    if tc_delta.function:
+                        if tc_delta.function.name:
+                            entry["name"] = tc_delta.function.name
+                        if tc_delta.function.arguments:
+                            entry["arguments"] += tc_delta.function.arguments
 
         for idx in sorted(tool_call_acc):
             entry = tool_call_acc[idx]
             try:
                 arguments = json.loads(entry["arguments"] or "{}")
-            except json.JSONDecodeError:
-                arguments = {}
+            except json.JSONDecodeError as error:
+                raise ProviderSchemaError("Provider returned malformed streamed Tool arguments") from error
+            if not isinstance(arguments, dict):
+                raise ProviderSchemaError("Provider streamed Tool arguments must be a JSON object")
             yield LLMChunk(
                 type="tool_call_delta",
                 tool_call=ToolCall(id=entry["id"] or "", name=entry["name"] or "", arguments=arguments),
+                item_index=entry["item_index"],
             )
 
-        if usage:
-            yield LLMChunk(
-                type="done",
-                usage=TokenUsage(input_tokens=usage.prompt_tokens, output_tokens=usage.completion_tokens),
-            )
+        yield LLMChunk(
+            type="done",
+            usage=(TokenUsage(
+                input_tokens=usage.prompt_tokens, output_tokens=usage.completion_tokens,
+            ) if usage else TokenUsage()),
+            stop_reason=finish_reason,
+            model=response_model,
+            provider_request_id=provider_request_id,
+        )
 
     async def count_tokens(self, messages: list[dict]) -> int:
         return sum(len(str(m.get("content", ""))) // 4 for m in messages)

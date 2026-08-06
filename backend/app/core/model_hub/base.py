@@ -23,10 +23,17 @@ class LLMResponse(BaseModel):
 
 
 class LLMChunk(BaseModel):
-    type: str                           # "text_delta" | "tool_call_delta" | "done"
+    # transport_payload marks that the Provider emitted a wire event even when
+    # its Tool arguments are still incomplete and cannot yet be normalized.
+    type: str  # "transport_payload" | "text_delta" | "tool_call_delta" | "done"
     content: str | None = None
     tool_call: ToolCall | None = None
     usage: TokenUsage | None = None
+    stop_reason: str | None = None
+    model: str | None = None
+    provider_request_id: str | None = None
+    provider_state_ref: str | None = None
+    item_index: int | None = None
 
 
 class BaseLLM(ABC):

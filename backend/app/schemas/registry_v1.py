@@ -23,6 +23,22 @@ class ModelCreate(BaseModel):
     _capabilities_are_valid = field_validator("capabilities")(_validate_model_capabilities)
 
 
+class LogicalModelCreate(BaseModel):
+    key: str
+    name: str
+
+
+class ModelVersionCreate(BaseModel):
+    provider: str
+    model_name: str
+    endpoint: str | None = None
+    credential_ref: str | None = None
+    default_parameters: dict = Field(default_factory=dict)
+    capabilities: dict
+
+    _capabilities_are_valid = field_validator("capabilities")(_validate_model_capabilities)
+
+
 class ModelPatch(BaseModel):
     endpoint: str | None = None
     credential_ref: str | None = None

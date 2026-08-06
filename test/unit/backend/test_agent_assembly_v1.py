@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+
 import pytest
 from fastapi import HTTPException
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.database import Base
+from app.core.model_hub.base import BaseLLM, LLMChunk, LLMResponse, TokenUsage, ToolCall
+from app.core.tool_registry.base import RuntimeContext, ToolResult
 from app.api.agents import (
     _change_agent_state,
     _get_accessible_agent,
@@ -20,6 +24,7 @@ from app.deps import CurrentAccount
 from app.models.agent_v1 import (
     AgentAssemblyVersion,
     AgentBlueprint,
+    AgentCard,
     AgentVersionBinding,
     AgentVersionSkill,
     AgentVersionTool,
@@ -32,12 +37,18 @@ from app.models.foundation import (
     UserIdentity,
 )
 from app.models.registry import (
+    ConformanceRun,
+    ModelVersion,
     PlatformTool,
     PolicyDefinition,
+    PolicyVersion,
     RegisteredModel,
     RegisteredSkill,
     SandboxProfile,
+    SandboxProfileVersion,
+    SkillVersion,
 )
+from app.models.runtime_v1 import CapabilitySnapshot, DurableRunner
 from app.services.agent_assembly_service import (
     AgentDraftConflict,
     AgentPublishValidationError,
@@ -47,10 +58,39 @@ from app.services.agent_assembly_service import (
     publish_agent,
     update_agent_draft,
 )
+from app.runtime.snapshot_resolver import SnapshotResolver
+from app.runtime.action_dispatcher import ActionDispatcher
+from app.runtime.agent_loop_coordinator import AgentLoopCoordinator
+from app.runtime.context_assembler import ContextAssembler
+from app.runtime.model_adapter import ModelAdapter
 from app.services.registry_reconcile import seed_core_registries
 from app.schemas.agent_v1 import AgentStateCommand
 
 pytestmark = pytest.mark.unit
+
+
+class PublishedVersionProvider(BaseLLM):
+    def __init__(self):
+        self.requests = []
+        self.calls = 0
+
+    async def chat(self, messages, tools, params) -> LLMResponse:
+        raise NotImplementedError
+
+    async def stream(self, messages, tools, params) -> AsyncIterator[LLMChunk]:
+        self.requests.append({"messages": messages, "tools": tools})
+        self.calls += 1
+        if self.calls == 1:
+            yield LLMChunk(type="tool_call_delta", tool_call=ToolCall(
+                id="published-call", name="lookup", arguments={"key": "alpha"},
+            ))
+            yield LLMChunk(type="done", stop_reason="tool_calls", usage=TokenUsage())
+        else:
+            yield LLMChunk(type="text_delta", content="Published Agent completed.")
+            yield LLMChunk(type="done", stop_reason="stop", usage=TokenUsage())
+
+    async def count_tokens(self, messages):
+        return 1
 
 
 @pytest.fixture
@@ -59,10 +99,13 @@ async def assembly_db():
     tables = [
         UserIdentity.__table__, PlatformAccount.__table__, PlatformAuditEvent.__table__,
         IdempotencyRecord.__table__,
-        RegisteredModel.__table__, PlatformTool.__table__, RegisteredSkill.__table__,
-        PolicyDefinition.__table__, SandboxProfile.__table__, AgentBlueprint.__table__,
+        RegisteredModel.__table__, ModelVersion.__table__, ConformanceRun.__table__,
+        PlatformTool.__table__, RegisteredSkill.__table__, SkillVersion.__table__,
+        PolicyDefinition.__table__, PolicyVersion.__table__,
+        SandboxProfile.__table__, SandboxProfileVersion.__table__, AgentBlueprint.__table__,
         AgentAssemblyVersion.__table__, AgentVersionTool.__table__,
-        AgentVersionSkill.__table__, AgentVersionBinding.__table__,
+        AgentVersionSkill.__table__, AgentVersionBinding.__table__, AgentCard.__table__,
+        DurableRunner.__table__, CapabilitySnapshot.__table__,
     ]
     async with engine.begin() as connection:
         await connection.run_sync(lambda sync: Base.metadata.create_all(sync, tables=tables))
@@ -82,10 +125,27 @@ async def assembly_db():
     factory = async_sessionmaker(engine, expire_on_commit=False)
     account_id = uuid7()
     model_id = uuid7()
+    model_version_id = uuid7()
     async with factory.begin() as db:
         db.add(UserIdentity(user_id="builder-1", status="active"))
         db.add(PlatformAccount(id=account_id, user_id="builder-1", display_name="Builder", status="active"))
-        db.add(RegisteredModel(id=model_id, key="mock.default", provider="openai_compatible", model_name="mock", default_parameters={}, capabilities={}, enabled=True, config_version=1))
+        db.add(RegisteredModel(
+            id=model_id, key="mock.default", name="Mock", provider="openai_compatible",
+            model_name="mock", default_parameters={}, capabilities={}, enabled=True,
+            config_version=1, current_version_id=model_version_id, next_version_no=2,
+        ))
+        db.add(ModelVersion(
+            id=model_version_id, model_id=model_id, version_no=1,
+            provider="openai_compatible", model_name="mock", default_parameters={},
+            capabilities={"streaming": True, "native_tool_calling": True},
+            content_hash="1" * 64,
+        ))
+        db.add(ConformanceRun(
+            subject_type="model_version", subject_id=model_version_id,
+            suite_version="agent-native-v2.1", idempotency_key="seed-pass",
+            request_hash="2" * 64, status="passed", started_at=utcnow(),
+            ended_at=utcnow(), result_summary={"passed": True}, content_hash="3" * 64,
+        ))
         await seed_core_registries(db)
     yield factory, account_id, model_id
     await engine.dispose()
@@ -112,12 +172,23 @@ async def test_publish_copies_and_seals_while_preserving_draft(assembly_db):
     factory, account_id, model_id = assembly_db
     async with factory.begin() as db:
         policies = await _policy_ids(db)
+        model_version_id = await db.scalar(
+            select(RegisteredModel.current_version_id).where(RegisteredModel.id == model_id)
+        )
         sandbox_id = await db.scalar(select(SandboxProfile.id).where(SandboxProfile.profile_key == "local"))
         skill_id = uuid7()
+        skill_version_id = uuid7()
         db.add(RegisteredSkill(
             id=skill_id, logical_name="acceptance.skill", name="Acceptance Skill",
             description="Draft snapshot regression", owner_account_id=account_id,
-            status="active", current_published_version_id=uuid7(),
+            status="active", current_published_version_id=skill_version_id,
+        ))
+        db.add(SkillVersion(
+            id=skill_version_id, skill_id=skill_id, version_no=1, status="published",
+            package_uri="memory://acceptance.skill/1", checksum="4" * 64,
+            content_hash="5" * 64, manifest={"name": "acceptance.skill"},
+            manifest_name="acceptance.skill", manifest_description="Acceptance Skill",
+            created_by_account_id=account_id, published_at=utcnow(),
         ))
         await db.flush()
         agent, draft = await create_agent(db, owner_account_id=account_id, created_by_account_id=account_id, name="Finance", description="Finance specialist")
@@ -152,6 +223,16 @@ async def test_publish_copies_and_seals_while_preserving_draft(assembly_db):
         assert published.version_no == 1
         assert published.immutable_at is not None
         assert len(published.content_hash) == 64
+        assert published.model_version_id == model_version_id
+        frozen_skill = await db.scalar(select(AgentVersionSkill).where(
+            AgentVersionSkill.agent_version_id == published.id,
+        ))
+        assert frozen_skill.skill_version_id == skill_version_id
+        assert frozen_skill.checksum == "4" * 64
+        card = await db.scalar(select(AgentCard).where(AgentCard.agent_version_id == published.id))
+        assert card is not None
+        assert card.attestation["assembly_content_hash"] == published.content_hash
+        assert "instructions" not in card.declaration
         assert agent.draft_version_id == draft_id
         assert draft.draft_revision == 3
         assert draft.derived_from_version_id == published.id
@@ -162,6 +243,109 @@ async def test_publish_copies_and_seals_while_preserving_draft(assembly_db):
         stored = await db.get(AgentAssemblyVersion, published.id)
         assert stored.instructions == "Handle finance work safely."
         assert stored.publication_status == "published"
+
+
+@pytest.mark.asyncio
+async def test_snapshot_resolver_persists_effective_tools_and_live_governance_denial(assembly_db):
+    factory, account_id, model_id = assembly_db
+    async with factory.begin() as db:
+        policies = await _policy_ids(db)
+        sandbox_id = await db.scalar(select(SandboxProfile.id).where(
+            SandboxProfile.profile_key == "local"
+        ))
+        tool = PlatformTool(
+            id=uuid7(), tool_key="lookup", display_name="Lookup",
+            description="Lookup", input_schema={
+                "type": "object", "properties": {"key": {"type": "string"}},
+                "required": ["key"], "additionalProperties": False,
+            }, output_schema={"type": "object"}, implementation_ref="tests:lookup",
+            implementation_version="1", execution_mode="inline", side_effect="none",
+            enabled=True, confirmation_policy="never", platform_config={},
+            config_version=1, registration_hash="7" * 64,
+        )
+        db.add(tool)
+        await db.flush()
+        agent, draft = await create_agent(
+            db, owner_account_id=account_id, created_by_account_id=account_id,
+            name="Resolver", description="Resolver test",
+        )
+        draft = await update_agent_draft(
+            db, agent_id=agent.id, expected_draft_revision=1,
+            values={
+                "instructions": "Resolve tools.", "model_id": model_id,
+                "sandbox_profile_id": sandbox_id,
+                "context_policy_id": policies["context.standard"],
+                "history_policy_id": policies["history.recent"],
+                "memory_write_policy_id": policies["memory_write.none"],
+                "memory_recall_policy_id": policies["memory_recall.none"],
+            },
+            selection=AssemblySelection(tool_ids=(tool.id,)),
+        )
+        published = await publish_agent(
+            db, agent_id=agent.id, expected_draft_revision=draft.draft_revision,
+            actor_account_id=account_id, idempotency_record_id="resolver-publish",
+        )
+        runner = DurableRunner(
+            id=uuid7(), work_item_id="work-1", run_id="run-1", session_id="session-1",
+            agent_id=agent.id, agent_version_id=published.id, execution_epoch=1,
+            status="running", principal_snapshot={}, assembly_snapshot={},
+            prompt_manifest={}, input_snapshot={},
+        )
+        db.add(runner)
+        await db.flush()
+        resolved = await SnapshotResolver().resolve(
+            db, runner=runner, execution_principal={"account_id": account_id},
+            permission_mode="standard", hard_budget={},
+        )
+        assert resolved.capability.assembled_tool_keys == ["lookup"]
+        assert resolved.capability.effective_tool_keys == ["lookup"]
+        assert resolved.tool_definitions[0]["registration_hash"] == "7" * 64
+        assert runner.capability_snapshot_id == resolved.capability.id
+
+        provider = PublishedVersionProvider()
+
+        async def execute(name, arguments, context, dispatch_db):
+            return ToolResult(status="succeeded", summary="Found", data={"value": 42})
+
+        loop = await AgentLoopCoordinator(
+            ModelAdapter(provider),
+            ActionDispatcher(list(resolved.tool_definitions), executor=execute),
+        ).run(
+            context=ContextAssembler().assemble(
+                platform_rules="Use native Tool Calls.",
+                agent_instructions=resolved.assembly.instructions,
+                current_input="find alpha",
+            ),
+            tool_definitions=list(resolved.tool_definitions),
+            capability_snapshot=resolved.capability,
+            runtime_context=RuntimeContext(
+                session_id=runner.session_id, runner_id=runner.id,
+                task_id=runner.work_item_id, user_id="builder-1", agent_id=agent.id,
+            ),
+            model_parameters={"model_id": resolved.model_version.model_name},
+        )
+        assert loop.final_message == "Published Agent completed."
+        assert provider.requests[0]["tools"] == provider.requests[1]["tools"]
+        assert provider.requests[1]["messages"][-1]["role"] == "tool"
+
+        tool.enabled = False
+        runner2 = DurableRunner(
+            id=uuid7(), work_item_id="work-2", run_id="run-2", session_id="session-1",
+            agent_id=agent.id, agent_version_id=published.id, execution_epoch=1,
+            status="running", principal_snapshot={}, assembly_snapshot={},
+            prompt_manifest={}, input_snapshot={},
+        )
+        db.add(runner2)
+        await db.flush()
+        denied = await SnapshotResolver().resolve(
+            db, runner=runner2, execution_principal={"account_id": account_id},
+            permission_mode="standard", hard_budget={},
+        )
+        assert denied.capability.assembled_tool_keys == ["lookup"]
+        assert denied.capability.effective_tool_keys == []
+        assert denied.capability.denied_capabilities == [{
+            "capability": "lookup", "reason_code": "platform_tool_disabled",
+        }]
 
 
 @pytest.mark.asyncio

@@ -5,6 +5,8 @@ from types import SimpleNamespace
 import pytest
 
 from app.core.model_hub.openai import OpenAILLM, normalize_messages_for_openai
+from app.runtime.model_adapter import ModelAdapter
+from app.runtime.protocol import ProviderRequest
 
 pytestmark = pytest.mark.unit
 
@@ -92,10 +94,11 @@ async def test_stream_forwards_frozen_temperature_and_output_limit():
     model = OpenAILLM("unused-test-key")
     await model.client.close()
     model.client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
-    assert [chunk async for chunk in model.stream(
+    chunks = [chunk async for chunk in model.stream(
         [{"role": "user", "content": "return json"}], None,
         {"model_id": "model", "temperature": 0, "max_tokens": 4096},
-    )] == []
+    )]
+    assert [chunk.type for chunk in chunks] == ["transport_payload", "done"]
     assert captured["temperature"] == 0
     assert captured["max_tokens"] == 4096
 
@@ -117,15 +120,16 @@ async def test_stream_forwards_declared_structured_response_format():
     await model.client.close()
     model.client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
     response_format = {"type": "json_object"}
-    assert [chunk async for chunk in model.stream(
+    chunks = [chunk async for chunk in model.stream(
         [{"role": "user", "content": "return json"}], None,
         {"model_id": "model", "response_format": response_format},
-    )] == []
+    )]
+    assert [chunk.type for chunk in chunks] == ["transport_payload", "done"]
     assert captured["response_format"] == response_format
 
 
 @pytest.mark.asyncio
-async def test_stream_forwards_required_tool_choice_for_harness_envelope():
+async def test_stream_exposes_native_tools_without_forcing_a_control_envelope():
     captured = {}
 
     class Completions:
@@ -141,19 +145,20 @@ async def test_stream_forwards_required_tool_choice_for_harness_envelope():
     await model.client.close()
     model.client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
     tools = [{
-        "name": "finalize_response", "description": "Finalize",
+        "name": "read_file", "description": "Read a file",
         "input_schema": {"type": "object", "properties": {}},
     }]
-    assert [chunk async for chunk in model.stream(
+    chunks = [chunk async for chunk in model.stream(
         [{"role": "user", "content": "finish"}], tools,
-        {"model_id": "model", "tool_choice": "required"},
-    )] == []
-    assert captured["tool_choice"] == "required"
-    assert captured["tools"][0]["function"]["name"] == "finalize_response"
+        {"model_id": "model"},
+    )]
+    assert [chunk.type for chunk in chunks] == ["transport_payload", "done"]
+    assert "tool_choice" not in captured
+    assert captured["tools"][0]["function"]["name"] == "read_file"
 
 
 @pytest.mark.asyncio
-async def test_stream_retries_one_transient_failure_only_before_output(monkeypatch):
+async def test_model_adapter_retries_one_transient_failure_only_before_output():
     calls = 0
 
     class Completions:
@@ -171,22 +176,19 @@ async def test_stream_retries_one_transient_failure_only_before_output(monkeypat
 
             return chunks()
 
-    async def no_sleep(_delay):
-        return None
-
-    monkeypatch.setattr("app.core.model_hub.openai.asyncio.sleep", no_sleep)
     model = OpenAILLM("unused-test-key")
     await model.client.close()
     model.client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
-    chunks = [chunk async for chunk in model.stream(
-        [{"role": "user", "content": "return json"}], None, {"model_id": "model"},
-    )]
+    result = await ModelAdapter(model).invoke(ProviderRequest(
+        messages=({"role": "user", "content": "return json"},),
+        tools=(), parameters={"model_id": "model"},
+    ))
     assert calls == 2
-    assert [chunk.content for chunk in chunks] == ["ok"]
+    assert result.assistant_messages[0].text == "ok"
 
 
 @pytest.mark.asyncio
-async def test_stream_retries_incomplete_chunked_read_before_output(monkeypatch):
+async def test_model_adapter_retries_incomplete_chunked_read_before_output():
     calls = 0
 
     class Completions:
@@ -207,18 +209,15 @@ async def test_stream_retries_incomplete_chunked_read_before_output(monkeypatch)
 
             return chunks()
 
-    async def no_sleep(_delay):
-        return None
-
-    monkeypatch.setattr("app.core.model_hub.openai.asyncio.sleep", no_sleep)
     model = OpenAILLM("unused-test-key")
     await model.client.close()
     model.client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
-    chunks = [chunk async for chunk in model.stream(
-        [{"role": "user", "content": "return json"}], None, {"model_id": "model"},
-    )]
+    result = await ModelAdapter(model).invoke(ProviderRequest(
+        messages=({"role": "user", "content": "return json"},),
+        tools=(), parameters={"model_id": "model"},
+    ))
     assert calls == 2
-    assert [chunk.content for chunk in chunks] == ["recovered"]
+    assert result.assistant_messages[0].text == "recovered"
 
 
 @pytest.mark.asyncio
@@ -247,6 +246,48 @@ async def test_stream_never_retries_after_a_delta():
         async for chunk in model.stream(
             [{"role": "user", "content": "return json"}], None, {"model_id": "model"},
         ):
-            received.append(chunk.content)
+            if chunk.content is not None:
+                received.append(chunk.content)
     assert calls == 1
     assert received == ["partial"]
+
+
+@pytest.mark.asyncio
+async def test_model_adapter_never_retries_after_buffered_tool_delta():
+    calls = 0
+
+    class Completions:
+        async def create(self, **kwargs):
+            nonlocal calls
+            calls += 1
+
+            async def chunks():
+                yield SimpleNamespace(
+                    id="response-1", model="model", usage=None,
+                    choices=[SimpleNamespace(
+                        finish_reason=None,
+                        delta=SimpleNamespace(
+                            content=None,
+                            tool_calls=[SimpleNamespace(
+                                index=0, id="call-1",
+                                function=SimpleNamespace(name="lookup", arguments='{"key":'),
+                            )],
+                        ),
+                    )],
+                )
+                raise RuntimeError("Request timed out.")
+
+            return chunks()
+
+    model = OpenAILLM("unused-test-key")
+    await model.client.close()
+    model.client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+    with pytest.raises(Exception, match="timed out"):
+        await ModelAdapter(model).invoke(ProviderRequest(
+            messages=({"role": "user", "content": "use lookup"},),
+            tools=({
+                "name": "lookup", "description": "lookup",
+                "input_schema": {"type": "object"},
+            },), parameters={"model_id": "model"},
+        ))
+    assert calls == 1
