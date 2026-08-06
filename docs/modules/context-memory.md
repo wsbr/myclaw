@@ -13,19 +13,18 @@ Memory Write Policy
 Memory Recall Policy
 ```
 
-每个 Policy Definition 至少包含：
+每个逻辑 Policy Definition 至少包含：
 
 ```text
 key
 type
 name
 description
-implementation_ref
-version
-enabled
+current_version_id
+status: active | inactive
 ```
 
-内部可以维护 Token 预算、TTL、排序阈值、存储后端等实现参数，但这些是平台策略的一部分，不是 Agent 自定义配置。
+Policy Definition 通过 `current_version_id` 指向不可变 PolicyVersion；PolicyVersion 保存 `version_no + implementation_ref + parameters + content_hash + status`。内部 Token 预算、TTL、排序阈值、存储后端等实现参数属于版本内容，不是 Agent 自定义配置。Draft 选择四个逻辑 Policy，发布时分别固定精确 PolicyVersion；显式 `none` 也是版本化策略，不能用 NULL 表示。
 
 ## 各策略职责
 
@@ -35,7 +34,7 @@ enabled
 
 ### History Window Policy
 
-决定从当前 UserSession、Plan 对话或 GroupSession 选取、裁剪或总结哪些历史消息。
+决定从当前 UserSession 或 GroupSession 选取、裁剪或总结哪些历史消息。显式 Plan 仍使用原 UserSession，不产生第二套历史源。
 
 ### Memory Write Policy
 
@@ -102,7 +101,7 @@ memory_recall.user_combined
 ```
 
 - `memory_recall.none`：不召回。
-- `memory_recall.user_agent`：只召回同 `userId + agent_id` 的记忆。
+- `memory_recall.user_agent`：只召回同 `tenant_id + account_id + agent_id` 的记忆。
 - `memory_recall.user_combined`：召回当前 Agent 专属的 `user_agent` 记忆和同用户的 `user` 记忆，优先专属记忆。
 
 召回结果必须记录使用过的 `memory_id` 到 Runner 的可解释快照或 Trace。策略可以排序和裁剪召回结果，但不能越过作用域查询。
@@ -127,7 +126,7 @@ memory_recall.user_combined
 
 ```text
 memory_id
-userId
+account_id
 agent_id?
 scope
 content
@@ -144,28 +143,28 @@ updated_at
 
 ## Group 中的上下文
 
-Group 只有一个共享 GroupSession，不为每个节点建立独立聊天 Session。每个节点以 `group_id + agent_id` 为命名空间，先确定当前 Agent 的直接可见范围，再由自己的策略在该范围内构建上下文。
+Group 只有一个共享 GroupSession，不为每个成员复制一份用户会话。每个成员以 `group_id + agent_id` 为私有执行命名空间，先确定当前 Agent 的直接可见范围，再由自己的策略在该范围内构建上下文。
 
-直接可见范围包括：
+直接可见范围先经过 `private | direct | group | user` 可见性投影，包括：
 
-- Group 目标、已确认 Agent 图和整体状态；
+- 当前用户目标、Group Membership、RunSnapshot、WorkingPlan 和整体状态；
 - 当前 Agent 自己发送和接收的消息；
 - 用户定向发给当前 Agent 的消息；
 - 当前 Agent 发起或收到的 Clarification；
-- 分配给当前 Agent 的 Work Item；
+- 当前 Agent 认领或收到的 WorkItem / SharedTask；
 - 当前 Agent 参与的 AgentInvocation 请求与结果；
 - 明确发送给当前 Agent 的 Artifact；
 - 当前 Agent 自己的 ToolInvocation 和执行结果。
 
 Context、History 和 Memory Policy 只能在上述可见范围内裁剪、召回和组装，不能借助策略读取其他 Agent 的对话或工作。
 
-其他 Agent 之间的消息、Work Item、调用、结果和发布到 Group 的共享 Artifact 属于 Group 共享记录。它们不会自动进入当前 Agent Prompt，必须通过显式装配的 `search_group_history` Platform Tool 获取。查询结果作为普通 ToolInvocation 结果进入当前 Runner。
+其他 Agent 之间标记为 `group` 的消息、SharedTask、调用、验证结果、分歧、结果和 Artifact 属于 Group 共享记录。它们不会自动进入当前 Agent Prompt，必须通过显式装配且可重复调用的 `search_group_history` Platform Tool 获取。查询结果作为普通 ToolInvocation 结果进入当前 Runner，并保留来源、sequence、visibility 与 checksum。
 
 GroupTranscriptDocument 是共享 Message 与 ExecutionEvent 的派生只读文档或索引，不是上下文策略的隐式数据源。Group 不自动添加查询 Tool；启用 Group 时管理面可以提示能力缺失，但不能替 Agent 装配。
 
 `history.summary_recent` 的 Group 摘要也必须按 `group_id + agent_id` 分别维护，不能生成一份全群摘要后自动注入所有 Agent。通过 `search_group_history` 得到的结果只进入当前 Runner 的可见上下文，不自动写入长期记忆。
 
-共享 GroupSession 不等于共享私有配置。其他节点不能读取本 Agent 的 Instructions、私有记忆、Runner Prompt、模型内部推理或敏感凭证。
+共享 GroupSession 不等于共享私有配置。其他成员不能读取本 Agent 的 Instructions、私有记忆、Runner Prompt、模型内部推理或敏感凭证。平台也不保存或传播原始 Chain-of-Thought；需要协作的解释应是 Agent 主动生成的消息、决定摘要、事实引用和风险。
 
 ## 后期 Agent 进化
 

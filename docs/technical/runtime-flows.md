@@ -1,6 +1,8 @@
-# Runtime 详细流程
+# V1 Runtime 流程（历史实现参考）
 
-本文是 Chat、Plan、Group 从请求到交付的唯一实现级时序定义。状态迁移细节见 [状态机](state-machines.md)，并发保障见 [一致性](consistency-concurrency.md)。
+> **历史 V1 实现参考，非目标设计。** Worker 切点、Checkpoint 和 Invocation 恢复仅作为迁移证据；旧冻结 Plan、Formation、Settlement 和 Completion 流程已被[当前综合技术方案](phase-one-agent-native-delivery.md)取代。
+
+本文记录V1 Chat、Plan、Group从请求到交付的时序基线。状态迁移细节见[状态机](state-machines.md)，并发保障见[一致性](consistency-concurrency.md)。
 
 ## 1. Runtime 组件
 
@@ -16,7 +18,7 @@
 2. 读取 WorkItem 固定的 `agent_version_id`。Chat 首 WorkItem 在 Run 创建时解析当前 published；被调用 Chat Agent 在 AgentInvocation 创建时解析；Plan/Group 使用确认表固定值。
 3. 读取 SessionSandbox 固定 profile/version并验证 ready。不得使用 AgentVersion 后来选择的 Sandbox 替换。
 4. 读取 Model 与 AgentVersion Tool/Policy 关系；任何引用不存在或当前停用，Runner 明确失败。Tool 当前 enabled 会在每次调用再校验。
-5. 对每个逻辑 Skill 读取当前 published SkillVersion，验证共享目录 checksum，写 `runner_skill_snapshot`。缺失同步目录时失败并发起 sync，不用旧版 fallback。
+5. 对 AgentVersion/draft_test_snapshot 已固定的每个精确 SkillVersion 验证共享目录 checksum，写 `runner_skill_snapshot`。缺失同步目录时失败并发起 sync，不读取 logical current，也不用其他版本 fallback。
 6. 生成可调用 Agent Catalog：Chat 直接绑定；Plan Owner 为绑定与 declared 集合交集，子 Agent为空；Group 为固定节点集合（排除自身）。
 7. 固定 ExecutionPrincipal、model parameter_version、tool implementation/config version、policy parameter version和 Prompt section source manifest。
 8. 从最新 safe Checkpoint 或初始输入装载模型循环状态，然后开始上下文组装。
@@ -48,15 +50,15 @@ Client → API → DB transaction → Outbox → Runtime Worker → Model/Tool
 ```
 
 1. `POST /sessions/{id}/messages` 验证 userId、Session active、入口 Agent published/可访问；分配 Message 与 Session event sequence。
-2. 同事务解析入口 Agent 最新 published AgentVersion，创建 `Run(mode=chat)`、根 WorkItem、queued Runner、`message.created/run.created/runner.queued` 和 `runtime.runner` Outbox，返回 202。
-3. Runner 按通用启动规则解析最新 Skill checksum、装配 Prompt并流式调用模型。
+2. 同事务解析入口 Agent 最新 published AgentVersion，创建 `Run(mode=chat)`、根 WorkItem、queued Runner、`message.created/run.created/runner.created` 和 `runtime.runner` Outbox，返回 202。
+3. Runner 按通用启动规则加载已固定的精确 SkillVersion/checksum、装配 Prompt 并流式调用模型。
 4. Inline Tool：先落 Invocation/Attempt；无需等待且当前 Runner 可安全继续时，把最终信封加入模型上下文。
 5. Confirmation：保存 safe Checkpoint，Runner 结束，WorkItem waiting_user（具体原因 confirmation）；用户批准后同 Invocation 执行，拒绝后以 rejected Tool result 创建新 Runner。
 6. Clarification：创建 Clarification 与 Assistant Message，Checkpoint 后结束 Runner；回答创建 User Message并恢复同 WorkItem。
 7. `invoke_agent`：校验直接绑定、用户访问、目标启用和星形深度；创建 AgentInvocation、目标独立 WorkItem/Runner。调用方 waiting_agent；子 Agent无 Agent Catalog、不直接澄清用户，其 `needs_clarification/assistance` 是定向结果。目标完成后恢复调用方。
 8. Durable Async Tool/`execute`：创建/排队 Attempt，WorkItem waiting_tool/resource；Tool Worker完成后恢复新 Runner。
-9. 新 Runner 从 Checkpoint载入已完成 Tool/Agent结果；重新解析最新 Skill并固定新 checksum，但 AgentVersion/Model/Tool/Policy仍来自当前 WorkItem版本关系和平台注册状态。
-10. 根 WorkItem结果写 Assistant Message、Artifact引用；Run进入 settling。Memory Write异步命令与完成/通知同结算事务写出，Run completed。
+9. 新 Runner 从 Checkpoint 载入已完成 Tool/Agent 结果；继续使用 WorkItem 固定 AgentVersion 中的精确 SkillVersion/checksum，Model/Policy/Sandbox 也不漂移；Tool 启停、确认、风险和连接治理按当前事实重读。
+10. 根 WorkItem 结果写 Assistant Message、Artifact 引用；结算事务直接把 Run 推进到合法终态，不引入 `settling` 状态。Memory Write 异步命令与完成/通知同结算事务写出。
 
 同 Session 下一条用户消息创建全新 Chat Run并再次使用 Agent最新 published版本；前一终态 Run不复活。
 
@@ -73,7 +75,7 @@ Builder受控草稿测试使用独立`draft/test-runs`入口；创建事务把�
 
 ### 执行
 
-5. Plan Scheduler只计算关系表中的“节点已就绪”，不执行领域判断。Owner节点可直接创建WorkItem；子Agent节点只写`plan.node_ready`并恢复Owner协调WorkItem，不能直接启动目标Agent。默认依赖要求predecessor succeeded；用户确认的`settled`边允许失败结果继续。
+5. 历史 Plan Scheduler 只计算关系表中的“节点已就绪”，不执行领域判断；该旧投影不属于当前稳定 ExecutionEvent。目标方案由 Owner 的 WorkingPlan/AgentInvocation 自然推进，平台不能因文本节点就绪暗中启动目标 Agent。
 6. 每个开始执行的计划节点有一个WorkItem。Owner节点使用固定Owner版本；子Agent节点必须由Owner Runner显式调用`invoke_agent`后创建并关联目标WorkItem，平台不得因节点就绪而暗中调用。
 7. Owner callable集合严格是固定 declared Agent与其固定绑定的交集。子 Agent Catalog为空，不能调用其他 Agent/Plan/Group；澄清需求返回 Owner。
 8. 同一 Owner Runner可并行创建多个 AgentInvocation；all-settled后恢复。每个节点可经历 Tool、Confirmation、Clarification、Checkpoint与新 Runner。
@@ -105,7 +107,7 @@ Builder受控草稿测试使用独立`draft/test-runs`入口；创建事务把�
 
 ### 结算与后续
 
-11. 初始 GroupRun owner为入口节点，负责首次汇总但无 Supervisor特权。全部相关 WorkItem终态或收敛后只结算统一Run，GroupRun lifecycle/outcome由该Run派生；写父 Session状态卡/摘要和按来源通知。
+11. 初始 GroupRun owner 为入口节点，负责首次汇总但无 Supervisor 特权。全部相关 WorkItem 终态或收敛后只结算统一 Run，GroupRun 的展示状态/结果由该 Run 派生；写父 Session 状态卡/摘要和按来源通知。
 12. 返回普通 Chat只切 UI，不改变 Group。取消 GroupRun只取消其Run；关闭 GroupSession取消全部非终态Run并转只读。
 13. 终态后的定向追问创建新 GroupRun/Run并引用历史。短事务锁定 UserSession、GroupSession、固定节点以及按 `agent_id` 排序的相关 Agent，重新解析每个节点：可用节点固定最新已发布版本，不可用节点写 unavailable/null version。指定节点成为 owner，未指定时使用入口节点；owner 不可用则以 `group_owner_unavailable` 拒绝且不创建部分 Run，用户可改选另一可用固定节点。非 owner 不可用不阻塞本轮，但 Runtime Catalog 排除该节点并拒绝对它的新 WorkItem、Message 和 Invocation。固定节点始终保留且不可替换/删除；重新启用只在未来 GroupRun 重新解析，既有映射不变。
 
@@ -124,4 +126,4 @@ Runner lost时 control选择 WorkItem最新 `safe_to_resume` Checkpoint，创建
 
 ## 10. 结算、记忆与通知
 
-Settlement先确保所有未完成项被标成明确结果，再计算唯一 Run lifecycle/outcome；PlanExecution和GroupRun不保存镜像状态。最终 Message、Artifact关联、Run、ExecutionEvent和 `runtime.maintenance:extract_memory` 命令同事务提交。仅当Session `origin_type=channel`且原binding active时，同事务创建NotificationDelivery与`runtime.delivery`命令；Web依靠ExecutionEvent/Required Action，API依靠轮询/SSE，不制造Delivery。Maintenance内的Memory handler提取失败写 `memory.write_failed`，Notification失败只改变NotificationDelivery并写安全事件，均不改变原Run结果。Trace可以晚到或丢失。
+Settlement 先确保所有未完成项被标成明确结果，再计算唯一 Run status/terminal result；PlanExecution 和 GroupRun 不保存镜像状态。最终 Message、Artifact 关联、Run、ExecutionEvent 和 `runtime.maintenance:extract_memory` 命令同事务提交。仅当 Session `origin=channel` 且原 binding active 时，同事务创建 NotificationDelivery 与 `runtime.delivery` 命令；Web 依靠 ExecutionEvent/Required Action，API 依靠轮询/SSE，不制造 Delivery。Maintenance 内的 Memory handler 提取失败写诊断审计，Notification 失败只改变 NotificationDelivery 并写安全事件，均不改变原 Run 结果。Trace 可以晚到或丢失。

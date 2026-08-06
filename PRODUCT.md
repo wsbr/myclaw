@@ -1,161 +1,211 @@
 # MyClaw 产品设计总览
 
-> 本文是产品入口，只概述目标产品与用户体验。完整定义以 [设计文档索引](docs/README.md) 中的权威模块为准。
+> 本文是产品入口，只概述目标体验。完整定义以[设计文档索引](docs/README.md)中的权威模块为准。
 
 ## 产品定位
 
-MyClaw 是垂类 Agent 装配平台。平台统一提供模型、Tool、Skill、上下文、记忆和协作 Runtime，装配者通过选择这些能力构建能够独立承担领域工作的 Agent。
+MyClaw 是 Agent-native 的云端 Agent 平台。个人、岗位、业务域和企业公共 Agent 先成为能够独立工作的专业主体，再作为节点进入企业工作网，按目标发现彼此、临时协作并持续成长。
 
-MyClaw 不把 Agent 简化为聊天提示词，也不要求每个 Agent 重复建设文件读取、模型调用、记忆、长任务恢复和协作机制。平台负责复用、授权和可靠执行，Agent 负责领域判断与语义结果。
+用户用自然语言表达想解决的问题。模型驾驭 Agent，负责理解、规划、行动、观察、调整、协作和交付；平台负责身份、权限、上下文、Tool、Sandbox、持久状态、副作用、预算和可观测性。
 
-长期目标是形成企业智能体网络：每个垂类岗位、业务域乃至个人都可以拥有完整 Agent，并在企业网络中发布、更新、协作和下线。人发起目标后，Agent 优先承担领域工作和跨域协调，确实缺少信息、判断或授权时才定向找人。完整北极星见 [企业智能体网络最终蓝图](docs/modules/enterprise-agent-network.md)。
+长期目标是可治理的动态 Agent 社会，不是中央超级 Agent、角色模板市场或固定工作流平台。完整北极星见[Enterprise Agent Network](docs/modules/enterprise-agent-network.md)。
 
 ## 核心产品对象
 
-- **Agent**：稳定的垂类身份；具体可执行装配以不可变 AgentVersion 发布。
-- **Enterprise Agent Network**：企业内可发现、可治理、可协作的个人、岗位、业务域和公共 Agent 网络。
-- **Platform Tool**：由平台代码实现和注册的动作能力。
-- **Skill**：兼容通用 `SKILL.md` 的可移植能力包。
-- **Model**：由平台统一管理、由 Agent 固定选择的模型。
-- **Policy**：平台内置的上下文、历史和记忆策略。
-- **Sandbox**：Agent 选择、Session 固定的执行环境与共享工作空间。
-- **Artifact**：Session Workspace 中正式发布文件的稳定引用。
-- **UserSession**：用户与入口 Agent 的连续对话容器。
-- **Work Item**：可跨时间持续的业务工作。
-- **Runner**：一次短生命周期、不可原地恢复的 Agent 执行尝试。
-- **Plan**：经用户确认并冻结的中心化 Work Item Graph。
-- **GroupSession**：固定参与者共享的对等 Agent 群组会话。
-- **GroupRun**：GroupSession 内一次不可重启的具体工作周期。
-- **Channel**：将第三方机器人会话绑定到 UserSession 的双向接入能力。
+- **Agent**：稳定的逻辑工作主体和治理身份，不等同于配置行或常驻进程；
+- **AgentVersion**：Agent 的不可变发布配置，固定 ModelVersion、Instructions、Tool 选择/registration hash、精确 SkillVersion/checksum、PolicyVersion 和 SandboxProfileVersion；Tool 的实时启停、确认、风险和连接治理不冻结；
+- **AgentCard**：Agent 在工作网中的安全发现信息；
+- **Enterprise Agent Network**：Agent 被发现、选择、邀请和建立信誉的网络；
+- **UserSession**：用户与一个 Agent 或 Group 持续交互的上下文；
+- **Run / WorkItem**：一次用户工作及可跨等待持续的工作状态；
+- **Turn / Runner**：一次模型决策及承载若干决策的短生命周期执行片段；
+- **WorkingPlan**：Agent 在复杂任务中按需维护的可见工作计划；
+- **ToolInvocation / AgentInvocation**：真实 Tool 行动和 Agent 协作；
+- **Clarification / Approval**：可以跨时间恢复的人类输入与高影响确认；
+- **GroupSession / Membership / GroupRun**：从工作网选取 Agent 后形成的协作关系；GroupRun 的状态由一对一 Run 统一承载；
+- **Workspace / Artifact**：分区的运行工作区与不可变正式交付快照；
+- **ExecutionEvent / Trace**：可靠业务时间线和诊断数据。
 
-## Agent 装配体验
+这些对象服务于 Agent，而不是替 Agent 决定业务步骤。
 
-Agent 配置页按以下区域组织：
+## 装配一个完整 Agent
 
-1. **基础信息**：名称、任务描述和状态。
-2. **模型与指令**：选择一个模型和 Sandbox，编辑唯一的 Agent Instructions。
-3. **能力装配**：自由选择 Tool 与 Skill。
-4. **上下文与记忆**：分别选择四类平台策略。
-5. **协作与访问**：绑定可发现 Agent，并决定是否启用 Group。
+Agent 的专业性来自整体装配：
 
-Chat 和 Plan 是所有可交互 Agent 的固有模式；Group 只有在 `group_enabled` 后才可选。Agent 页面不重复配置 Tool 实现、模型采样参数或策略内部阈值。
+1. **身份与职责**：代表谁、服务谁、擅长什么、不负责什么；
+2. **Instructions**：领域原则、工作方法、协作习惯和交付标准；
+3. **Model**：与任务复杂度、成本和延迟匹配的模型；
+4. **Tool 与 Skill**：真实行动能力和可复用专业方法；
+5. **Context 与 Memory**：当前信息、长期偏好和领域事实；
+6. **Sandbox 与业务连接**：Agent 能观察和改变的环境；
+7. **AgentCard**：向工作网公开的能力、边界、成本和可用性摘要。
 
-Agent 编辑采用草稿—发布模型。Chat 每个新 Run 使用最新已发布版本；Plan 和 Group 在用户确认图时固定参与 AgentVersion，执行期间不随管理面编辑改变。
+个人 Agent 的耐心、严谨、沟通风格和协作习惯主要写入 Instructions、Memory 或 Skill，并通过运行行为观察。平台可以提供可选标签，但不使用固定 Profile 枚举替 Agent 定义人格。
 
-## 三种执行模式
+Agent 使用草稿—发布模型。发布版本不可变，运行记录实际使用的版本；Builder 拥有 Agent 蓝图，不因此拥有使用者数据。
+
+Agent 平时不需要占用进程。收到用户请求、AgentInvocation 或 Group 消息后，平台为对应工作创建或恢复 WorkItem，再由 Runtime Worker 加载 AgentVersion、上下文和权限运行一个 Runner。Runner 终结不影响 Agent、Session、Membership 和历史继续存在。同一 AgentVersion 的并发 Runner 默认是同一 Agent 的多个执行实例，不是自动复制出的新 Agent。
+
+## 自然语言驱动的通用 Agent Loop
+
+```text
+用户提出目标
+    ↓
+Agent 读取当前上下文和有效能力
+    ↓
+判断是否需要澄清、规划、使用 Tool 或寻找 Agent
+    ↓
+执行行动并观察真实结果
+    ↓
+调整理解和 WorkingPlan
+    ↓
+继续行动、等待输入或自然交付
+```
+
+简单请求可以直接回答；复杂请求可以在普通 Chat 中自主产生计划并按计划执行。用户不需要切换模式才能获得模型的规划能力。
+
+## Chat、Plan、Group
+
+三个模式共用同一个 Agent Loop，区别只在交互、权限和协作策略。
 
 | 维度 | Chat | Plan | Group |
 | --- | --- | --- | --- |
-| 适用目标 | 即时和开放式对话 | 可展示、可恢复的长任务 | 多领域对等协作 |
-| 中心 | 当前 Agent | Plan Owner | 无固定 Supervisor |
-| 图节点 | 无正式图 | Work Item | Agent 参与实例 |
-| Agent 调用 | 中心 → 子 Agent | Owner → 已声明子 Agent | 图内任意节点互调 |
-| 用户沟通 | 当前 Agent | 仅 Owner | 群内任意 Agent |
-| 图确认 | 无 | 必须 | 必须 |
+| 核心体验 | 与一个 Agent 连续工作 | 实施前先调查和确认方案 | 多个 Agent 直接协作 |
+| 是否可以规划 | Agent 按需规划 | 必须先形成可见方案 | 每个成员都可规划 |
+| 实施权限 | 按当前授权直接行动 | 批准前只读，批准后执行 | 每个成员按自身权限行动 |
+| 协作关系 | 当前 Agent 可按需委派 | 当前 Agent 可研究和委派 | 成员对等通信与协作 |
+| 用户交互 | 当前 Agent | 当前 Agent | 可直接面向任一成员 |
 
 ### Chat
 
-当前 Agent 统一与用户沟通，可以通过 `invoke_agent` 调用直接绑定 Agent。子 Agent 不能继续调用其他 Agent，也不直接向用户澄清。
+Chat 是默认工作方式。Agent 可以直接回答，也可以自主拆解复杂任务、维护 WorkingPlan、使用 Tool、请求澄清或调用其他 Agent。协作结果回到当前 Agent，由它继续面向用户工作。
+
+Chat 不是“只能聊天且不能规划”的简化模式。
 
 ### Plan
 
-当前用户交互 Agent 成为 Plan Owner，生成 Work Item Graph。用户确认或修改后图完全冻结；Owner 采用严格星形拓扑调用计划中已经声明的子 Agent。
+Plan 是实施前检查点，而不是独立工作流引擎。进入 Plan 后，Agent 可以阅读、搜索、分析、向用户澄清并生成 WorkingPlan，但写文件、执行高影响命令和外部副作用保持禁止。
 
-执行结果导致计划失效时，旧 Plan 以已有结果结算，Owner 生成需要重新确认的后继 Plan，而不是修改运行中的图。详见 [Plan 模式](docs/modules/plan-mode.md)。
+用户可以修改或继续讨论方案。批准后原 Session 切换到可执行权限，Agent 基于当前方案继续工作，并可以随新信息动态修订计划。批准的是“允许开始实施”，不是把计划冻结成 DAG。
 
 ### Group
 
-入口 Agent 从当前 UserSession 提取待共享 Bootstrap Context，生成参与 Agent 图。用户确认后建立共享 GroupSession，参与者集合固定。
+Group 是工作网中多个完整 Agent 围绕当前目标形成的临时逻辑协作关系。成员不需要保持常驻进程；消息或调用到达时，平台按需运行相应 Agent。
 
-Group 中所有对话进入同一共享会话。每个 Agent 的默认可见上下文由 `group_id + agent_id` 确定；其他节点的共享记录不会自动注入，只能通过显式装配的查询 Tool 获取。Agent 之间的执行请求仍只能通过 `invoke_agent`。
+用户可以直接从工作网选成员；当前 Agent 也可以搜索候选并提议邀请。Group 不依赖产品/开发/测试之类的角色模板，也不预生成固定协作边。成员加入后保留自己的身份、Instructions、Memory、Tool 和专业判断，可以直接通信、认领工作、质疑、返工或向用户询问。
 
-Group 的唯一人类参与者是任务发起人。某个垂类 Agent 后期可以定向联系岗位工作人员、责任人或审批人，但这些人不会加入 Group，也不会自动看到群组上下文；回复只恢复请求 Agent 的工作。
+第一阶段为了可控 UAT，由用户明确选择产品、开发、测试三个 Agent，并固定本次 GroupRun 的成员快照；内部协作仍由 Agent 自主产生。长期可以按 Collaboration Policy 动态加入、退出和替换成员。
 
-群组可以包含多个 GroupRun。终态 GroupRun 不重新激活；用户在同一目标下追问时创建新的 GroupRun。详见 [Group 模式](docs/modules/group-mode.md)。
+每个 GroupRun 固定一名 Reporter，默认是本轮入口 Agent。它只在所有持久工作自然空闲后负责汇总，不获得额外权限或 Supervisor 地位；平台通过持久事件幂等唤醒，避免“大家都结束了但没人向用户交付”。
 
-## 可恢复执行体验
+## Plan 是通用工作状态
 
-Work Item 可以等待用户、Agent 或异步 Tool，而不占用长期进程。等待条件满足后，平台在同一个 Work Item 下创建新 Runner 继续。
+WorkingPlan 可以在三个模式中出现：
 
-所有 Tool 调用持久化为 ToolInvocation，并区分即时与持久化异步。平台只在同一 ToolInvocation、相同参数和幂等键内处理瞬时技术重试；Agent 只看到最终状态。
+- 普通 Chat 遇到复杂目标时自动出现；
+- Plan 模式中作为实施前方案；
+- Group 中每个成员可以维护自己的计划，Group 也可共享任务或里程碑。
 
-取消表示停止后续推进并尽力取消运行操作，不承诺回滚已产生的业务副作用。
+计划可以包含步骤、状态、依赖、风险和变更原因，但它只是高信号工作记忆和用户可见进度。平台不根据计划内容自动创建 Tool 调用或业务任务。
 
-节点成功、失败、超时、取消或放弃都属于明确结果。Run 是否完成与业务是否成功分开表达；部分节点失败后仍可汇总已有结果并以部分成功或失败完成，不会因为等待项永久卡住。
+## 工作网与 Group
 
-## 文件与执行环境
-
-Agent 显式选择平台 Sandbox Profile。第一阶段只有物理机目录隔离的 `local`，Session 创建后固定并共享一个 Workspace。Workspace 文件操作使用平台读写锁；无法预知写入范围的 `execute` 独占 Workspace。
-
-Skill 脚本当前默认可信，可以由显式装配 `execute` 的 Agent 在 Local Sandbox 中运行。Local Sandbox 不被宣传为不可信代码安全边界。
-
-正式交付文件登记为轻量 Artifact。文件仍保存在 Session Workspace，Artifact 只提供稳定 ID、来源、版本和下载引用。
-
-## 账号与外部访问
-
-平台以企业内唯一 `userId` 识别用户。Web、API、Channel 和 Agent 调用链共用同一身份；修改 `userId` 视为新人，不迁移或合并历史数据。
-
-同一 Agent 可以创建多把独立撤销和轮换的 API Key。API 使用持久异步 Run 协议，支持轮询、SSE、图确认、定向澄清、Tool Confirmation、取消和 Artifact 下载，不要求外部团队使用平台前端。
-
-## Channel
-
-平台账号可以开通飞书、QQ、微信等 Channel，并把第三方机器人绑定到入口 Agent。外部 conversation 首次消息创建 Session，之后持续复用绑定 Session。
-
-第一阶段核心闭环不以完整 Channel 插件生态为验收前提；已经接入 Channel 时，通知严格跟随 Session 来源：Channel 中产生的任务将完成、失败、澄清和确认通知投递回原 Channel conversation；Web 通过站内事件展示，API 通过查询或 SSE 获取。后期才提供账号级默认通知渠道或全渠道设置。
-
-## Tool Confirmation
-
-Platform Tool 列表页允许管理员启停 Tool，并在 `never | always` 之间调整静态 Confirmation Policy。Agent 只能选择 Tool，不能覆盖平台策略。需要确认时提供类似命令行执行确认的轻量交互：
+在同一 MyClaw 平台内，AgentVersion 发布后生成 AgentCard 安全投影并写入平台目录。工作网发现本质是受权限过滤的数据库查询，不需要为每个 Agent 建立独立网络服务：
 
 ```text
-Agent 准备执行某 Tool 与精确参数
-→ 用户确认或拒绝
-→ 确认后执行原 ToolInvocation
+AgentVersion → AgentCard → Enterprise Agent Network
+                              ↓
+                    搜索 / 推荐 / 直接选择
+                              ↓
+                    邀请并形成 Membership
+                              ↓
+                         GroupSession
 ```
 
-策略从 `never` 收紧为 `always` 时，尚未执行的调用必须等待确认；放宽策略不会自动批准既有等待。平台前端不是唯一入口，外部 API 也可以获取并响应 Confirmation。
+固定 Group 成员不是代码写死，也不是从模板实例化，而是某次 GroupRun 对真实网络 Agent 的可审计快照。
 
-## Group 页面与退出
+`group_enabled` 只表示 AgentVersion 可以成为 Group 候选。实际查询仍要过滤发布状态、租户与用户可见范围、协作策略、环境兼容性和可用性。发现只说明“谁可能适合”，不能自动产生权限；成员加入或调用时平台仍检查原始用户权限、Agent 装配、数据共享范围、预算和风险策略。
 
-Group 是当前 UserSession 中的子空间。用户可以随时返回入口 Agent 的普通 Chat，Group 在后台继续。
+未来跨组织或跨 MyClaw 实例时，由 Agent Gateway 增加外部 Endpoint、协议协商和联邦身份。产品层仍使用同一发现、Membership 和 AgentInvocation 语义，不把公网协议复杂度提前复制到平台内部。
 
-以下操作严格区分：
+## 自然停止和真实验证
 
-- **返回 Chat**：只切换消息作用域；
-- **取消当前 GroupRun**：停止该轮工作；
-- **关闭群组**：取消非终态工作并将 GroupSession 变为只读。
+Agent 不需要调用 `finalize_response`。当模型返回普通最终消息且没有 Tool Call 时，当前 Turn 自然结束：根 Agent 的消息交给用户，被调用 Agent 的消息返回调用方，Group 成员的消息进入相应会话。
 
-父 UserSession 只展示 Group 状态卡和结果摘要引用，不复制完整群聊。输入框必须明确当前消息发送到普通 Chat 还是某个 Group Agent。
+平台区分：
 
-## 权限边界
+- **Turn 已结束**：模型当前没有继续行动；
+- **Run 在等待**：仍等待 Tool、Agent、用户或批准；
+- **Run 已结束**：本次请求得到结果、失败、取消或被中断；
+- **结果已验证**：真实测试、Artifact 或业务状态满足可机器检查的条件；
+- **UAT 已通过**：外部验收用例和统计门禁满足。
 
-- 第一阶段平台角色为 `user / builder / admin`，Agent 范围为 `private / enterprise`。
-- Builder 拥有 Agent 蓝图，不拥有使用者的 Session、Memory、Artifact 或业务内容。
-- Runtime 不静默补齐未选择的 Tool。
-- Skill 不扩大 Tool、MCP 或 Agent 权限。
-- 会话和请求不能临时切换 Agent 模型。
-- 其他 Agent 不能读取本 Agent 的 Instructions、私有记忆或内部 Prompt。
-- Agent 间不存在隐藏执行通道，只有 `invoke_agent`。
-- Agent 调用代表原始执行主体，目标 Agent 带来领域能力但不带来身份提权。
-- 平台服务凭证不等于用户拥有全量业务数据权限。
+模型最终文本不能伪造测试、文件或副作用。平台可以基于权威 Invocation 和环境状态显示 `verified / unverified`，也可以对发布、高风险动作设置确定性 Gate；但不把独立 LLM Evaluator 强制塞进所有任务。
+
+## 可恢复的云端执行
+
+Session 和 WorkingPlan 可以长期存在。等待用户、审批、Agent 或异步 Tool 时，当前 Runner 结束；等待满足后，新 Runner 从 Checkpoint、消息和权威结果继续。
+
+页面关闭、网络断开和 Worker 重建不会丢失任务。技术重试复用同一 Invocation，不创造第二个业务动作。取消停止后续推进，但不承诺回滚已发生的外部副作用。
+
+## 文件、Tool 与环境
+
+Tool 在授权期间持续可见，不因成功一次被消费。是否重复执行由 Tool 语义、参数、目标资源、operation key 和当前业务意图决定。
+
+文件先存在于 Session Workspace 的当前 Agent 私有根或 Group shared 根；物理共享目录不代表所有成员可读。需要正式交付时，平台把源字节复制成不可变 Artifact 快照并记录来源、checksum、版本和下载信息。Local Sandbox 是第一阶段验证环境，不宣传为生产级不可信代码强隔离。
+
+## 用户如何驾驭 Agent
+
+用户可以：
+
+- 用自然语言补充目标、纠正理解和增加约束；
+- 查看或修改 WorkingPlan；
+- 在 Plan 模式批准或拒绝实施；
+- 批准精确 Tool 调用或高风险副作用；
+- 查看 Agent 正在使用的身份、版本、能力和环境；
+- 在 Group 中选择、邀请或直接联系任一成员；
+- 暂停、继续、取消或要求提前汇报；
+- 查看真实 Tool 结果、文件、测试、Artifact 和失败原因。
+
+用户不需要手工调度每个步骤，也不需要知道内部 Tool key。
+
+## 第一阶段产品验证
+
+第一阶段固定五个 UAT Agent 和“Sprint 容量风险计算器”场景：
+
+- 个人工作助手验证 Chat；
+- 项目经理验证显式 Plan 的“只读规划 → 用户批准 → 动态实施”；
+- 产品、开发、测试验证从工作网选取固定成员后的对等 Group 协作。
+
+验收重点是同一 Agent Loop、自然语言、稳定 Tool Calling、动态计划、持久等待、恢复、真实九例和 Artifact，而不是 Proposal JSON、冻结 DAG、Group 模板或 LLM 完成合同。
+
+详细范围见[第一阶段交付边界](docs/modules/phase-one-scope.md)，实现方案见[第一阶段 Agent-native 交付技术方案](docs/technical/phase-one-agent-native-delivery.md)。目标用户、替代方案、价值指标、成本和多 Agent 对照实验见[产品价值验证](docs/modules/product-validation.md)；当前仍是待验证假设，不宣称已证明商业价值。
+
+企业生产不是把第一阶段 Compose 直接换一个部署名称。正式产品 Profile 必须使用受验证的 OIDC/OBO 身份、强隔离 Sandbox、HA 数据与存储、明确 SLO/RPO/RTO 和绑定 release 的演练证据；具体落地合同见[企业生产参考架构](docs/technical/production-reference-architecture.md)与[生产就绪要求](docs/operations/production-readiness.md)。
+
+## 产品底线
+
+- 不用固定工作流代替 Agent 的理解和规划；
+- 不把 Chat、Plan、Group 实现成三套 Agent；
+- 不强制模型通过 `finalize_response` 或复杂最终 JSON 才能结束；
+- 不让模型定义自己必须调用过哪些 Tool；
+- 不因一次成功调用删除整个 Tool 能力；
+- 不把 WorkingPlan 当作平台可执行 DAG；
+- 不为 Group 强制角色模板、固定拓扑或永久 Supervisor；
+- 不把第一阶段固定成员写成终局产品限制；
+- 不共享 Agent 私有 Prompt、Memory、凭证和 Chain-of-Thought；
+- 不让文字声称代替真实 Tool、测试、Artifact 和业务状态。
 
 ## 文档导航
 
-- [企业智能体网络最终蓝图](docs/modules/enterprise-agent-network.md)
-- [第一阶段交付边界](docs/modules/phase-one-scope.md)
 - [设计哲学与产品原则](docs/DESIGN_PHILOSOPHY.md)
+- [Enterprise Agent Network](docs/modules/enterprise-agent-network.md)
+- [第一阶段交付边界](docs/modules/phase-one-scope.md)
 - [Agent 装配](docs/modules/agent-assembly.md)
-- [Platform Tool](docs/modules/tool-system.md)
-- [Skill](docs/modules/skill-system.md)
-- [Model](docs/modules/model-system.md)
-- [上下文与记忆](docs/modules/context-memory.md)
-- [身份与 Agent API](docs/modules/identity-api.md)
-- [Sandbox 与 Artifact](docs/modules/sandbox-artifact.md)
-- [Channel 与通知](docs/modules/channel-system.md)
 - [Agent 协作](docs/modules/agent-collaboration.md)
 - [Plan 模式](docs/modules/plan-mode.md)
 - [Group 模式](docs/modules/group-mode.md)
 - [Runtime 执行](docs/modules/runtime-execution.md)
-- [Runtime 调度与数据库并发](docs/modules/runtime-scheduling.md)
-- [执行事件与可观测性](docs/modules/observability.md)
 - [技术设计总览](TECH.md)
+- [企业生产参考架构](docs/technical/production-reference-architecture.md)
+- [OpenAPI 3.1](docs/technical/openapi-v1.yaml)

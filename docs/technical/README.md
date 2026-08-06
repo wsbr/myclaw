@@ -1,49 +1,138 @@
 # 第一阶段技术设计索引
 
-本目录是 MyClaw 第一阶段实现级技术设计。产品语义仍以 [设计文档索引](../README.md) 所列产品模块为准；本目录只定义如何实现，不改变产品行为。
+## 当前权威基线
 
-## 技术模块
+[第一阶段 Agent-native 交付技术方案](phase-one-agent-native-delivery.md)是第一阶段架构、Provider 协议、迁移、测试和 UAT 门禁的总纲。详细实施权威拆分为[数据库契约](database-schema.md)、[状态机](state-machines.md)、[API 与 SSE](api-sse.md)和机器可读 [OpenAPI 3.1](openapi-v1.yaml)。[企业生产参考架构](production-reference-architecture.md)把同一领域语义映射为 HA、OIDC/OBO、强 Sandbox、分布式存储、发布和灾备合同。
 
-| 文档 | 唯一负责定义 |
-| --- | --- |
-| [物理架构](architecture.md) | 进程边界、单机拓扑、存储职责、Outbox Topic 与 MQ 演进接口 |
-| [数据库 Schema](database-schema.md) | 表、字段、主外键、约束、索引、版本与保留 |
-| [状态机](state-machines.md) | 领域对象的合法迁移、事件、并发与迟到结果 |
-| [事务、一致性与并发](consistency-concurrency.md) | 原子写入、幂等、租约、fencing、sequence、Workspace 锁和竞态 |
-| [执行事件、平台审计与可见性](events-audit-visibility.md) | 两类事件边界、事件 dedupe、visibility、统一投影、脱敏与审计访问 |
-| [Runtime 详细流程](runtime-flows.md) | Chat、Plan、Group、Prompt、模型循环、等待、恢复与结算 |
-| [三模式 Agent Harness 稳定性优化方案](agent-harness-stability-plan.md) | UAT 系统性失效分析、Harness V2、模型调用稳定性、三模式迁移与发布门禁 |
-| [Context、History 与 Memory](context-history-memory.md) | 首批 Policy 接口、默认参数、摘要、投影、记忆和 Trace |
-| [Platform Tool 与 Skill](tools-skills.md) | Registry、Invocation、内置 Tool 契约、Skill 包和共享同步 |
-| [API 与 SSE](api-sse.md) | HTTP 资源、错误、幂等、分页、权限、冲突和断线续读 |
-| [前端详细设计](frontend.md) | 页面、客户端状态、交互契约、后台执行和现有页面处置 |
-| [代码审计与迁移实施计划](audit-migration-plan.md) | 当前实现差距、处置矩阵、九阶段顺序、验收和测试 |
-| [第一阶段交付状态与验收证据](phase-one-delivery-status.md) | 实现缺口闭环、七个验收场景、最终测试证据、风险与剩余缺口 |
+[Agent-native Harness 调研与架构判断](agent-native-harness-research.md)记录 Codex、Claude Code、Agent Harness 研究和本项目 UAT 证据，用于解释为什么采用统一 Agent Loop、Plan Permission Mode、工作网 Membership 和自然 Turn Stop。
 
-生产发布、备份恢复、Retention 与事故处置见[第一阶段生产运行手册](../operations/phase-one-runbook.md)。
+产品语义仍以[设计文档索引](../README.md)中的权威模块为准。若综合技术方案与产品模块冲突，必须先修订并明确决策，不能由实现自行选择。
 
-## 已确定技术选型
+## 架构基线
 
-- MySQL 8 为第一阶段权威数据库，运行事务隔离基线为 `READ COMMITTED`；使用 SQLAlchemy 2 Async 与 Alembic。
-- 所有公开 ID 由应用生成 UUIDv7，数据库类型统一 `CHAR(36)`；时间统一 UTC、`DATETIME(6)`。
-- 第一阶段采用 Database Outbox，不使用 Celery/Redis 作为可靠事实源；Redis 是实时 Token Bridge 的必需但非权威依赖，故障只降级流式体验。
-- SSE 从 `execution_event` 续读；流式模型 Token 经 Redis Pub/Sub 实时转发、不逐 Token 入账，也不重放。
-- Session Workspace、Skill 包源和共享 Skill Workspace 使用服务端文件系统；路径只以逻辑相对路径和 URI 进入数据库。
-- JSON 只保存不可自然关系化的参数、Schema、快照和结果信封。Agent 装配、图、参与者、依赖、Invocation 与状态均关系化。
-- 已确认当前不存在必须保留的生产数据；实施阶段创建全新第一阶段 Schema 基线并重建开发/测试数据库。本设计任务不执行任何数据库操作。
+```text
+Agent = stable identity + governance boundary
+AgentVersion = Model + Instructions + Tools + exact SkillVersions + Policies + Environment
+WorkItem = durable work state
+Runner = ephemeral execution segment on a Runtime Worker
 
-## 跨模块不变量
+Agent Loop = Observe → Decide → Act → Observe → Adapt → Respond/Wait
 
-- Session 执行状态、对应 `ExecutionEvent` 和后续 `OutboxCommand` 同事务提交；无 Session 的管理面变化改写 `PlatformAuditEvent`，不虚构 Session。
-- Chat 新 Run 解析最新已发布 AgentVersion；Plan/Group 在图确认或新 GroupRun 开始时固定参与版本。
-- Skill 在每个新 Runner 启动时解析最新已发布版本并固定 checksum；SessionSandbox 在 Session 创建时固定。
-- Model、Platform Tool 的当前停用状态与 Tool 当前 Confirmation Policy 在真正使用前重新校验。
-- Runtime 不补 Tool、不换模型、不修改冻结图、不静默 fallback。
-- 同一 WorkItem 最多一个 active Runner；Runner 结束后不可复活。
-- Run 是 Chat/Plan/GroupRun 唯一执行 lifecycle/outcome 权威；Plan 只另存定义状态，GroupRun 不复制状态。
+Chat  = Loop + direct execution policy
+Plan  = Loop + plan_readonly / approval policy
+Group = Loop + Agent Network membership / messaging policy
+```
 
-## 已确认 Group 后续执行规则
+同一 MyClaw 控制域内，Agent Directory 由数据库 AgentCard 投影提供，AgentInvocation 通过 WorkItem、Outbox 和 Runtime Worker 按需运行目标配置；不存在每个 Agent 一个常驻服务。跨控制域的 Endpoint 和协议只进入未来 Agent Gateway。
 
-用户已于 2026-07-31 确认：固定 GroupSession 的节点集合继续保留，不因 Agent 停用而替换、删除或静默忽略节点。每次新建 GroupRun 时重新检查固定节点：当前可用节点固定其最新已发布 AgentVersion；停用节点写 `participation_status=unavailable,agent_version_id=NULL`，且不得接收新的 WorkItem、定向消息或 AgentInvocation。非 owner 节点不可用不阻塞其他可用节点继续。
+第一阶段明确不再使用：
 
-本轮 owner 必须可用。未显式指定 owner 时使用入口节点；入口节点不可用则拒绝创建，并要求用户选择另一个可用固定节点或新建 Group。Agent 后续重新启用只影响再下一次创建的 GroupRun，不改变已创建 GroupRun 的冻结映射。该产品行为已经封版，第一阶段技术设计没有剩余产品确认阻塞项。
+- 模型可调用 `finalize_response`；
+- 模型声明 `required_tool_keys`；
+- Tool 类型在一次成功后被移除；
+- 普通最终消息的复杂结构化 Completion Envelope；
+- Plan 确认后冻结 DAG；
+- Plan 固定参与者集合；
+- Group 模板、角色槽位和强制 Formation JSON；
+- 永久 Supervisor；
+- 通用 `GoalEnvelope → OutcomeClaim → Evaluator` 结算链；
+- 从 Tool 类型或调用次数推断业务成功。
+
+## 文档分层
+
+| 层级 | 文档 | 地位 |
+| --- | --- | --- |
+| 产品最高原则 | [设计哲学](../DESIGN_PHILOSOPHY.md) | 所有设计的最高约束 |
+| 产品模块 | `../modules/*.md` | 相应产品语义权威 |
+| 目标技术总览 | [根技术设计总览](../../TECH.md) | 架构摘要和导航 |
+| 实施总纲 | [第一阶段交付技术方案](phase-one-agent-native-delivery.md) | 架构、迁移、测试与 UAT 总纲 |
+| 数据权威 | [数据库契约](database-schema.md) | 表、字段、约束和索引 |
+| 状态权威 | [状态机](state-machines.md) | 迁移、推进者、终态和恢复 |
+| 接口语义 | [API 与 SSE](api-sse.md) | 认证、资源、错误、幂等和事件续读 |
+| 接口机器契约 | [OpenAPI 3.1](openapi-v1.yaml) | 路径、方法、Header、Schema 和枚举 |
+| 生产部署权威 | [企业生产参考架构](production-reference-architecture.md) | HA、身份、Sandbox、存储、扩缩、发布和故障语义 |
+| 生产准入 | [生产就绪要求](../operations/production-readiness.md) | SLO、RPO/RTO、安全、演练与证据 Gate |
+| 生产运维 | [企业生产运行手册](../operations/production-runbook.md) | 发布、回滚、failover、DR、安全事件与演练步骤 |
+| 设计依据 | [Harness 调研](agent-native-harness-research.md) | 外部研究、UAT事实和取舍 |
+| 历史 V1 实现 | 下列仍带历史标识的 architecture/runtime/frontend 文档 | 当前代码证据与可靠工程迁移参考，非目标设计 |
+| 历史补丁 | [旧 Harness 稳定性方案](agent-harness-stability-plan.md) | 2026-08-03 历史分析，非目标设计 |
+| 交付证据 | `../acceptance/*`、[旧交付状态](phase-one-delivery-status.md) | 历史实现与UAT证据 |
+
+## 实施契约覆盖矩阵
+
+| 领域 | 产品语义 | 数据/状态 | 外部合同 | 生产实现/验证 |
+| --- | --- | --- | --- | --- |
+| 身份与账号 | [Identity](../modules/identity-api.md) | account/external identity/composite FK | auth/account paths + identity errors | OIDC/OBO、预配、break-glass、负向测试 |
+| Agent/Registry | [Assembly](../modules/agent-assembly.md)、[Model](../modules/model-system.md)、[Skill](../modules/skill-system.md) | logical definition + immutable versions + publish transaction | Agent/Draft/Version/Option schemas | Registry reconcile、Conformance、供应链 Gate |
+| Chat/Plan/Group | [Plan](../modules/plan-mode.md)、[Group](../modules/group-mode.md) | sole Run lifecycle + WorkingPlan + Group snapshot/summary epoch | Session/Run/Plan/Group paths | 多副本 Worker、恢复、自然结束与并发测试 |
+| Agent Network | [Network](../modules/enterprise-agent-network.md)、[Collaboration](../modules/agent-collaboration.md) | AgentCard/Membership/AgentInvocation | discovery/invocation schemas | 本地 Directory；联邦不属于 v1 生产范围 |
+| Tool/Approval | [Tool](../modules/tool-system.md) | ToolInvocation/Attempt/SessionGrant/Approval | RequiredAction/Approval errors | operation key、outcome_unknown、实时治理 |
+| Workspace/Artifact | [Sandbox](../modules/sandbox-artifact.md) | SessionSandbox/RunnerSandbox/lock/Artifact | list/download/checksum | Kata、跨区 Workspace、对象不可变与对账 |
+| Context/Memory | [Context/Memory](../modules/context-memory.md) | PolicyVersion/MemoryVersion/HistorySummary | 用户设置/管理投影按模块实现 | account scope、visibility、Retention |
+| Channel（可选） | [Channel](../modules/channel-system.md) | verified binding/DeliveryAttempt | Provider adapter 内部入口 | 插件签名、重放、原渠道恢复 |
+| 调度/事件 | [Scheduling](../modules/runtime-scheduling.md)、[Observability](../modules/observability.md) | Outbox/lease/fencing/Event sequence | REST/SSE cursor | HA Worker、Redis 降级、SLI/告警 |
+| 生产运行 | — | release manifest/evidence references | readiness metadata | [参考架构](production-reference-architecture.md)、[准入](../operations/production-readiness.md)、[Runbook](../operations/production-runbook.md) |
+
+矩阵中的每一行都必须有实现 Owner 和测试证据；若新增产品能力无法落入某行，先补产品/数据/状态/API/生产五个维度再编码。`public federation`、通用 MCP、动态组织审批和自动 Agent 进化不属于 `enterprise_production_v1`，不得因本矩阵未展开而被误认为当前缺口。
+
+## 历史 V1 文档如何使用
+
+V1 文档只可复用已经经过测试、并被当前综合方案明确保留的工程设计：
+
+- MySQL 领域事实；
+- Database Outbox；
+- Runner lease、heartbeat、execution epoch 和 fencing；
+- ToolInvocation / ToolAttempt 副作用边界；
+- Session Workspace、Artifact 和 checksum；
+- SSE 可靠事件续读；
+- Redis provisional token bridge；
+- OTel Runner Trace 和 Span Link；
+- UTC 时间、UUIDv7、CAS 和唯一约束。
+
+V1 文档中与以下主题有关的内容均被新方案覆盖：Completion Contract、Effect Ledger、冻结 Plan DAG、Group Formation、固定 Group 图、structured conversation completion 和 Tool 类型消费。
+
+| 文档 | 可复用重点 | 按新方案改造重点 |
+| --- | --- | --- |
+| [物理架构](architecture.md) | Compose、进程、MySQL/Redis/FS、Outbox | 三模式共用 AgentLoopCoordinator，无 Evaluator Worker |
+| [一致性](consistency-concurrency.md) | 事务、幂等、lease、fencing、Workspace lock | Tool持续可见、Run级预算、Approval恢复 |
+| [事件与可见性](events-audit-visibility.md) | Event/Audit分层和脱敏 | mode/plan/membership/message/verification事件 |
+| [Runtime流程](runtime-flows.md) | Worker切点、Checkpoint、Tool恢复 | 普通message+native tool loop |
+| [Context/History/Memory](context-history-memory.md) | Policy接口、历史和Memory边界 | WorkingPlan、Group按需共享、Compaction |
+| [Tool与Skill](tools-skills.md) | Registry、Invocation、Skill包 | 无finalize、具体Invocation幂等 |
+| [前端](frontend.md) | 后台运行、断线恢复、Required Action | Plan只读批准、工作网选人、真实Interaction Graph |
+| [审计迁移计划](audit-migration-plan.md) | 测试和旧代码定位方法 | 实施顺序以新综合方案为准 |
+
+仍属于 V1 的文档开头必须保持“历史实现参考，非目标设计”标识；它们不能覆盖当前产品模块、数据库、状态机、API 或综合方案。
+
+## 部署 Profile
+
+### `uat_single_node`
+
+- MySQL 8、SQLAlchemy 2 Async、Alembic，隔离级别基线 `READ COMMITTED`；
+- 应用生成 UUIDv7，公开 ID `CHAR(36)`，UTC `DATETIME(6)`；
+- Database Outbox 是可靠调度入口；
+- Redis 只做非权威 Token bridge 和短 TTL 设施；
+- Session Workspace、Skill 和 Artifact 本体使用受控文件系统；
+- SSE 从已提交 ExecutionEvent 续读，模型 delta 不可靠重放；
+- 同一 WorkItem 最多一个 active Runner，使用 lease 和 fencing；
+- OTel Trace 不作为业务状态或恢复事实；
+- 第一阶段没有生产数据迁移负担，但旧 UAT 数据必须只读保留。
+
+### `enterprise_production_v1`
+
+- 三可用区 Kubernetes，无状态服务多副本；
+- MySQL 8 单写者 + 跨区 failover replica + PITR；
+- `identity_profile=enterprise_oidc_v1`，内部统一 account FK；
+- Kata/microVM Sandbox 专用节点池、多可用区 Workspace、版本化对象 Artifact；
+- Database Outbox 继续是可靠命令源，Redis/MQ/Trace 均非业务权威；
+- 具体副本、网络、发布、故障处理和数值目标见[生产参考架构](production-reference-architecture.md)与[生产就绪要求](../operations/production-readiness.md)。
+
+## 维护规则
+
+- 目标变化先更新产品模块，再更新综合技术方案；
+- 新抽象必须证明无法由现有 Agent Loop 原语解决；
+- 历史文档冲突时，以产品模块和当前综合方案为准并在相应 Stage 删除冲突代码；
+- UAT 报告记录事实，不反向定义产品；
+- 完成度只来自 clean SHA、部署、测试和可访问证据；
+- 每个实施 PR 必须检查是否重新引入 Workflow、模板或通用完成合同；
+- 未提交工作区不称为 release baseline；只有 clean SHA + tag/reference + 绑定证据才可进入 UAT/生产评审。

@@ -1,289 +1,451 @@
-# 第一阶段数据库 Schema
+# 数据库契约
 
-本文是第一阶段物理关系模型的唯一实现级定义。表名、字段名使用 `snake_case`；产品对象语义以 [权威模块](../README.md) 为准。
+本文是 Agent-native v2 关系模型、主外键、唯一约束和关键索引的技术权威，同时覆盖 `uat_single_node` 与 `enterprise_production_v1`；Profile 特有字段会明确标注。产品语义以[权威模块](../README.md)为准，状态值和迁移以[状态机](state-machines.md)为准。历史 V1 表只能作为迁移输入，不能覆盖本契约。
 
 ## 1. 全局约定
 
-- MySQL 8、InnoDB、`utf8mb4_0900_ai_ci`；生产连接显式设为 `READ COMMITTED`。
-- 主键均为应用生成 UUIDv7 `CHAR(36)`；外部 `user_id` 为企业 canonical userId，`VARCHAR(191)`，不得与账号主键混用。
-- 时间为 UTC `DATETIME(6)`；所有表含 `created_at`，可变表含 `updated_at`。
-- 可并发聚合含 `version BIGINT NOT NULL DEFAULT 1`，条件更新成功后 `version = version + 1`。
-- 状态列使用受代码枚举和数据库 `CHECK` 双重约束的 `VARCHAR`，避免 MySQL ENUM 迁移锁定。
-- 秘密只存 `secret_hash` 或 Secret Manager 的 `credential_ref`；不存明文。
-- JSON 仅用于 JSON Schema、不可变参数/结果信封、执行快照、扩展元数据；核心关系必须使用关联表。
-- 用户业务表冗余 `user_id` 用于所有权过滤。关键父表增加 `(id,user_id)` 唯一键，子表使用复合 FK 保证父子 `user_id` 一致；无法使用复合 FK 的多父关系由锁定事务校验并在一致性扫描中复核。
+- MySQL 8 / InnoDB / `READ COMMITTED`；所有领域写入使用显式事务；
+- 应用生成 UUIDv7，公开主键使用 `CHAR(36)`；时间为 UTC `DATETIME(6)`；
+- 可变聚合均有 `version BIGINT NOT NULL`，命令使用 CAS；
+- 金额、Token、次数和预算使用明确的整数/定点单位，不使用浮点；
+- JSON 只保存有界快照或 Provider 原始安全元数据，不保存需要约束、连接或调度的状态；
+- 外键默认 `RESTRICT`。执行、审计、版本和 Artifact 不做级联删除；
+- 每张 tenant-owned 表物理上必须携带非空 `tenant_id`；所有 tenant-owned 主实体除 `id PK` 外还建立 `UNIQUE(tenant_id,id)`，跨表关系一律用 `(tenant_id,*_id)` 复合 FK，服务查询不得只按裸资源 ID；
+- `execution_event`、`platform_audit_event` 和 Attempt 事实只追加；终态事实不可覆盖或复活；
+- secret 只保存 hash 或外部 secret reference，不保存明文。
 
-## 2. 账号、角色与 API Key
+“不可变版本”精确指版本的行为内容、依赖关系、版本号和 `content_hash` 不可改写，不表示安全治理无法停止新的准入。只有本文/状态机明确列出的 `publication_status|status` 迁移可以由 Registry Service 通过 CAS 修改，同事务写 PlatformAuditEvent；状态列、治理 `version` 和状态时间不参与 `content_hash`。任何依赖要采用新内容都必须创建新版本，不能借状态迁移换包。
 
-### `user_identity` 与 `platform_account`
+下文省略所有表共有的 `created_at`、`updated_at`；只追加表没有 `updated_at`。为避免在每个子表重复同一句，字段清单也省略由本节统一要求的 tenant-owned 子表 `tenant_id`、`UNIQUE(tenant_id,id)` 和复合 FK 前缀；这是物理 DDL 必填项，不是可选的逻辑投影。
 
-`user_identity` 保存不会因账号改绑而消失的数据身份：`user_id VARCHAR(191) PRIMARY KEY`、`status active/orphaned`、`created_at`。Session、Memory、Plan、Group、Execution 与 Artifact 的 `user_id` FK 指向该表。改绑时旧 identity 置 orphaned（仍保留数据），创建或取得新 identity，再改变账号指针；不迁移业务行。
+### Tenant 隔离的物理范围
 
-| 字段 | 类型/约束 | 职责 |
-| --- | --- | --- |
-| `id` | PK | 平台账号外壳 ID |
-| `user_id` | `VARCHAR(191) NOT NULL UNIQUE FK user_identity` | 账号当前 canonical userId 指针 |
-| `email`、`display_name` | nullable/非空展示字段 | 登录资料，不作为数据归属键 |
-| `password_hash` | nullable | 本地登录；联登账号可为空 |
-| `status` | `active/discarded/disabled` | `discarded` 用于 userId 改绑后的旧外壳 |
-| `auth_revision` | BIGINT | 密码、角色或身份变更后令旧 Token 失效 |
-| `version`、审计时间 | | 乐观并发与审计 |
+控制域全局 Registry 白名单只有 `model/model_version`、`platform_tool`、`policy_definition/policy_version`、`sandbox_profile/sandbox_profile_version`、`channel_plugin` 及只针对这些全局对象的 `conformance_run`；它们由部署级平台治理，不能保存用户正文、用户委托 Token 或 Tenant 数据，只能保存指向企业 Secret Manager 的平台 Credential reference。`tenant` 自身是租户根。除此之外，本契约中的 Agent、Skill、身份、Session、Run、Invocation、Group、Memory、Workspace、Artifact、Channel binding/delivery、Event/Audit/Seal 及全部关系/Attempt 表都是 tenant-owned。
 
-索引：`UNIQUE(user_id)`、`UNIQUE(email)`（非空部署规则）、`INDEX(status, created_at)`。`user_id` 更新通过身份服务专用事务完成，不迁移旧数据；若目标已属于既有账号则拒绝复制并要求登录既有账号。
+tenant-owned join/child 表即使字段清单只写 `run_id FK` 或 `agent_version_id FK`，物理列也必须包含 `tenant_id`，并建立 `(tenant_id,run_id)`、`(tenant_id,agent_version_id)` 等复合 FK；多父表因此必须同时属于同一 Tenant。tenant-owned 表引用白名单全局 Registry 时只需全局 ID FK，反向不得让全局表持有某 Tenant 的正文或 Credential。`outbox_command.tenant_id` 是唯一 nullable 例外：只有签名平台级 maintenance 命令可为空；任何用户/业务 aggregate 的命令必须非空并通过其 `(tenant_id,aggregate_id)` 约束或类型化写服务校验。多态 `aggregate/cause/resource/scope` 字段不能替代这些真实 FK；每个允许类型都要有类型化 nullable FK + CHECK，或在数据库 Trigger 中拒绝跨 Tenant 值。
+
+### 物理类型与迁移规则
+
+- UUID 字段统一 `CHAR(36) CHARACTER SET ascii COLLATE ascii_bin`；hash/checksum 使用 `CHAR(64) ascii_bin`；operation/dedupe key 使用 `VARCHAR(191) ascii_bin`；
+- 状态值在应用层使用字符串枚举，数据库使用 `VARCHAR(32)` + `CHECK`，不使用 MySQL `ENUM`，便于 expand/contract；
+- `version`、revision、epoch、sequence、attempt、generation 使用 `BIGINT UNSIGNED`，初值分别按本文规定，不允许负数；
+- 时间统一 `DATETIME(6)`，由数据库 UTC session 写入；lease/expiry 比较使用数据库时间；
+- boolean 使用 `BOOLEAN NOT NULL`；正文使用 `MEDIUMTEXT`；短标签/名称最大 191 字符；reason/error code 最大 191 字符；
+- JSON 列使用 MySQL `JSON`，写入前按各对象 Schema 校验，单字段默认上限 256 KiB；Prompt/Message 正文和文件本体不得塞入 JSON；
+- 所有 tenant-owned 表至少有以 `tenant_id` 开头的授权/列表索引；ORM repository 方法签名必须先接收 TenantAccountScope，再接收资源 ID；
+- Alembic 只允许 expand → backfill → contract。新增非空列先 nullable/backfill/验证再收紧；删除/改名至少跨一个兼容版本；生产禁止自动 downgrade destructive DDL。
+
+### 身份字段唯一解释
+
+以下命名在全部新表、迁移、ORM 和查询中强制统一：
+
+- `asserted_user_id`：只表示入口调用方提交的外部字符串，允许出现在 `AuthContext`、认证日志和审计快照中，不作为领域外键；
+- `canonical_user_id`：`platform_account` 内经规范化的外部业务标识，只用于 `(tenant_id, canonical_user_id)` 解析账号；
+- `account_id` / `*_account_id`：平台内部稳定 UUID，是 Session、Action、Capability、Artifact 和授权关系唯一允许使用的账号外键；
+- 同时保存 `tenant_id + *_account_id` 的表必须建立复合外键，禁止分别校验两个互不关联的单列外键；
+- API 边界先在固定 tenant 内把 `asserted_user_id` 或受验证的 OIDC identity 解析为 `platform_account.id`，领域命令从此只携带 `account_id`。Agent、Tool 和下游 AgentInvocation 不得重新解析或改写身份。
+
+因此，`raw_user_id_v1` 只是 UAT 入口认证 Profile，不会让裸字符串成为内部关系键；生产切换到 OIDC/OBO 时，领域表和授权查询不需要更换主外键。
+
+## 2. 身份与客户端
+
+### `tenant`
+
+`id PK`、`key UNIQUE`、`name`、`status active|suspended`、`next_audit_sequence BIGINT NOT NULL DEFAULT 1`、`version`。
+
+第一阶段单租户也必须写真实 `tenant_id`，禁止用 nullable tenant 形成两套查询路径。
+
+### `platform_account`
+
+`id PK`、`tenant_id FK`、`canonical_user_id VARCHAR(191) NOT NULL`、`display_name`、`account_type user|service`、`status active|suspended|closed`、`created_via web|enterprise_login|agent_api|directory_sync|admin`、`authorization_revision BIGINT NOT NULL DEFAULT 1`、`version`；唯一 `(tenant_id,canonical_user_id)` 和 `(tenant_id,id)`。角色、账号状态或其他授权输入变化必须在同一事务递增 authorization_revision；纯展示名修改只递增 version。
+
+第一阶段 `canonical_user_id` 来自企业调用方提供的字符串，不要求 UUID。`tenant_id` 取部署配置中的固定值，不能由 Agent API 请求覆盖；这样保留未来多租户键，但不声称已经验证外部 issuer/subject。
+
+### `external_identity`
+
+`id PK`、`tenant_id FK`、`account_id`、`issuer VARCHAR(512) ascii_bin`、`subject VARCHAR(255) utf8mb4_bin`、`principal_type user|service`、`status active|revoked`、`active_subject_key GENERATED NULL|subject`、`claims_revision`、`bound_by_account_id`、`last_seen_at`、`revoked_at NULL`、`version`；复合 FK `(tenant_id,account_id)` 和 `(tenant_id,bound_by_account_id)` 指向 `platform_account(tenant_id,id)`，唯一 `(tenant_id,issuer,active_subject_key)`。该 nullable active key 保证同一 subject 最多一个 active 绑定，同时允许保留多条 revoked 历史。issuer 保存管理员验证后配置的 OIDC issuer 原值，Token `iss` 必须与它精确匹配，请求期不删尾斜线、换大小写或重写端口；subject 是 IdP 的不透明、大小写敏感字符串，不做业务语义改写。
+
+`external_identity` 是 `enterprise_oidc_v1` 下 `oidc_user|oidc_obo|service_principal` 认证来源的生产身份映射。`issuer + subject` 是受验证的外部身份键；展示名、email 和任意 Header 都不能替代它。UAT 的 `raw_user_id_v1` 不创建伪造的 issuer/subject。
+
+### `tenant_identity_provider`、`workload_client_policy`
+
+- `tenant_identity_provider`：`id PK`、`tenant_id FK`、`issuer`、`jwks_uri`、`audiences_json`、`allowed_algorithms_json`、`required_claims_json`、`clock_skew_seconds`、`jwks_cache_ttl_seconds`、`status active|inactive`、`config_revision`、`content_hash`、`version`；唯一 `(tenant_id,issuer)`；
+- `workload_client_policy`：`id PK`、`tenant_id FK`、`identity_provider_id FK`、`client_subject`、`active_client_key GENERATED NULL|client_subject`、`agent_scope all|selected`、`status active|revoked`、`credential_revision`、`content_hash`、`version`；唯一 `(tenant_id,identity_provider_id,active_client_key)`，允许保留 revoked 历史；
+- `workload_client_auth_source`：`workload_client_policy_id FK`、`authentication_source oidc_obo|service_principal`；PK 两列；
+- `workload_client_scope`：`workload_client_policy_id FK`、`scope`；PK 两列；
+- `workload_client_agent`：`workload_client_policy_id FK`、`agent_id FK`；PK 两列，只有 agent_scope=selected 时允许存在且至少一行。
+
+两表由签名部署配置/GitOps reconcile，应用管理 API 不直接修改。`enterprise_oidc_v1` readiness 必须确认至少一个 active IdP、HTTPS issuer/JWKS、非空 audience/algorithm allowlist，以及 OBO/service principal 对应的 active workload policy。配置变化递增 revision 并写 PlatformAuditEvent。
+
+### `oidc_login_transaction`、`browser_auth_session`
+
+- `oidc_login_transaction`：`id PK`、`tenant_id FK`、`identity_provider_id FK`、`state_hash CHAR(64) UNIQUE`、`nonce_hash CHAR(64)`、`pkce_verifier_ciphertext`、`return_to_path`、`status pending|consumed|expired`、`expires_at`、`consumed_at NULL`、`version`。PKCE verifier 使用 KMS envelope encryption；最长 10 分钟，consume 使用 status/version CAS，terminal 后不复用，Maintenance 到期标 expired 并按短期认证数据 Retention 清理；
+- `browser_auth_session`：`id PK`、`tenant_id FK`、`account_id`、`external_identity_id FK`、`session_token_hash CHAR(64) UNIQUE`、`csrf_token_hash CHAR(64)`、`oidc_session_id_hash NULL`、`authentication_source oidc_user`、`credential_revision BIGINT NOT NULL DEFAULT 1`、`account_authorization_revision`、`status active|revoked|expired`、`authenticated_at`、`last_seen_at`、`idle_expires_at`、`absolute_expires_at`、`revoked_at NULL`、`version`；复合 FK `(tenant_id,account_id)`。只保存 opaque token/CSRF/IdP session id 的 hash，不保存浏览器可用的 access/refresh token。Session token/CSRF 轮换创建新行或递增 credential_revision 并原子换 hash；lookup 后仍需校验 Account、ExternalIdentity、credential revision 和 account authorization revision；权限/身份撤销时批量 CAS revoke。
+
+登录 callback 必须在一个事务中 CAS consume LoginTransaction、创建新 BrowserAuthSession、撤销同一浏览器的 pre-auth token 并写 PlatformAuditEvent；失败全部回滚。Cookie 值只在响应中返回一次，数据库和日志不保存明文。`enterprise_production_v1` 的空闲/绝对 TTL 固定为 30 分钟/8 小时，更严格的客户策略可以缩短但不能延长。
 
 ### `platform_account_role`
 
-`account_id FK`、`role_key`（`user/builder/admin`）、`granted_by_account_id FK`、`granted_at`，PK `(account_id, role_key)`。创建账号必须插入 `user`；`builder/admin` 是附加角色，授权判断取并集。
+`tenant_id FK`、`account_id`、`role user|builder|admin`、`granted_by_account_id`、`granted_at`；PK `(tenant_id,account_id,role)`，复合 FK `(tenant_id,account_id)` 和 `(tenant_id,granted_by_account_id)` 均指向 `platform_account(tenant_id,id)`。
+
+CHECK/Trigger 要求只有 `account_type=user` 可以存在 role 行，且 user 账号始终保留基础 `user` role（closed 账号仅保留历史，授权仍一律拒绝）；builder/admin 是附加角色。`account_type=service` 不得持有 user/builder/admin role，只通过受信 workload policy 与 scopes 授权。角色变更递增 PlatformAccount.authorization_revision，并撤销/轮换现有 BrowserAuthSession。
 
 ### `agent_api_key`
 
-`id PK`、`agent_id FK`、`name`、`caller_label`、`prefix UNIQUE`、`secret_hash UNIQUE`、`status active/revoked/expired`、`created_by_account_id FK`、`expires_at`、`last_used_at`、`rotated_from_id FK NULL`、`version`。索引 `(agent_id,status)`、`(expires_at,status)`。Key 删除是撤销，不物理删除；审计至少保留 365 天。
+`id PK`、`tenant_id FK`、`agent_id FK`、`name`、`caller_label`、`prefix UNIQUE`、`secret_hash`、`status active|revoked|expired`、`credential_revision`、`expires_at`、`last_used_at`、`created_by_account_id`、`version`。
 
-### `idempotency_record`
+第一阶段 Key 认证调用方并绑定入口 Agent；`X-MyClaw-User-Id` 不写入 Key，而是在每次请求中形成 `asserted_user_id`。有效 Key 可以断言固定 tenant 内任意合法 userId，这是显式接受的 UAT 风险。
 
-`id PK`、`principal_type`、`principal_id`（Web 用 userId，API 用 api_key_id）、`operation`、`idempotency_key`、`request_hash`、`resource_type`、`resource_id`、`http_status`、`response_snapshot JSON`、`expires_at`。唯一 `(principal_type,principal_id,operation,idempotency_key)`；同 Key 不同 hash 返回 `409 idempotency_mismatch`。默认保留 7 天，创建 Run/Invocation 的资源引用不得随记录清理。
+### `http_idempotency_record`
 
-## 3. Agent 与装配关系
+`id PK`、`tenant_id FK`、`account_id`、`authentication_source web_session|agent_api_key|oidc_user|oidc_obo|service_principal`、`authenticated_client_type web_app|agent_api_key|oidc_client|service_principal`、`authenticated_client_key VARCHAR(255) ascii_bin`、`method`、`canonical_path`、`idempotency_key`、`request_hash`、`status in_progress|completed|failed`、`response_status NULL`、`response_resource_type NULL`、`response_resource_id NULL`、`response_hash NULL`、`expires_at`、`version`；复合 FK `(tenant_id,account_id)`，唯一 `(tenant_id,account_id,authenticated_client_type,authenticated_client_key,method,canonical_path,idempotency_key)`。`authenticated_client_key` 不是 Secret：UAT Key 使用平台 key id，Web 使用部署应用 client id，OIDC/OBO/service principal 使用受信 issuer+client_id 的稳定 HMAC/内部 id；不使用易变的单次 Cookie session id。
+
+首次命令在领域事务中创建 in_progress 记录并写业务事实；提交响应前更新 completed 和稳定资源引用。同 key/hash 重放从权威资源重建等价响应，不重复执行命令；同 key 不同 hash 返回 409。一次性 Secret 不进入该表；API Key 创建响应丢失时必须 rotate，重放只返回 key metadata 和 `secret_retrievable=false`。
+
+## 3. Registry、Agent 与不可变版本
 
 ### `agent`
 
-`id PK`、`owner_account_id FK`、`visibility private/enterprise`、`status draft/published/inactive`、`draft_version_id FK NULL`、`current_published_version_id FK NULL`、`next_version_no INT NOT NULL DEFAULT 1`、`version`、审计时间。`draft_version_id` 只允许在创建事务回填前短暂为 NULL，任何已提交 Agent 必须有 draft；MySQL 无 deferred FK，此跨行不变量由唯一的创建服务事务保证并由一致性扫描复核。稳定身份只承载所有权、访问范围和生命周期；名称等可执行发现信息来自相应 AgentVersion。索引 `(owner_account_id,status)`、`(visibility,status)`。
+`id PK`、`tenant_id FK`、`owner_account_id`、`visibility private|enterprise`、`status draft|published|inactive`、`current_published_version_id FK NULL`、`draft_version_id FK`、`next_version_no`、`version`；复合 FK `(tenant_id,owner_account_id) → platform_account(tenant_id,id)`。
 
 ### `agent_version`
 
-`id PK`、`agent_id FK`、`version_no INT NULL`、`publication_status draft/published/deprecated/draft_test_snapshot`、`draft_revision BIGINT NULL`、`derived_from_version_id FK NULL`、`name VARCHAR(200)`、`description TEXT`、`instructions MEDIUMTEXT`、`model_id FK`、`sandbox_profile_id FK`、四个 `policy_definition_id FK`、`group_enabled BOOL`、`created_by_account_id FK`、`published_at`、`content_hash CHAR(64)`、`immutable_at NULL`、审计时间。Published/deprecated 必须有 `version_no`，draft 与 test snapshot 必须为 NULL；唯一 `(agent_id,version_no)`。生成列 `draft_agent_id = CASE WHEN publication_status='draft' THEN agent_id ELSE NULL END` 加 `UNIQUE(draft_agent_id)`，保证一个 Agent 最多一个可编辑 draft。`draft_test_snapshot` 是受控测试 Run 创建时复制的不可变快照，不可发布、绑定或作为正式调用目标。
+`id PK`、`agent_id FK`、`publication_status draft|published|deprecated|draft_test_snapshot`、`version_no NULL`、`draft_revision NULL`、`draft_agent_key GENERATED NULL|agent_id`、`derived_from_version_id FK NULL`、`name`、`description`、`instructions MEDIUMTEXT`、`model_id FK`、`model_version_id FK NULL`、`context_policy_id FK`、`context_policy_version_id FK NULL`、`history_policy_id FK`、`history_policy_version_id FK NULL`、`memory_write_policy_id FK`、`memory_write_policy_version_id FK NULL`、`memory_recall_policy_id FK`、`memory_recall_policy_version_id FK NULL`、`sandbox_profile_id FK`、`sandbox_profile_version_id FK NULL`、`group_enabled`、`discovery_config_json`、`collaboration_config_json`、`content_hash CHAR(64)`、`published_at`、`published_by_account_id FK`、`version`。
 
-关系表：
+约束：唯一 `(agent_id,version_no)`（published/deprecated）；`draft_agent_key=agent_id` 当且仅当 status=draft，唯一 `(draft_agent_key)` 保证每个 Agent 只有一个 draft；draft 保存逻辑选择并允许 snapshot FK 为空，published/deprecated/draft_test_snapshot 必须同时保存全部精确 version FK；后面三类的行为字段和依赖关系在数据库 Trigger/权限层拒绝 UPDATE/DELETE，仅 published 允许按状态机 CAS 迁移为 deprecated。发布使用 copy-on-publish，不把 draft 行原地改为 published。
 
-- `agent_version_tool(agent_version_id, platform_tool_id, sort_order)`，PK 前两列，`UNIQUE(agent_version_id,sort_order)`。
-- `agent_version_skill(agent_version_id, skill_id, sort_order)`，同上，绑定逻辑 Skill。
-- `agent_version_binding(agent_version_id, bound_agent_id, sort_order)`，禁止自绑定，PK 前两列。
+### `agent_version_tool`
 
-Agent 创建事务插入 Agent 和一行 `draft` AgentVersion，draft 的 `version_no=NULL,draft_revision=1`，再回填 `draft_version_id`；这是唯一允许的 Agent/AgentVersion 循环创建流程。发布时锁 Agent 与当前 draft，完整校验后把 draft 标量和关系行**复制**为一行新的 `published` AgentVersion，分配 `next_version_no`，更新 `current_published_version_id/next_version_no`；原 draft 行不转态、不换 ID，继续作为内容相同的下一工作草稿，只更新 `derived_from_version_id` 和递增 `draft_revision`。因此事务中从不出现第二个 draft，也不覆盖历史版本。首次发布把 Agent `draft→published`；inactive Agent 发布新版仍保持 inactive，重新启用必须单独命令。
+`agent_version_id FK`、`platform_tool_id FK`、`tool_registration_hash CHAR(64)`、`sort_order`；PK `(agent_version_id,platform_tool_id)`。Tool 平台连接配置、启停、确认策略和风险版本不复制到此表，它们是执行前重读的实时治理事实。
 
-Published、deprecated 与 draft_test_snapshot 的内容不可变性由 `immutable_at` sealing 保护。复制事务先插入目标版本（immutable_at=NULL）、复制关系、计算 content_hash，最后执行 seal 更新设置 immutable_at/published_at；`BEFORE UPDATE/DELETE` trigger 对已 sealed 行只允许 `publication_status: published→deprecated` 这一治理元数据迁移，拒绝任何装配字段、hash、version_no 或删除变更，关系表 trigger 在父版本 sealed 后拒绝 INSERT/UPDATE/DELETE。任何未 sealed 的非 draft 行都不能被执行选择，且只存在于未提交发布事务；服务层仍先校验并返回领域错误，trigger 是最终防线。发布失败整事务回滚，Agent 指针、next_version_no、draft_revision 和复制行均不变化。Draft Test 在创建 Run 的事务中以同样流程复制并 seal `draft_test_snapshot`，WorkItem 固定该快照；测试快照在关联 Run 终态 30 天且无其他引用后可清理。
+### `agent_version_skill`
 
-## 4. Registry
+`agent_version_id FK`、`skill_version_id FK`、`checksum CHAR(64)`、`sort_order`；PK `(agent_version_id,skill_version_id)`，并唯一 `(agent_version_id,sort_order)`。
 
-### `model`
+发布事务从 Draft 的逻辑 Skill 选择解析精确 SkillVersion 后复制此表。同一 published AgentVersion 不得因 `skill.current_version_id` 变化而改变行为。
 
-`id PK`、`key UNIQUE`、`provider`、`model_name`、`endpoint`、`credential_ref`、`default_parameters JSON`、`parameter_version INT`、`capabilities JSON`、`enabled BOOL`、`config_version BIGINT`、`created_by_account_id FK`、审计时间。索引 `(provider,enabled)`。参数 JSON 只含 Provider 参数；Agent 不覆盖。
+### `agent_card`
+
+`id PK`、`tenant_id FK`、`agent_id FK`、`agent_version_id FK UNIQUE`、`visibility private|enterprise`、`name`、`description`、`identity_kind`、`domain_tags_json`、`supported_outcomes_json`、`accepted_request_summary`、`capabilities_summary_json`、`collaboration_summary_json`、`cost_class`、`latency_class`、`availability available|unavailable`、`group_enabled`、`declaration_json`、`attestation_json`、`content_hash CHAR(64)`、`published_at`。只为 published/deprecated 版本创建，不保存 Instructions、Credential、私有 Memory 或 Prompt；`declaration_json` 只含 Builder 自述字段，`attestation_json` 只含平台签发证据引用。
+
+### `model`、`model_version`
+
+- `model`：`id PK`、`key UNIQUE`、`name`、`current_version_id FK NULL`、`status active|inactive`、`next_version_no`、`version`；
+- `model_version`：`id PK`、`model_id FK`、`version_no`、`provider`、`model_name`、`endpoint`、`credential_ref`、`default_parameters_json`、`capabilities_json`、`content_hash`、`published_at`、`published_by_account_id FK`，只追加；唯一 `(model_id,version_no)` 和 `(model_id,content_hash)`。
+
+Credential 轮换更新 Secret Manager 中同一 reference 的版本，不修改 ModelVersion；任何 endpoint、model name、参数、能力或 Adapter 协议变化都发布新 ModelVersion。只有存在当前必需 suite 的 passed ConformanceRun 的版本可进入 AgentVersion 快照。
+
+### `conformance_run`
+
+`id PK`、`subject_type model_version|platform_tool|channel_plugin|sandbox_profile_version`、`model_version_id FK NULL`、`platform_tool_id FK NULL`、`channel_plugin_id FK NULL`、`sandbox_profile_version_id FK NULL`、`subject_key GENERATED`、`suite_version`、`idempotency_key`、`request_hash`、`status queued|running|passed|failed`、`started_at NULL`、`ended_at NULL`、`result_summary_json NULL`、`evidence_artifact_id FK NULL`、`content_hash NULL`、`version`。CHECK 要求四个 subject FK 恰好一个非空且与 `subject_type` 一致；`subject_key` 由该非空 UUID 生成。唯一 `(subject_type,subject_key,suite_version,idempotency_key)`，索引 `(subject_type,subject_key,suite_version,status,ended_at)`。OpenAPI 的 `subject_id` 是四个物理 FK 投影出的通用 wire 字段，不对应无外键的数据库列。
+
+queued/running 通过 CAS 推进，terminal 后由 Trigger 拒绝修改/删除。新的测试创建新 ConformanceRun；不覆盖旧结果。Registry/Agent publish 只接受平台配置指定 suite_version 的最新 terminal passed 结果。
 
 ### `platform_tool`
 
-`id PK`、`tool_key UNIQUE`、`display_name`、`description`、`input_schema JSON`、`output_schema JSON`、`implementation_ref`、`implementation_version`、`execution_mode inline/durable_async`、`enabled BOOL`、`confirmation_policy never/always`、`platform_config JSON`、`config_version BIGINT`、审计时间。代码注册字段的 hash 存 `registration_hash`；管理面只能改展示字段、enabled、policy 与实现声明为可编辑的平台配置。索引 `(enabled,tool_key)`。
+`id PK`、`key UNIQUE`、`name`、`description`、`implementation_ref`、`input_schema_json`、`output_schema_json`、`execution_mode inline|durable_async`、`side_effect none|idempotent|non_idempotent`、`supports_cancel`、`supports_status_lookup`、`registration_hash`、`enabled`、`confirmation_policy never|per_call|session_grant`、`platform_config_ref`、`config_revision`、`risk_version`、`version`。
 
-### `skill` 与 `skill_version`
+Registry reconcile 以代码注册为来源校验 key/implementation/schema/registration_hash；管理员只能改名称、说明、enabled、confirmation_policy 和 platform_config_ref。AgentVersionTool 固定 registration_hash；若当前 Tool 的 registration_hash 不兼容，新的 Runner 明确失败 `tool_registration_changed`，不得静默使用新 Schema。enabled、confirmation_policy、config/risk revision 是刻意的实时治理事实，执行前重读，不冻结进 AgentVersion。
 
-`skill`：`id PK`、`logical_name UNIQUE`、`name`、`description`、`owner_account_id FK`、`status active/inactive`、`current_published_version_id FK NULL`、`version`。
+### `skill`、`skill_version`
 
-`skill_version`：`id PK`、`skill_id FK`、`version_no INT`、`status uploaded/validating/published/rejected/deprecated`、`package_uri`、`checksum CHAR(64)`、`manifest_name`、`manifest_description`、`validation_error TEXT NULL`、`created_by_account_id FK`、`published_at`。唯一 `(skill_id,version_no)`、`(skill_id,checksum)`；相同包可由不同逻辑 Skill 独立发布，但同一逻辑 Skill 不重复建版本。索引 `(skill_id,status,version_no DESC)`。
+- `skill`：`id PK`、`tenant_id FK`、`owner_account_id`、`name`、`description`、`current_version_id FK NULL`、`status active|inactive`、`next_version_no`、`version`；复合 FK `(tenant_id,owner_account_id)`；
+- `skill_version`：`id PK`、`skill_id FK`、`version_no`、`package_uri`、`checksum`、`manifest_json`、`status uploaded|published|deprecated|quarantined`、`content_hash`、`published_at`、`published_by_account_id FK`、`version`；内容只追加，唯一 `(skill_id,version_no)` 和 `(skill_id,checksum)`。
 
-### `policy_definition`
+AgentVersionSkill 只能引用 published/deprecated SkillVersion；quarantined 阻止新的装配和执行，但不删除历史包与引用。
 
-`id PK`、`policy_key UNIQUE`、`policy_type context/history/memory_write/memory_recall`、`name`、`description`、`implementation_ref`、`implementation_version`、`default_parameters JSON`、`parameter_version INT`、`enabled BOOL`。索引 `(policy_type,enabled)`。第一阶段 Registry seed 只包含权威列出的九个 key。
+生产另有：
 
-### `sandbox_profile`
+- `skill_assessment`：`id PK`、`skill_version_id FK`、`assessment_revision`、`source_class`、`scanner_versions_json`、`status trusted|unknown|quarantined`、`findings_summary_json`、`content_hash`、`created_at`，只追加；唯一 `(skill_version_id,assessment_revision)`；
+- `skill_assessment_decision`：`id PK`、`skill_assessment_id FK UNIQUE`、`decision approved|rejected`、`decided_by_account_id FK`、`reason`、`created_at`，只追加。
 
-`id PK`、`profile_key UNIQUE`（首批 `local`）、`type`、`description`、`implementation_ref`、`config JSON`、`config_version`、`enabled`。宿主路径不进入 AgentVersion。
+生产执行取最新适用 assessment：trusted 可直接准入，unknown 必须存在 approved decision，quarantined 或 rejected 一律拒绝新发布/执行。重新扫描创建新 assessment revision，旧 decision 不自动覆盖新 revision。
 
-## 5. Session、Message、Run
+### `policy_definition`、`policy_version`
+
+- `policy_definition`：`id PK`、`key UNIQUE`、`policy_type context|history|memory_write|memory_recall`、`name`、`description`、`current_version_id FK NULL`、`status active|inactive`、`next_version_no`、`version`；
+- `policy_version`：`id PK`、`policy_definition_id FK`、`version_no`、`implementation_ref`、`parameters_json`、`content_hash`、`status published|deprecated`、`published_at`、`version`；内容只追加，唯一 `(policy_definition_id,version_no)` 和 `(policy_definition_id,content_hash)`。
+
+AgentVersion 的四个逻辑 Policy FK 必须分别匹配 policy_type，发布时解析并固定四个精确 PolicyVersion。显式 `none` 也是已发布 PolicyVersion，字段不得为空。
+
+### `sandbox_profile`、`sandbox_profile_version`
+
+- `sandbox_profile`：`id PK`、`key UNIQUE`、`name`、`sandbox_type local|remote_isolated`、`current_version_id FK NULL`、`status active|inactive`、`next_version_no`、`version`；
+- `sandbox_profile_version`：`id PK`、`sandbox_profile_id FK`、`version_no`、`provider_ref`、`runtime_class`、`image_digest`、`workspace_protocol_version`、`artifact_protocol_version`、`resource_policy_json`、`egress_policy_json`、`mount_policy_json`、`security_level dev_directory|microvm`、`content_hash`、`status published|deprecated`、`published_at`、`version`；内容只追加，唯一 `(sandbox_profile_id,version_no)` 和 `(sandbox_profile_id,content_hash)`。
+
+`enterprise_production_v1` 只允许 `security_level=microvm`。SessionSandbox 固定 `sandbox_profile_version_id`；Profile 后续发布不热迁移已有 Session。GroupRun 成员可以使用不同 Provider，但必须通过相同 Workspace/Artifact protocol version 与当前 Session mount policy 的兼容检查，否则创建时返回 `sandbox_profile_incompatible`。
+
+以上 Registry 版本表的内容列由 Trigger 拒绝 UPDATE，整行拒绝 DELETE；只允许状态机明确的准入状态 CAS 迁移。依赖版本（Skill/Policy/Sandbox）的 `deprecated` 阻止新 AgentVersion 选择/发布，但已固定该精确依赖的 AgentVersion 仍可启动和恢复 Runner；AgentVersion 自身的 `deprecated` 阻止它被新 Run/Invocation 解析，但已创建工作可按原快照恢复。SkillVersion 的 `quarantined` 及逻辑 Registry 对象的 `inactive` 是强准入禁止，阻止尚未开始的新 Run/Runner，但不修改已提交历史事实。这些状态均不改写 AgentVersion 历史关系或任何版本内容。
+
+## 4. Session、消息与唯一 Run
 
 ### `user_session`
 
-`id PK`、`user_id FK user_identity`、`entry_agent_id FK`、`status active/closed/archived`、`title`、`origin_type web/api/channel`、`origin_api_key_id FK NULL`、`origin_channel_account_id FK NULL`、`origin_external_conversation_id NULL`、`next_event_sequence BIGINT DEFAULT 1`、`version`、`closed_at`。`session_sandbox` 通过唯一 `session_id` 反向一对一关联，避免循环外键。索引 `(user_id,status,updated_at DESC)`、`(entry_agent_id,created_at)`；Channel 绑定另设唯一表，不依赖 nullable unique。
+`id PK`、`tenant_id FK`、`account_id`、`entry_agent_id FK`、`origin web|api|channel`、`origin_channel_account_id FK NULL`、`origin_external_conversation_id NULL`、`status active|closed|archived`、`permission_mode direct|plan_readonly`、`permission_revision`、`session_sandbox_id FK NULL`、`next_event_sequence BIGINT NOT NULL DEFAULT 1`、`version`；复合 FK `(tenant_id,account_id) → platform_account(tenant_id,id)`，CHECK 要求 origin=channel 时两个 origin 字段非空、其他来源为空。ChannelConversationBinding 在同一事务随后引用 Session，避免循环外键。
+
+索引：`(tenant_id,account_id,updated_at,id)`、`(entry_agent_id,status)`。
 
 ### `message`
 
-`id PK`、`session_id FK`、`user_id`、`scope_type chat/group`、`group_session_id FK NULL`、`group_run_id FK NULL`、`sender_type user/agent/system`、`sender_user_id NULL`、`sender_agent_id FK NULL`、`recipient_type session/group_node/user`、`recipient_group_node_id FK NULL`、`role user/assistant/system/tool_notice`、`content MEDIUMTEXT`、`content_format text/markdown`、`status committed/superseded/redacted`、`run_id FK NULL`、`work_item_id FK NULL`、`clarification_id FK NULL`、`reply_to_message_id FK NULL`、`caused_by_event_id FK NULL`。索引 `(session_id,created_at,id)`、`(group_session_id,recipient_group_node_id,created_at)`、`(run_id,created_at)`。附件用 `message_artifact(message_id,artifact_id,visibility)`。
+`id PK`、`session_id FK`、`run_id FK NULL`、`group_session_id FK NULL`、`group_run_id FK NULL`、`sender_kind user|agent|runtime`、`sender_agent_id FK NULL`、`recipient_agent_id FK NULL`、`visibility private|direct|group|user`、`content MEDIUMTEXT`、`content_hash`、`channel_account_id FK NULL`、`provider_message_id NULL`、`sequence`、`created_by_runner_id FK NULL`。
+
+约束：唯一 `(session_id,sequence)` 和 nullable `(channel_account_id,provider_message_id)`；sender/recipient 与 visibility 的组合由 CHECK 和领域校验约束。Runtime 状态摘要必须标记 sender_kind=runtime，不伪装成 Agent 发言。
 
 ### `run`
 
-`id PK`、`session_id FK`、`user_id`、`mode chat/plan/group`、`execution_kind normal/draft_test/proposal_generation`、`lifecycle running/waiting/settling/completed/cancelled`、`wait_reason NULL/waiting_user/waiting_agent/waiting_tool/waiting_resource/graph_confirmation`、`outcome NULL/succeeded/partially_succeeded/failed`、`entry_agent_id FK`、`source_run_id FK NULL`、`result_summary TEXT NULL`、`error_code NULL`、`cancellation_requested_at NULL`、`version`、`started_at`、`finished_at`。CHECK 要求 lifecycle=waiting 时 wait_reason 非空，其他 lifecycle 除过渡事务外提交时必须为 NULL；唯一 `(id,user_id)` 支持子表复合 FK；索引 `(session_id,created_at)`、`(user_id,lifecycle,updated_at)`。`draft_test` 只固定 immutable draft_test_snapshot；`proposal_generation` 用于 Plan/Group 的模型生成阶段，不与正式执行混为一个 WorkItem。
+`id PK`、`session_id FK`、`mode chat|plan|group`、`status active|waiting_user|waiting_approval|waiting_tool|waiting_agent|completed|cancelled|failed`、`wait_reason NULL|waiting_user|waiting_approval|waiting_tool|waiting_agent`、`terminal_reason NULL`、`root_work_item_id FK NULL`、`permission_mode_snapshot direct|plan_readonly`、`hard_budget_json`、`cancellation_requested_at NULL`、`completed_at NULL`、`version`。CHECK 要求非 waiting 状态的 wait_reason 为空、终态 completed_at 非空、非终态 completed_at 为空。
 
-## 6. WorkItem 与 Runner
+`run.status` 是所有模式的唯一 lifecycle/terminal 权威；不另存 outcome 镜像。成功、部分完成和业务失败由 `terminal_reason + verified/accepted 投影 + 最终消息` 表达，状态枚举见状态机。
+
+索引：`(session_id,created_at,id)`、`(status,updated_at,id)`。
+
+## 5. WorkingPlan 与人类动作
+
+### `working_plan`、`plan_update`
+
+- `working_plan`：`id PK`、`session_id FK`、`run_id FK`、`owner_agent_id FK`、`summary`、`revision`、`status active|superseded|closed`、`active_owner_key GENERATED NULL|owner_agent_id`、`version`；唯一 `(run_id,active_owner_key)` 保证每个 Agent 在一个 Run 中只有一个 active head；
+- `plan_update`：`id PK`、`working_plan_id FK`、`revision`、`items_json`、`explanation`、`updated_by_runner_id FK`、`content_hash`；唯一 `(working_plan_id,revision)`，只追加。
+
+Plan 模式不创建冻结 DAG 或 PlanExecution lifecycle。`permission_mode=plan_readonly` 是 Session/Run 的机器权限事实；用户批准记录在 Approval 中。
+
+### `clarification`、`approval`
+
+- `clarification`：`id PK`、`tenant_id FK`、`run_id FK`、`work_item_id FK`、`clarification_type general|reporter_selection`、`target_account_id`、`question`、`allowed_answer_refs_json NULL`、`idempotency_key`、`request_hash`、`status open|answered|cancelled`、`answer_message_id FK NULL`、`version`；复合 FK `(tenant_id,target_account_id) → platform_account(tenant_id,id)`，唯一 `(work_item_id,idempotency_key)`；
+- `approval`：`id PK`、`tenant_id FK`、`run_id FK`、`work_item_id FK`、`approval_type plan_implementation|tool|membership|session_grant`、`target_account_id`、`subject_ref_type`、`subject_ref_id`、`subject_hash`、`idempotency_key`、`request_hash`、`status pending|approved|rejected|cancelled`、`decision_message_id FK NULL`、`version`；复合 FK `(tenant_id,target_account_id) → platform_account(tenant_id,id)`，唯一 `(approval_type,subject_ref_type,subject_ref_id,subject_hash)` 和 `(work_item_id,idempotency_key)`。
+
+相同 idempotency key/request hash 返回既有动作；同 key 不同 hash 冲突。结算使用 `id + expected version + current status` CAS，因此同一个 open/pending 动作只能结算一次。
+
+## 6. WorkItem、Runner 与模型回合
 
 ### `work_item`
 
-`id PK`、`run_id FK`、`session_id FK`、`user_id`、`mode`、`owner_agent_id FK`、`agent_version_id FK`、`parent_work_item_id FK NULL`、`plan_node_id FK NULL`、`group_formation_proposal_id FK NULL`、`group_formation_work_item_id FK NULL`、`group_run_id FK NULL`、`group_node_id FK NULL`、`goal TEXT`、`status queued/running/waiting_user/waiting_agent/waiting_tool/waiting_resource/succeeded/failed/timed_out/cancelled/abandoned/blocked`、`active_runner_id FK NULL`、`execution_epoch BIGINT`、`attempt_no INT`、`result_summary TEXT`、`result_data JSON`、`error_code`、`error_detail TEXT`、`retryable BOOL`、`version`、时间。使用 `(run_id,user_id)` 复合 FK 指向 Run；Group 模式行使用 `(group_run_id,group_node_id)` 复合 FK 指向 `group_run_agent_version`，Chat/Plan 两列都为 NULL；索引 `(run_id,status)`、`(group_formation_proposal_id,status)`、`(group_run_id,group_node_id,status)`、`(status,updated_at)`。
+`id PK`、`run_id FK`、`agent_id FK`、`agent_version_id FK`、`purpose root|delegation|group_message|group_summary`、`parent_work_item_id FK NULL`、`status queued|running|waiting_user|waiting_approval|waiting_tool|waiting_agent|waiting_resource|succeeded|failed|cancelled|timed_out|blocked`、`wait_reason NULL|waiting_user|waiting_approval|waiting_tool|waiting_agent|waiting_resource`、`active_runner_id FK NULL`、`execution_epoch BIGINT`、`resume_cursor_json`、`result_message_id FK NULL`、`version`。CHECK 要求 waiting 状态/原因一一对应，终态没有 active_runner_id。
 
-MySQL 不支持通用 partial unique，唯一 active Runner 由锁定 WorkItem 后更新 `active_runner_id` 保证；Runner 另有唯一 `(work_item_id,execution_epoch)`。
+约束：一个 WorkItem 只有一个 `active_runner_id`；恢复递增 execution_epoch 并创建新 Runner，不复活旧 Runner。
 
 ### `runner`
 
-`id PK`、`work_item_id FK`、`run_id FK`、`session_id FK`、`agent_id FK`、`agent_version_id FK`、`execution_epoch`、`status queued/running/succeeded/failed/cancelled/lost`、`lease_owner NULL`、`lease_token CHAR(36) NULL`、`lease_expires_at NULL`、`heartbeat_at NULL`、`principal_snapshot JSON`、`assembly_snapshot JSON`、`prompt_manifest JSON`、`input_snapshot JSON`、`result_message_id FK NULL`、`error_code/detail`、`version`、时间。唯一 `(work_item_id,execution_epoch)`；索引 `(status,lease_expires_at)`、`(session_id,created_at)`。
+`id PK`、`work_item_id FK`、`execution_epoch`、`status queued|running|succeeded|failed|cancelled|lost`、`lease_owner NULL`、`lease_token NULL`、`lease_expires_at NULL`、`heartbeat_at NULL`、`capability_snapshot_id FK NULL`、`started_at NULL`、`ended_at NULL`、`failure_code NULL`、`version`。CHECK 要求 running 时 lease/started_at 非空，终态 ended_at 非空且 lease 字段清空。
 
-`runner_skill_snapshot(runner_id,skill_id,skill_version_id,checksum,path_uri,sort_order)`、`runner_tool_snapshot(runner_id,platform_tool_id,implementation_version,config_version,sort_order)` 与 `runner_policy_snapshot(runner_id,policy_definition_id,parameter_version,policy_type)` 关系化保存解释所需版本；完整 Prompt 文本不进入这些关系表。
+唯一 `(work_item_id,execution_epoch)`；索引 `(status,lease_expires_at)`。所有 Runner 写入必须带 `runner_id + execution_epoch + lease_token` fencing 条件。
 
-## 7. Invocation、等待与确认
+### `capability_snapshot`
 
-### `tool_invocation`
+`id PK`、`runner_id FK UNIQUE`、`tenant_id FK`、`account_id`、`authentication_source web_session|agent_api_key|oidc_user|oidc_obo|service_principal`、`api_key_id FK NULL`、`external_identity_id FK NULL`、`asserted_user_id_snapshot NULL`、`actor_agent_id FK`、`agent_version_id FK`、`permission_revision`、`credential_revision`、`account_authorization_revision`、`assembled_json`、`effective_json`、`denied_json`、`budget_json`、`content_hash`；复合 FK `(tenant_id,account_id) → platform_account(tenant_id,id)`。
 
-`id PK`、`runner_id/work_item_id/run_id/session_id FK`、`platform_tool_id FK`、`tool_key`、`execution_mode`、`status created/waiting_confirmation/waiting_resource/queued/running/succeeded/failed/rejected/cancel_requested/cancelled/outcome_unknown`、`arguments JSON`、`arguments_hash`、`business_idempotency_key`、`principal_hash`、`result_data JSON`、`error_code/detail`、`attempt_count`、`version`、时间。唯一 `(work_item_id,business_idempotency_key)`；索引 `(status,updated_at)`、`(platform_tool_id,status)`。Confirmation 通过 `tool_confirmation.tool_invocation_id UNIQUE` 反向一对一查询；WorkspaceLockRequest 通过 `tool_invocation_id` 反向一对多查询，避免循环 FK并允许异步 Tool 分阶段重新取锁。
+Agent API 来源的 `asserted_user_id_snapshot` 是调用方断言，不代表平台验证了终端用户本人。Snapshot 的授权主体始终是 `account_id`，并保留 `api_key_id` 或 `external_identity_id`，便于区分真实 caller、认证方式与 represented account。
 
-### `tool_attempt`
+### `agent_turn`、`provider_attempt`
 
-`id PK`、`tool_invocation_id FK`、`attempt_no`、`status queued/running/succeeded/failed/timed_out/cancelled/outcome_unknown`、`worker_id`、`lease_token`、`provider_request_id NULL`、`request_snapshot JSON`、`response_snapshot JSON`、`error_class/code/detail`、`retryable`、时间。唯一 `(tool_invocation_id,attempt_no)`、`UNIQUE(tool_invocation_id,provider_request_id)`（非空时生效）。
+- `agent_turn`：`id PK`、`runner_id FK`、`turn_no`、`input_manifest_json`、`provider_stop_reason NULL`、`usage_json`、`status started|waiting_actions|completed|failed`、`final_message_id FK NULL`；唯一 `(runner_id,turn_no)`；
+- `provider_attempt`：`id PK`、`agent_turn_id FK`、`attempt_no`、`provider_request_id NULL`、`request_hash`、`continuation_ref NULL`、`status queued|running|succeeded|failed|timed_out|outcome_unknown`、`error_code NULL`、`usage_json`；唯一 `(agent_turn_id,attempt_no)`。
 
-### `agent_invocation`
-
-`id PK`、`caller_work_item_id FK`、`caller_runner_id FK`、`target_work_item_id FK UNIQUE NULL`、`target_agent_id FK`、`target_agent_version_id FK`、`mode`、`request_text`、`context_snapshot JSON`、`status created/queued/running/succeeded/failed/cancelled/timed_out/rejected`、`batch_key NULL`、`result_summary/data`、`error_code/detail`、`idempotency_key`、`version`、时间。唯一 `(caller_work_item_id,idempotency_key)`；索引 `(caller_work_item_id,batch_key,status)`、`(target_work_item_id)`。
-
-### `clarification`
-
-`id PK`、`work_item_id/run_id/session_id FK`、`group_session_id/group_node_id NULL`、`asked_by_agent_id FK`、`target_user_id`、`question TEXT`、`status open/answered/cancelled`、`answer_message_id FK NULL`、`answer_text TEXT NULL`、`answered_by_user_id NULL`、`idempotency_key`、`version`、时间。唯一 `(work_item_id,idempotency_key)`；索引 `(target_user_id,status,created_at)`。
-
-### `tool_confirmation`
-
-`id PK`、`tool_invocation_id FK UNIQUE`、`user_id`、`tool_key`、`arguments_hash`、`principal_hash`、`status pending/approved/rejected/cancelled`、`decision_by_user_id NULL`、`decision_reason NULL`、`policy_version`、`version`、`decided_at`、时间。既有 `pending` 不因策略放宽自动改变。
-
-## 8. Plan 图
-
-### `plan_execution`
-
-`id PK`、`run_id FK UNIQUE`、`session_id/user_id`、`owner_agent_id FK`、`owner_agent_version_id FK NULL`、`predecessor_plan_id FK NULL`、`goal TEXT`、`deliverable TEXT`、`definition_status draft/awaiting_confirmation/frozen/cancelled`、`graph_revision INT DEFAULT 1`、`confirmed_at`、`frozen_hash NULL`、`version`、时间。Plan 不重复保存执行 lifecycle/outcome；公开 lifecycle/outcome 始终读取关联 Run。Draft 编辑递增 graph_revision；确认后 `definition_status=frozen`，定义列与图行不可更新。
-
-### `plan_work_item_node`
-
-`id PK`、`plan_execution_id FK`、`node_key`、`title`、`goal TEXT`、`acceptance_criteria TEXT`、`assigned_agent_id FK`、`agent_version_id FK NULL`、`work_item_id FK UNIQUE NULL`、`sort_order`、`definition_version`。唯一 `(plan_execution_id,node_key)`、`(plan_execution_id,sort_order)`。
-
-### `plan_work_item_dependency`
-
-`plan_execution_id FK`、`predecessor_node_id FK`、`successor_node_id FK`、`dependency_type success/settled`，PK 三个 ID，禁止自环；确认时执行 DAG 无环校验。`plan_declared_agent(plan_execution_id,agent_id,agent_version_id)` 固定参与集合。
-
-## 9. Group
-
-### `GroupFormationProposal` 与 revision
-
-`group_formation_proposal`：`id PK`、`parent_session_id FK`、`group_session_id FK UNIQUE`、`user_id`、`entry_agent_id FK`、`generation_run_id FK UNIQUE`、`status generating/awaiting_confirmation/confirmed/rejected/cancelled/failed`、`current_revision_id FK NULL`、`current_revision_no INT`、`version`、`decided_at`、时间。使用 `(parent_session_id,user_id)` 复合 FK；`(current_revision_id,id)` 复合 FK 指向 revision 的 `(id,proposal_id)`，保证 current revision 属于本 Proposal。索引 `(parent_session_id,status,created_at)`。Proposal generation 的 Run 使用 `mode=group,execution_kind=proposal_generation`，生成 WorkItem 通过 `group_formation_proposal_id` 关联，Runner 经 WorkItem 关联；GroupSession 此时已存在但为 forming，不能接受群消息或执行。
-
-每次模型生成或用户编辑都创建不可变 `group_formation_revision`：`id PK`、`proposal_id FK`、`revision_no`、`source generated/user_edit`、`derived_from_revision_id FK NULL`、`goal TEXT`、`bootstrap_context MEDIUMTEXT`、`content_hash`、`edited_by_type user/agent`、`edited_by_id`、时间，唯一 `(proposal_id,revision_no)`、`(id,proposal_id)`。Proposal 的 `current_revision_id/current_revision_no` 在 `If-Match + expected_revision_no` CAS 成功后一起前移；旧 revision 保留编辑历史。首次 revision 前 current_revision_id 允许 NULL。
-
-核心图按 revision 关系化：
-
-- `group_formation_participant(id PK,revision_id FK,participant_key,agent_id FK,is_entry,initial_responsibility,sort_order)`，唯一 `(revision_id,participant_key)`、`(revision_id,agent_id)`、`(id,revision_id)`；生成列 `entry_revision_id=IF(is_entry,revision_id,NULL)` 加 `UNIQUE(entry_revision_id)`，确保每 revision 最多一个入口，保存/确认事务另保证至少一个。
-- `group_formation_work_item(id PK,revision_id FK,work_item_key,participant_id FK,title,goal,acceptance_criteria,sort_order)`，唯一 `(revision_id,work_item_key)`；participant 必须属于同 revision，由复合 FK `(participant_id,revision_id)` 保证。
-- `group_formation_suggested_edge(id PK,revision_id FK,source_participant_id FK,target_participant_id FK,label,rationale,sort_order)`，唯一 `(revision_id,source_participant_id,target_participant_id)`，禁止自环；两端使用复合 FK 保证同 revision。
-- `group_formation_bootstrap_source(revision_id,source_type message/execution_event/artifact,source_id,sort_order,shared_excerpt_hash)`，PK `(revision_id,source_type,source_id)`；服务层校验来源属于同一 UserSession/userId。核心图不得放入 Proposal JSON。
-
-`rejected/cancelled/failed` 为 Proposal 终态，并把对应 forming GroupSession 关闭且不创建节点/GroupRun。确认事务锁 `UserSession → generation Run → Proposal → forming GroupSession → current Revision`，重新校验 revision、参与者、Agent 访问和 Sandbox 兼容后，原子打开下述 GroupSession并把 Proposal 标 confirmed。
-
-### `group_session` 与冻结 Formation
-
-`group_session`：`id PK`、`parent_session_id FK`、`user_id`、`frozen_formation_revision_id FK UNIQUE NULL`、`entry_agent_id FK`、`status forming/open/closed/archived`、`goal TEXT NULL`、`bootstrap_context MEDIUMTEXT NULL`、`confirmed_at`、`closed_at`、`version`、时间。Proposal 以唯一 `group_session_id` 反向关联，避免循环 FK。GroupSession 与 Proposal 同事务创建为 forming；确认后填充冻结字段并转 open，拒绝/取消/失败则转 closed。forming 不可接收群消息或 GroupRun。索引 `(parent_session_id,status,created_at)`。
-
-`group_bootstrap_source(group_session_id,source_type,source_id,sort_order,shared_excerpt_hash)` 是确认 revision 来源行的冻结副本，PK `(group_session_id,source_type,source_id)`。它与 `bootstrap_context` 一起构成可执行共享边界，不依赖可变 Chat 历史。
-
-### `group_agent_node`
-
-`id PK`、`group_session_id FK`、`agent_id FK`、`source_participant_id FK UNIQUE`、`is_entry BOOL`、`initial_responsibility TEXT`、`availability available/unavailable`、`unavailable_reason NULL`、`created_at`。唯一 `(group_session_id,agent_id)`、`(id,group_session_id)`；生成列 `entry_group_id=IF(is_entry,group_session_id,NULL)` 加 `UNIQUE(entry_group_id)` 保证最多一个入口，确认事务校验至少一个。节点集合确认后禁止 INSERT/DELETE/agent_id UPDATE；availability 只是当前治理投影，不删除节点。
-
-### 建议边、实际边与初始 WorkItem
-
-确认后的建议边保存在 `group_initial_suggested_edge(group_session_id,source_node_id,target_node_id,label,rationale,source_edge_id)`，PK 三个 ID，两端用 `(node_id,group_session_id)` 复合 FK；用于展示确认时的协作意图，不授予额外权限，也不表示已经发生调用。
-
-`group_collaboration_edge` 只记录执行中实际发生的 `invoke_agent`：`id PK`、`group_session_id FK`、`source_node_id FK`、`target_node_id FK`、`first_invocation_id FK UNIQUE`、`created_in_group_run_id FK`、时间；唯一 `(group_session_id,source_node_id,target_node_id)`。两端必须属于同 Group，由复合 FK 保证。实际边只在首个成功创建的 AgentInvocation 事务中插入，不能由建议边预先伪造。
-
-确认事务创建首个 GroupRun/Run，并把每条 `group_formation_work_item` 复制为正式 WorkItem，记录 `group_formation_work_item_id` 与对应 `group_node_id`；只为有初始 WorkItem 的节点创建 Runner。用户确认的初始工作是启动授权，不需要伪造 AgentInvocation。后续节点间工作仍必须通过 `invoke_agent`。
-
-### `group_run`
-
-`group_run`：`id PK`、`run_id FK UNIQUE`、`group_session_id FK`、`owner_node_id FK`、`goal TEXT`、`version`、时间。唯一 `(id,group_session_id)`，并以 `(owner_node_id,group_session_id)` 复合 FK 保证 owner 属于该固定 Group。它不重复保存 status/outcome；公共 lifecycle/outcome 始终来自关联 Run。索引 `(group_session_id,created_at)`。
-
-`group_run_agent_version(group_run_id,group_session_id,group_node_id,agent_version_id NULL,participation_status available/unavailable,unavailable_reason NULL)` PK `(group_run_id,group_node_id)`；`(group_run_id,group_session_id)` 和 `(group_node_id,group_session_id)` 分别复合 FK 到 GroupRun 与 GroupAgentNode，保证不能混入图外节点。CHECK 要求 available 时 version 非 NULL 且 reason 为 NULL、unavailable 时 version 为 NULL 且 reason 非 NULL。每个固定 GroupAgentNode 都必须恰有一行，由创建事务锁定 GroupSession、全部节点及相关 Agent 后逐一插入并在提交前计数校验；PK 保证同节点没有两份映射，完整覆盖由锁定事务保证。
-
-创建新 GroupRun 时，当前可用节点固定其最新已发布 AgentVersion；不可用节点保留并固定为 unavailable。`owner_node_id` 对应映射必须为 available，未显式指定 owner 时使用入口节点；入口不可用则整个创建事务失败，但非 owner 不可用不阻塞创建。映射提交后不可 UPDATE/DELETE，Agent 后续停用或重新启用都只影响未来 GroupRun。服务层在创建 WorkItem、定向 Message 和 AgentInvocation 时校验目标映射为 available；WorkItem 的复合 FK 保证执行目标属于同轮，Message/Invocation 的可选目标在创建事务中校验并通过 WorkItem 关系落地。AgentVersion 必须属于节点 Agent、owner 必须 available、映射必须完整等跨表断言由锁定事务保证，不能只靠普通 FK 表达。
-
-`group_run_reference(group_run_id,referenced_group_run_id)` 保存历史引用。Group 发布记录用 `group_artifact(group_session_id,artifact_id,published_by_node_id,message_id)`。
-
-## 10. Sandbox、Workspace 与 Artifact
-
-### `session_sandbox` / `workspace`
-
-`session_sandbox`：`id PK`、`session_id FK UNIQUE`、`sandbox_profile_id FK`、`profile_config_version`、`status provisioning/ready/failed/cleaned`、`root_uri`、`version`、时间。
-
-`workspace`：`id PK`、`session_sandbox_id FK UNIQUE`、`session_id FK UNIQUE`、`root_uri`、`status active/cleaning/cleaned/failed`、`retention_policy_key session_lifetime`、`version`、时间。绝对路径只在 Sandbox 实现内部由 `root_uri` 解析。
-
-### `workspace_lock`
-
-每个 Workspace 一行：`workspace_id PK`、`writer_request_id NULL`、`writer_fencing_token BIGINT`、`writer_lease_expires_at`、`next_ticket BIGINT`、`version`。读锁持有者在 `workspace_read_lease(id,workspace_id,request_id,ticket,lease_token,expires_at)`；写请求在 `workspace_lock_request(id,workspace_id,tool_invocation_id,mode read/write,status queued/granted/released/expired,ticket,fencing_token,...)`。索引 `(workspace_id,status,ticket)` 实现公平顺序。
-
-### `artifact`
-
-`id PK`、`user_id`、`session_id FK`、`workspace_id FK`、`relative_path`、`name`、`mime_type`、`size_bytes`、`checksum`、`created_by_agent_id FK`、`work_item_id/runner_id/tool_invocation_id FK NULL`、`parent_artifact_id FK NULL`、`status published/unavailable/deleted`、`version_no`、时间。唯一 `(session_id,relative_path,version_no)`、`UNIQUE(parent_artifact_id,version_no)`；索引 `(session_id,status,created_at)`。Artifact 元数据保留随 Session；清理文件只改 `unavailable`，不删审计行。
-
-## 11. Channel 与 NotificationDelivery
-
-`channel_account`：`id PK`、`plugin_key`、`owner_account_id FK`、`external_account_key`、`credential_ref`、`status active/disabled/revoked`、`config JSON`、`version`、时间；唯一 `(plugin_key,external_account_key)`。`agent_channel_binding(channel_account_id,external_route_key,agent_id,status,version)` 把入站入口绑定到 Agent；`channel_identity_binding(channel_account_id,external_user_id_hash,user_id,verified_at)` 唯一前两列；`channel_conversation_binding(channel_account_id,external_conversation_id,session_id,user_id,status)` 唯一 `(channel_account_id,external_conversation_id)` 与 `session_id`。外部 ID 可按部署加密，索引值使用稳定 hash。
-
-### `notification_delivery`
-
-`id PK`、`session_id FK`、`user_id`、`run_id FK NULL`、`group_run_id FK NULL`、`triggering_event_id FK`、`event_type clarification_required/graph_confirmation_required/tool_confirmation_required/run_completed/run_failed/run_cancelled`、`template_key`、`template_version`、`channel_account_id FK`、`external_conversation_id`、`status queued/delivering/retry_wait/succeeded/failed/cancelled/outcome_unknown`、`dedupe_key VARCHAR(191)`、`provider_idempotency_key`、`provider_message_key NULL`、`attempt_count`、`last_error_code/detail`、`next_attempt_at`、`version`、`delivered_at/cancelled_at`、时间。唯一 `(session_id,dedupe_key)`、`(channel_account_id,provider_idempotency_key)`、`(channel_account_id,external_conversation_id,provider_message_key)`（provider message key 非空时生效）；索引 `(status,next_attempt_at,created_at)`、`(session_id,created_at)`、`(run_id,status)`。
-
-`notification_delivery_attempt`：`id PK`、`delivery_id FK`、`attempt_no`、`status queued/delivering/succeeded/failed/timed_out/outcome_unknown`、`claim_token`、`provider_request_key NULL`、`provider_message_key NULL`、`request_metadata JSON`、`response_metadata JSON`、`error_code/detail`、`retryable`、时间；唯一 `(delivery_id,attempt_no)`、`(delivery_id,provider_request_key)`（非空）。正文由 `template_key/version + triggering_event_id` 在发送前生成安全渠道消息，不把完整用户内容复制进 Outbox。
-
-只有 `origin_type=channel` 且存在 active `channel_conversation_binding` 的 Session 才创建 NotificationDelivery；Web/API Session 不创建虚假 delivery 行。Delivery 的状态事件属于该 Session ExecutionEvent，但 Attempt 原始诊断为 private。投递记录至少随 Session 保留，Attempt 可在终态 90 天后按策略清理；provider message key 与最终状态保留用于去重和审计。
-
-## 12. History、Memory、Event、Audit、Checkpoint、Outbox
-
-### `history_summary`
-
-`id PK`、`session_id FK`、`scope_type chat/group_agent`、`group_session_id/group_node_id NULL`、生成列 `scope_discriminator = IF(scope_type='chat','chat',CONCAT('group_node:',group_node_id)) STORED NOT NULL`、`through_message_id FK`、`through_event_sequence`、`summary MEDIUMTEXT`、`source_hash`、`status pending/ready/failed/superseded`、`model_id/parameter_version`、`version`、时间。唯一 `(session_id,scope_discriminator,through_event_sequence)`；CHECK 要求 chat 的 group 字段为 NULL、group_agent 的两字段非 NULL。避免 MySQL nullable UNIQUE 允许多个 NULL；只使用 `ready` 最新行。
-
-### `MemoryHead`、`memory` 与 candidate
-
-`memory_head` 保存逻辑事实槽：`id PK`、`user_id FK`、`scope user/user_agent`、`agent_id FK NULL`、`fact_key VARCHAR(255)`、生成列 `scope_discriminator = IF(scope='user','user',CONCAT('user_agent:',agent_id)) STORED NOT NULL`、`version`、`last_user_edited_at NULL`、时间。CHECK 要求 user scope 的 agent_id 为 NULL、user_agent 必须非 NULL；唯一 `(user_id,scope_discriminator,fact_key)`，因此不受 nullable agent_id 影响。
-
-`memory` 是不可覆盖的事实版本：`id PK`、`head_id FK`、`user_id`、`agent_id FK NULL`、`scope user/user_agent/agent`、`fact_key`、`content TEXT`、`normalized_hash CHAR(64)`、`status active/superseded/deleted`、生成列 `active_head_id = IF(status='active',head_id,NULL)`、`source_kind model/user_edit/import`、`source_session_id FK NULL`、`created_by_runner_id FK NULL`、`policy_definition_id FK NULL`、`confidence DECIMAL`、`supersedes_memory_id FK NULL`、`version`、时间。`UNIQUE(active_head_id)` 保证每个 Head 最多一个 active 版本；查询索引 `(user_id,scope,agent_id,status,updated_at)`。当前未启用的 agent scope 不创建 Head，也不由首批 API 写入。
-
-`memory_source_message(memory_id,message_id,source_role)` PK 前两列保存所有来源。`runner_memory_snapshot(runner_id,memory_id,content_hash,scope,rank,score)` 保存已召回版本；Memory 后续编辑/删除不改历史 Runner 快照。
-
-异步提取先写 `memory_write_candidate`：`id PK`、`user_id`、`agent_id NULL`、`scope`、`fact_key`、`content`、`normalized_hash`、`source_session_id/runner_id/policy_definition_id`、`observed_head_version NULL`、`status pending/accepted/rejected/failed`、`rejection_code NULL`、`result_memory_id FK NULL`、`version`、时间；来源消息用 `memory_candidate_source_message`。Worker 锁定/创建 Head，重新验证来源和 head version：同内容可接受为来源补充；兼容内容创建新 active 并 supersede 旧版；冲突不确定或用户在 candidate 生成后编辑则 rejected，不覆盖用户值。
-
-### `execution_event`
-
-`id PK`、`session_id FK NOT NULL`、`run_id FK NULL`、`group_session_id/group_run_id NULL`、`sequence BIGINT`、`event_type`、`event_dedupe_key VARCHAR(191)`、`transition_key NULL`、`actor_type/id`、`entity_type/id`、`entity_version`、`visibility user/group/direct/private`、`private_owner_type/id NULL`、`summary`、`payload JSON`、`caused_by_event_id FK NULL`、`correlation_id`、时间。唯一 `(session_id,sequence)`、`(session_id,event_dedupe_key)`；索引 `(run_id,sequence)`、`(group_session_id,sequence)`、`(entity_type,entity_id,created_at)`、`(transition_key)`。`execution_event_recipient(event_id,recipient_type,recipient_id)` PK 三列并索引 `(recipient_type,recipient_id,event_id)`；direct 事件至少一个 recipient，private 事件必须有 owner，由 EventWriter 校验。表权限/trigger 拒绝 UPDATE，追加后不可修改，默认与业务记录同生命周期。幂等和投影见 [事件与可见性](events-audit-visibility.md)。
-
-### `platform_audit_event`
-
-`id PK`、`occurred_at`、`category identity/agent/registry/skill/channel/security/maintenance`、`action`、`actor_type account/api_key/service/anonymous`、`actor_id NULL`、`actor_user_id NULL`、`request_id/correlation_id NULL`、`resource_type/id`、`resource_version NULL`、`outcome succeeded/failed`、`severity info/warning/critical`、`summary`、`changes JSON`、`metadata JSON`、`source_ip_hash/user_agent_hash NULL`、`dedupe_key VARCHAR(191)`、`created_at`。`UNIQUE(dedupe_key)`；索引 `(resource_type,resource_id,occurred_at)`、`(actor_type,actor_id,occurred_at)`、`(category,action,occurred_at)`、`(outcome,severity,occurred_at)`。它无 session_id/sequence，不进入 Session SSE；changes 只存字段名与脱敏差异。表权限/trigger 拒绝普通 UPDATE，只有专用 retention procedure 可按已到期时间物理删除。成功治理事件至少保留 365 天，认证失败至少 180 天。
+Provider 原始秘密、完整授权头和不允许持久化的 reasoning 不进入数据库。
 
 ### `runner_checkpoint`
 
-`id PK`、`runner_id FK`、`work_item_id FK`、`sequence_no INT`、`checkpoint_type`、`state_snapshot JSON`、`last_completed_step`、`safe_to_resume BOOL`、`created_at`。唯一 `(runner_id,sequence_no)`；索引 `(work_item_id,safe_to_resume,created_at DESC)`。WorkItem 终态 30 天后可清理，受审计保留策略覆盖时延长。
+`id PK`、`work_item_id FK`、`runner_id FK`、`execution_epoch`、`checkpoint_no`、`context_cursor_json`、`working_plan_revision NULL`、`pending_refs_json`、`safe_provider_state_ref NULL`、`content_hash`；唯一 `(runner_id,checkpoint_no)`，只追加。
+
+### `memory_fact`、`memory_version`、`history_summary`
+
+- `memory_fact`：`id PK`、`tenant_id FK`、`account_id NULL`、`agent_id FK NULL`、`scope user|user_agent|agent`、`fact_key`、`current_version_id FK NULL`、`status active|deleted`、`version`；nullable 复合 FK `(tenant_id,account_id)`，CHECK 要求 user=(account 非空/agent 空)、user_agent=(两者非空)、agent=(account 空/agent 非空)；唯一 active fact 通过 `(tenant_id,account discriminator,scope,agent discriminator,fact_key,active_key)` generated key 保证；
+- `memory_version`：`id PK`、`memory_fact_id FK`、`version_no`、`content MEDIUMTEXT`、`content_hash`、`source_session_id FK`、`source_message_refs_json`、`created_by_runner_id FK NULL`、`policy_version_id FK`、`created_at`，只追加；唯一 `(memory_fact_id,version_no)`；
+- `history_summary`：`id PK`、`session_id FK`、`group_session_id FK NULL`、`agent_id FK`、`through_sequence`、`content MEDIUMTEXT`、`content_hash`、`status active|superseded`、`active_scope_key GENERATED`、`version`；唯一 `(session_id,group discriminator,agent_id,through_sequence)` 和当前 active scope key。
+
+Memory 的修改创建新 MemoryVersion 并 CAS 更新 current pointer；删除只写 tombstone/status，历史来源保持。Recall 只能用 `tenant_id + account_id + scope + agent_id` 索引查询 active head。Group history summary 按 group+agent 隔离，不能用一份全群摘要绕过 visibility。
+
+## 7. Tool 与 Agent 调用
+
+### `tool_invocation`、`tool_attempt`
+
+- `tool_invocation`：`id PK`、`run_id FK`、`work_item_id FK`、`agent_turn_id FK`、`tool_id FK`、`tool_key_snapshot`、`arguments_json`、`arguments_hash`、`operation_key`、`idempotency_scope_hash`、`status created|waiting_confirmation|waiting_resource|queued|running|succeeded|failed|rejected|cancelled|outcome_unknown`、`approval_id FK NULL`、`session_grant_id FK NULL`、`result_json NULL`、`error_code NULL`、`version`；
+- `tool_attempt`：`id PK`、`tool_invocation_id FK`、`attempt_no`、`status queued|running|succeeded|failed|timed_out|cancelled|outcome_unknown`、`lease_owner NULL`、`lease_token NULL`、`lease_expires_at NULL`、`heartbeat_at NULL`、`provider_operation_id NULL`、`result_json NULL`、`error_code NULL`、`started_at NULL`、`ended_at NULL`、`version`；唯一 `(tool_invocation_id,attempt_no)`，索引 `(status,lease_expires_at)`。
+
+唯一 `(tool_id,idempotency_scope_hash,operation_key)`；相同 operation key 但请求 hash 不同必须冲突。外部副作用 outcome_unknown 禁止盲目重试。
+
+### `session_grant`
+
+`id PK`、`tenant_id FK`、`account_id`、`session_id FK`、`tool_id FK`、`tool_key_snapshot`、`sandbox_profile_version_id FK`、`arguments_constraint_json`、`arguments_constraint_hash`、`risk_version`、`account_authorization_revision`、`approval_id FK UNIQUE`、`status active|revoked|expired`、`expires_at`、`revoked_at NULL`、`version`；复合 FK `(tenant_id,account_id)`，索引 `(tenant_id,account_id,session_id,tool_id,status,expires_at)`。当前账号 authorization_revision 不匹配时 Grant 视为失效并由 Maintenance 标 revoked。
+
+Grant 只由已批准的 `approval_type=session_grant` 创建；参数匹配使用规范化约束与 hash，执行前同时核对 account/session/tool/sandbox/risk/expiry/status。撤销和过期不删除记录，不能扩大既有 Grant 的 arguments constraint；扩大范围必须创建新 Approval 和新 Grant。
+
+### `agent_invocation`
+
+`id PK`、`run_id FK`、`caller_work_item_id FK`、`caller_agent_id FK`、`target_agent_id FK`、`target_agent_version_id FK NULL`、`target_work_item_id FK NULL`、`group_session_id FK NULL`、`group_run_id FK NULL`、`request_message_id FK NULL`、`return_route caller|direct|group`、`status created|queued|running|succeeded|failed|cancelled|timed_out|rejected`、`operation_key`、`request_hash`、`result_message_id FK NULL`、`error_code NULL`、`version`。
+
+唯一 `(caller_work_item_id,operation_key)`。授权拒绝也创建 terminal rejected 记录；只有成功校验后才允许 target_work_item 非空。
+
+## 8. Group 聚合
+
+### `group_session`、`group_membership`
+
+- `group_session`：`id PK`、`session_id FK`、`status open|closed|archived`、`initiator_agent_id FK`、`membership_policy fixed_for_run|dynamic_future`、`version`；
+- `group_membership`：`id PK`、`group_session_id FK`、`agent_id FK`、`status invited|joined|declined|cancelled|left|removed`、`invited_by_kind user|agent|runtime`、`invited_by_account_id FK NULL`、`invited_by_agent_id FK NULL`、`reason`、`context_scope_json`、`authorization_source`、`joined_at`、`ended_at`、`active_agent_key GENERATED NULL|agent_id`、`version`。CHECK 要求 invited_by_kind 与两个 actor FK 组合一致；唯一 `(group_session_id,active_agent_key)`。
+
+一个 Agent 的 membership 历史只追加事件；`active_agent_key=agent_id` 当且仅当 `ended_at IS NULL AND status IN ('invited','joined')`，其他状态为 NULL，利用 MySQL 允许多个 NULL 的唯一索引保证最多一条当前 membership。
+
+### `group_run`
+
+`id PK`、`group_session_id FK`、`run_id FK UNIQUE`、`reporter_agent_id FK`、`summary_epoch BIGINT DEFAULT 0`、`delivered_summary_epoch BIGINT DEFAULT 0`、`version`。`summary_epoch` 是已分配的最新汇总 epoch，是唯一单调计数器；是否已请求由 `group_summary_request(group_run_id,summary_epoch)` 唯一行表示，不再保存第二个 requested epoch 镜像。
+
+禁止增加 `status`、`outcome`、`wait_reason` 或 `completed_at`；这些字段只在一对一 Run 中存在。
+
+### `group_run_member`
+
+`group_run_id FK`、`agent_id FK`、`agent_version_id FK NULL`、`participation_status available|unavailable`、`unavailable_reason NULL`、`context_scope_json`、`capability_boundary_json`；PK `(group_run_id,agent_id)`。
+
+Reporter 必须是本快照中 available 的成员。唯一 `(group_run_id,agent_version_id)` 不成立，因为同一版本不应限制多逻辑用途；按 Agent 主键即可。
+
+### `group_summary_request`
+
+`id PK`、`group_run_id FK`、`summary_epoch`、`reporter_work_item_id FK`、`trigger_event_id FK`、`status queued|running|delivered|superseded|failed`、`final_message_id FK NULL`、`version`；唯一 `(group_run_id,summary_epoch)`。
+
+它是防重复唤醒和诊断记录，不是第二套 Run lifecycle。
+
+### `shared_task`
+
+`shared_task`：`id PK`、`group_session_id FK`、`group_run_id FK NULL`、`title`、`description`、`status pending|in_progress|completed|blocked|cancelled`、`assignee_agent_id FK NULL`、`version`。只有明确 assignee 且 in_progress 的任务进入 quiescence pending 判断；它不自动创建 WorkItem。
+
+- `shared_task_dependency`：`shared_task_id FK`、`predecessor_task_id FK`、`sort_order`；PK `(shared_task_id,predecessor_task_id)`，CHECK 禁止自依赖。领域事务锁定相关任务，确保两端属于同一 GroupSession 且新边不成环；该边只影响提示/UI，不触发调度、授权或 quiescence。
+- `shared_task_result_ref`：`shared_task_id FK`、`ref_type artifact|message|verification`、`artifact_id FK NULL`、`message_id FK NULL`、`verification_result_id FK NULL`、`ref_key GENERATED`、`sort_order`；PK `(shared_task_id,sort_order)`，唯一 `(shared_task_id,ref_type,ref_key)`，CHECK 要求与 ref_type 对应的 FK 恰好一个非空；领域校验引用属于同 tenant 且对该 Group 可见。
+
+### `verification_result`
+
+`verification_result`：`id PK`、`run_id FK`、`group_run_id FK NULL`、`rule_key`、`rule_version`、`verification_epoch BIGINT`、`status passed|failed|insufficient_evidence`、`observed_facts_json`、`missing_facts_json`、`created_at`；唯一 `(run_id,rule_key,rule_version,verification_epoch)`。epoch 在锁定 `run_id + rule_key + rule_version` 后单调分配，同一规则可在新事实后重新验证，不覆盖旧结果。
+
+- `verification_evidence_ref`：`verification_result_id FK`、`evidence_type tool_attempt|artifact|workspace_checksum|business_fact`、`tool_attempt_id FK NULL`、`artifact_id FK NULL`、`workspace_entry_id FK NULL`、`workspace_generation NULL`、`external_fact_ref NULL`、`checksum CHAR(64) NULL`、`evidence_key GENERATED`、`sort_order`；PK `(verification_result_id,sort_order)`，唯一 `(verification_result_id,evidence_type,evidence_key)`。CHECK 要求类型对应的引用恰好一个非空，workspace/business_fact 必须有 checksum，workspace 还必须固定 generation。领域服务校验数据属于同 tenant/Run 且对当前 account/Group 可见；结果不由模型文字直接写入。
+
+## 9. Workspace 与 Artifact
+
+### `session_sandbox`、`workspace_entry`
+
+- `session_sandbox`：`id PK`、`session_id FK UNIQUE`、`sandbox_profile_id FK`、`sandbox_profile_version_id FK`、`workspace_protocol_version`、`artifact_protocol_version`、`mount_policy_hash`、`root_storage_key`、`status provisioning|ready|failed|retained|deleted`、`version`；
+- `workspace_entry`：`id PK`、`session_sandbox_id FK`、`logical_root private_agent|group_shared`、`owner_agent_id FK NULL`、`group_session_id FK NULL`、`owner_scope_key GENERATED`、`relative_path`、`size_bytes`、`checksum`、`generation`、`version`。CHECK 要求 private_agent 只设置 owner_agent_id，group_shared 只设置 group_session_id；`owner_scope_key` 分别编码 `agent:<id>` 或 `group:<id>`。
+
+唯一 `(session_sandbox_id,logical_root,owner_scope_key,relative_path)`。每次访问还需 ExecutionPrincipal 校验，数据库路径不是授权替代。
+
+### `runner_sandbox_instance`
+
+`id PK`、`runner_id FK UNIQUE`、`session_sandbox_id FK`、`sandbox_profile_version_id FK`、`provider_instance_id NULL`、`status provisioning|running|stopped|failed|lost`、`mount_manifest_hash`、`egress_policy_hash`、`resource_policy_hash`、`started_at NULL`、`ended_at NULL`、`failure_code NULL`、`version`；唯一 nullable `(provider_instance_id)`。
+
+创建实例前校验 Runner 的 AgentVersion snapshot 与 SessionSandbox protocol/mount policy 兼容；实例只能挂载 ExecutionPrincipal 允许的逻辑根。实例停止/丢失不删除 SessionSandbox，恢复 Runner 必须创建新的 instance 记录，不能复活旧 VM/容器身份。
+
+### `workspace_lock_request`
+
+`id PK`、`session_sandbox_id FK`、`scope_key`、`mode read|write`、`ticket BIGINT`、`status queued|granted|released|expired|cancelled`、`lease_owner NULL`、`lease_token NULL`、`lease_expires_at NULL`、`fencing_token BIGINT NULL`、`tool_invocation_id FK`、`version`；唯一 `(session_sandbox_id,scope_key,ticket)`，索引 `(session_sandbox_id,scope_key,status,ticket)` 和 `(status,lease_expires_at)`。
+
+ticket 在锁定 SessionSandbox/独立 counter 后单调分配。read 只有在前方无 write 且无 active writer 时批量 grant；write 只有在前方无请求且无 active reader/writer 时 grant。每次文件读写同时验证 lease_token；写操作还验证递增 fencing_token。等待锁的 ToolInvocation 为 waiting_resource，不占 Runner。
+
+### `artifact`
+
+`id PK`、`tenant_id FK`、`owner_account_id`、`session_id FK`、`group_session_id FK NULL`、`source_relative_path`、`immutable_storage_key UNIQUE`、`name`、`mime_type`、`size_bytes NULL`、`checksum CHAR(64) NULL`、`visibility private|direct|group|user`、`created_by_agent_id FK`、`work_item_id FK`、`runner_id FK`、`tool_invocation_id FK`、`parent_artifact_id FK NULL`、`provenance_json`、`status publishing|published|unavailable|deleted`、`availability_reason NULL|publish_failed|storage_fault|checksum_mismatch|deletion_pending|retention_expired`、`published_at NULL`、`deletion_requested_at NULL`、`deleted_at NULL`、`version`；复合 FK `(tenant_id,owner_account_id) → platform_account(tenant_id,id)`。
+
+CHECK 固定为：publishing 的 size/checksum/reason/published/deletion/deleted 均为空；published 的 size/checksum/published_at 非空且 reason/deletion/deleted 为空；unavailable/deleted 的 reason 非空，且 deleted_at 当且仅当 status=deleted 时非空。reason=publish_failed 时 published_at/deletion_requested_at 必须为空、size/checksum 允许为空；其他 reason 必须保留非空 size/checksum/published_at。reason=deletion_pending|retention_expired 必须有 deletion_requested_at。合法 reason 迁移、恢复前置和 Event 以状态机为准。
+
+首次 `published` 后禁止修改 storage key、source path、name/mime/bytes metadata/checksum、tenant/owner/session/group/visibility、creator/WorkItem/Invocation、parent、provenance 和 published_at。新内容或新元数据版本都创建新 Artifact；Retention/受控恢复只能按状态机修改 status、availability/deletion 字段与治理 version，并写审计。恢复为 published 必须验证同一 immutable key 与原 checksum，不能改变任何不可变字段。
+
+## 10. Channel 与通知（启用 Channel 时必需）
+
+### `channel_plugin`、`channel_account`
+
+- `channel_plugin`：`id PK`、`key UNIQUE`、`name`、`implementation_ref`、`implementation_digest`、`signature_scheme`、`config_schema_json`、`required_conformance_suite_version`、`current_conformance_run_id FK NULL`、`status active|inactive`、`version`；`current_conformance_run_id` 只能指向该 Plugin 且 suite 匹配的 terminal passed ConformanceRun，结果历史不回写 Plugin；
+- `channel_account`：`id PK`、`tenant_id FK`、`owner_account_id`、`channel_plugin_id FK`、`external_account_id`、`active_external_account_key GENERATED NULL|external_account_id`、`credential_ref`、`status active|revoked|error`、`version`；复合 FK `(tenant_id,owner_account_id)`，唯一 `(channel_plugin_id,active_external_account_key)`，active/error 共享当前 key，revoked 后允许新授权创建新行。
+
+### `agent_channel_binding`、`channel_identity_binding`、`channel_conversation_binding`
+
+- `agent_channel_binding`：`id PK`、`channel_account_id FK`、`entry_agent_id FK`、`status active|inactive`、`active_channel_account_key GENERATED NULL|channel_account_id`、`version`；唯一 `(active_channel_account_key)`，使一个 ChannelAccount 最多一个 active binding 且保留 inactive 历史；
+- `channel_identity_binding`：`id PK`、`tenant_id FK`、`channel_account_id FK`、`external_user_subject`、`account_id`、`verification_method`、`verified_at`、`status active|revoked`、`active_subject_key GENERATED NULL|external_user_subject`、`version`；复合 FK `(tenant_id,account_id)`，唯一 `(channel_account_id,active_subject_key)`，保留 revoked 历史；
+- `channel_conversation_binding`：`id PK`、`channel_account_id FK`、`external_conversation_id`、`session_id FK UNIQUE`、`status active|closed`、`active_conversation_key GENERATED NULL|external_conversation_id`、`version`；唯一 `(channel_account_id,active_conversation_key)`，显式“新会话”关闭旧绑定后可为同一外部 conversation 创建新 Session 绑定。
+
+Provider 签名验证成功后才能查询 identity binding。外部 display name、消息正文或裸 userId 不能创建身份绑定；绑定创建/撤销写 PlatformAuditEvent。
+
+### `notification_delivery`
+
+`notification_delivery`：`id PK`、`session_id FK`、`execution_event_id FK`、`channel_conversation_binding_id FK`、`dedupe_key`、`provider_idempotency_key`、`status pending|running|succeeded|failed|dead|outcome_unknown`、`attempt_count`、`next_attempt_at NULL`、`provider_delivery_id NULL`、`last_error_code NULL`、`version`；唯一 `(channel_conversation_binding_id,dedupe_key)` 和 `(channel_conversation_binding_id,provider_idempotency_key)`，索引 `(status,next_attempt_at,id)`。`provider_idempotency_key` 在同一 Delivery 所有尝试中稳定，不包含正文。
+
+- `notification_delivery_attempt`：`id PK`、`notification_delivery_id FK`、`attempt_no`、`status running|succeeded|failed|outcome_unknown`、`lease_owner`、`lease_token`、`lease_expires_at`、`provider_request_id NULL`、`provider_delivery_id NULL`、`error_code NULL`、`started_at`、`ended_at NULL`、`version`；唯一 `(notification_delivery_id,attempt_no)`，索引 `(status,lease_expires_at)`。Attempt 终态后只追加诊断，不覆盖请求/回执事实。
+
+Delivery 与触发它的领域 Event/Outbox 同事务创建；投递失败只改变 NotificationDelivery 并追加安全 Event，不改变原 Run。Provider 不支持幂等/状态查询且请求可能已送达时必须进入 outcome_unknown，禁止自动再投。Channel 未启用时这些表可以为空，但不能用另一套临时表替代。
+
+## 11. Event、Outbox 与审计
+
+### `execution_event`
+
+`id PK`、`tenant_id FK`、`session_id FK`、`run_id FK NULL`、`sequence BIGINT`、`event_type`、`visibility private|direct|group|user`、`actor_kind user|agent|runtime|tool|system`、`actor_account_id FK NULL`、`actor_agent_id FK NULL`、`actor_runtime_id NULL`、`aggregate_type`、`aggregate_id`、`aggregate_version`、`cause_type`、`cause_id`、`dedupe_key`、`safe_summary`、`payload_json`、`hash_schema_version SMALLINT NOT NULL DEFAULT 1`、`previous_event_hash CHAR(64) NULL`、`event_hash CHAR(64)`、`occurred_at`。CHECK 要求 actor_kind 对应且只对应一个可用 actor 字段；system 可全部为空。写入前 payload_json 必须通过 OpenAPI `EventPayload` v1，不能存任意领域对象或正文。sequence=1 时 previous 为空，其他必须等于同 Session 前一 Event hash。
+
+唯一 `(session_id,sequence)`、`(session_id,dedupe_key)`、`(aggregate_type,aggregate_id,aggregate_version,event_type)`；索引 `(run_id,sequence)`、`(aggregate_type,aggregate_id,sequence)`。sequence 在 Session 行的 `next_event_sequence` 中事务分配。
 
 ### `outbox_command`
 
-`id PK`、`topic runtime.control/runtime.runner/runtime.tool/runtime.sandbox/runtime.delivery/runtime.maintenance`、`action`、`aggregate_type/id`、`partition_key`、`dedupe_key`、`payload_ref JSON`、`priority`、`available_at`、`status pending/claimed/retry_wait/completed/dead`、`attempt_count`、`dispatch_lease_owner/token/expires_at`、`last_error`、`published_at NULL`、`completed_at NULL`、时间。唯一 `(topic,dedupe_key)`；领取索引 `(topic,status,available_at,priority,created_at)`、回收索引 `(status,dispatch_lease_expires_at)`。dedupe_key 必须由不可清理的领域 transition/cause ID 生成；消费者先检查领域状态，因此 Completed 行清理后旧命令重现仍不能重复推进。Completed 保留 30 天（不得早于上游最大重投窗口），dead 至少 180 天；Session 命令关联 ExecutionEvent，平台命令关联 PlatformAuditEvent。
+`id PK`、`tenant_id FK NULL`、`topic runtime.control|runtime.runner|runtime.tool|runtime.sandbox|runtime.delivery|runtime.maintenance`、`command_type`、`aggregate_type`、`aggregate_id`、`partition_key`、`priority SMALLINT`、`cause_event_id FK NULL`、`dedupe_key`、`payload_json`、`status pending|claimed|retry_wait|completed|dead`、`available_at`、`claim_owner NULL`、`claim_token NULL`、`claim_expires_at NULL`、`attempt_count`、`last_error_code NULL`、`completed_at NULL`、`version`。
 
-## 13. 保留与删除边界
+唯一 `(topic,dedupe_key)`；索引 `(topic,status,available_at,id)`、`(status,claim_expires_at)`。领域状态、ExecutionEvent 和必要 Outbox 必须同事务提交。
 
-- Published AgentVersion、Plan/Group 冻结定义、Invocation、ExecutionEvent、Artifact 元数据不级联物理删除。
-- 用户删除 Session：先 `closed/archived`，异步清理 Workspace 文件并把 Artifact 标记 unavailable；领域记录按部署审计策略保留。
-- 未被测试 Run 引用的 draft_test_snapshot、失败上传 SkillVersion 可在 30 天后清理；当前 draft 不按时间清理。
-- Trace 独立保留（默认 30 天）；Token 临时流不保留；Checkpoint 默认终态后 30 天；Outbox 按上述窗口。
-- FK 删除策略默认 `RESTRICT`；只有纯关联表、未发布草稿子项允许 `ON DELETE CASCADE`。
+### `platform_audit_event`
 
-## 14. MySQL 约束实现清单
+`id PK`、`tenant_id FK`、`audit_sequence BIGINT`、`actor_account_id FK NULL`、`actor_external_identity_id FK NULL`、`actor_api_key_id FK NULL`、`asserted_user_id_snapshot NULL`、`category`、`action`、`resource_type`、`resource_id`、`outcome succeeded|denied|failed`、`request_id`、`dedupe_key`、`safe_summary`、`changes_redacted_json`、`hash_schema_version SMALLINT NOT NULL DEFAULT 1`、`previous_event_hash CHAR(64) NULL`、`event_hash CHAR(64)`、`occurred_at`，只追加；唯一 `(tenant_id,audit_sequence)` 和 `(dedupe_key)`。锁定 Tenant `next_audit_sequence` 分配序号并构建与 ExecutionEvent 同样的 canonical hash chain。
 
-| 不变量 | 数据库直接保证 | 锁定事务/服务保证 |
-| --- | --- | --- |
-| 一个 Agent 最多一个 draft | generated `draft_agent_id` + UNIQUE | Agent 创建提交前必须回填 draft_version_id；一致性 job 检查非空且同 Agent |
-| Published/test snapshot 不可变 | immutable_at seal 后 AgentVersion 与三张关系表 trigger 拒绝变更，FK RESTRICT | 发布服务只复制并 seal，不把 draft 原地转态；未 sealed 版本不可选择 |
-| version_no 唯一递增 | `(agent_id,version_no)` UNIQUE | 锁 Agent 分配 next_version_no；无间隙不是业务要求 |
-| History Chat 摘要唯一 | 非空 generated scope_discriminator UNIQUE | 保存前校验 scope/group 字段组合 |
-| Memory 每逻辑键一个 active | Head 非空 discriminator UNIQUE；Memory generated active_head_id UNIQUE | 锁 Head，先 supersede/delete 旧 active，再插入新版；candidate 复核 head version |
-| Group 每 revision/正式 Group 恰一入口 | generated entry key UNIQUE 保证最多一个 | revision 保存和确认事务计数必须等于 1 |
-| Proposal 图同 revision | participant/work item/edge 复合 FK | DAG/业务合法性与访问权由保存、确认事务校验 |
-| Proposal revision 不可改写 | revision 及四类子表 trigger 拒绝 UPDATE/DELETE | 编辑只 INSERT revision_no+1，并以 Proposal CAS 前移 current revision |
-| Group 节点冻结 | confirmed Group 的 node trigger 拒绝 INSERT/DELETE/agent_id UPDATE | 确认事务一次性复制；availability 可更新但不改变集合 |
-| Plan 定义冻结 | definition_status=frozen 后 Plan node/dependency trigger 拒绝写 | confirm 锁 Plan/Run 并计算 frozen_hash |
-| Event 合法重复诊断 | 仅 `(session_id,event_dedupe_key)` UNIQUE | EventWriter 按 transition/cause 生成 key；entity_version 不唯一 |
-| Event audience 完整 | recipient FK/PK 防重复与悬空 | EventWriter 在同事务保证 direct 至少一 recipient、private 必有 owner；读取统一投影二次授权 |
-| Outbox 清理后不重复推进 | 领域唯一键、状态 CHECK、Runner epoch/Invocation key 仍保留 | handler 始终回读领域状态；dedupe key 来源 transition/cause，不只依赖 Outbox 行 |
-| 冗余 user_id 一致 | 关键链路 `(id,user_id)` UNIQUE + 子表复合 FK | 多父表在固定锁顺序下逐一校验；每日一致性扫描只告警，不静默修复 |
-| 循环引用创建 | 初始 FK 均 nullable、迁移后 ALTER 添加 FK | Agent、Artifact/Message 等只允许专用事务按“父→子→回填”创建；提交后 invariant scan 不允许悬空 |
+### `ledger_integrity_seal`
 
-MySQL CHECK 负责枚举和单行条件，不用 CHECK 假装保证跨行计数。Trigger 只保护不可变与冻结边界，不承载复杂业务授权；授权、可访问性和图语义仍由服务层在短事务中验证。
+`id PK`、`tenant_id FK`、`ledger_type platform_audit|session_execution`、`scope_id`、`through_sequence`、`hash_schema_version SMALLINT`、`head_hash CHAR(64)`、`signature_algorithm`、`kms_key_version`、`signature`、`immutable_object_uri`、`sealed_at`，只追加；唯一 `(tenant_id,ledger_type,scope_id,through_sequence)`。`platform_audit` 的 scope_id 必须等于 tenant_id，`session_execution` 的 scope_id 必须指向同 Tenant 的 session_id，由写服务和数据库 Trigger 双重校验。签名对象固定包含 `tenant_id + ledger_type + scope_id + through_sequence + hash_schema_version + head_hash + sealed_at`，避免合法链头被替换到其他范围；对象 key 为 `ledger-seals/<tenant_id>/<ledger_type>/<scope_id>/<through_sequence>.json`，开启版本锁/对象锁且禁止覆盖。Production Maintenance 至少每日验证 hash chain，用非数据库内的 KMS 签名该对象并写入不可覆盖对象存储；签名或链校验失败是安全事件，不允许“重建”历史掩盖差异。
 
-有意允许多 NULL 的 UNIQUE 仅包括：Tool/Notification provider request/message key（尚未取得 Provider 标识的多次本地记录）、Artifact `parent_artifact_id`（多个根 Artifact 合法，根版本由 `(session_id,relative_path,version_no)` 约束）以及尚未发布的 version pointer。凡 NULL 代表同一逻辑桶的场景（History Chat、Memory user scope、Group entry）一律使用非空 generated discriminator，不直接依赖 nullable UNIQUE。
+`hash_schema_version=1` 的计算合同固定为：对该行除 `previous_event_hash`、`event_hash` 外的全部只追加列构造 JSON 对象，UUID 使用小写连字符格式，时间使用 UTC 六位小数和 `Z`，JSON 数字保留数据库整数值，嵌套 JSON 先按 RFC 8785 JCS 规范化；随后计算 `SHA-256(0x01 || UTF-8(JCS(row)) || 0x00 || previous_hash_bytes)`。第一行的 `previous_hash_bytes` 为 32 个零字节，后续行使用前一行 `event_hash` 的 32 字节解码值。升级算法只能新增 `hash_schema_version`，旧行、旧 seal 和旧算法验证器必须保留；不得原地重算历史 hash。
+
+Registry、身份、角色、密钥、Retention、break-glass 和策略变更写平台审计；Session 中 Agent 执行写 ExecutionEvent。跨账本关联使用 request/cause ID，不复制敏感正文。
+
+## 12. 约束实施分层
+
+不得用“应用会注意”替代可由数据库表达的约束，也不得用复杂 Trigger 隐藏跨聚合业务流程。约束归属固定如下。
+
+### DDL：FK / UNIQUE / CHECK / generated column
+
+1. 所有内部账号关系使用 `account_id`；所有 tenant-owned 子表物理带 tenant_id，tenant-owned FK 使用复合 FK，迁移测试必须证明数据库直接拒绝跨 Tenant parent/account/session/agent 组合；
+2. GroupRun 的 `run_id UNIQUE NOT NULL`，表中物理上不存在 lifecycle/outcome 字段；
+3. `(work_item_id,execution_epoch)`、`(group_run_id,summary_epoch)`、Tool operation、AgentInvocation operation、Event/Outbox dedupe key 唯一；
+4. status、mode、visibility、actor/owner 字段组合使用 CHECK；
+5. active Draft、WorkingPlan head和 Membership 使用 nullable generated key + UNIQUE；Clarification/Approval 使用 idempotency/subject UNIQUE 与结算 CAS；
+6. Artifact storage key、AgentCard version、Session event sequence 和版本序号唯一；
+7. 所有 required FK 默认 RESTRICT，历史执行/版本/审计不级联删除。
+
+### 数据库 Trigger + 独立 migration role
+
+应用运行账号不能禁用或修改 Trigger。Trigger 只承担行级不可变规则：
+
+- `agent_version` 为 published/deprecated/draft_test_snapshot 时拒绝行为内容字段 UPDATE 和整行 DELETE；只允许 `published→deprecated` 的状态/CAS/审计列变化，对应 Tool/Skill/Card 关系拒绝 UPDATE/DELETE；
+- `skill_version`、`policy_version`、`sandbox_profile_version` 拒绝内容列 UPDATE 和整行 DELETE，只允许稳定状态机中的 `status + version + status timestamp/actor` CAS 变化；
+- Artifact 为 published 后拒绝修改全部内容/归属/来源列；只允许状态机中的 status、availability/deletion 字段和治理 version CAS 变化；
+- append-only Event/Audit/Attempt/PlanUpdate/Checkpoint 拒绝 UPDATE/DELETE；Attempt 只允许由当前非终态向合法终态更新的状态列，不允许覆盖请求/结果事实；
+- Run、WorkItem、Runner、Invocation 的终态不得迁回非终态；
+- 只有专用 migration/retention role 能执行已批准的结构迁移或 Retention tombstone，普通应用账号无 DDL 权限。
+
+Trigger 必须版本化进入 Alembic，并有正向和拒绝测试；不能只存在于手工生产数据库。
+
+### 领域事务 + CAS / fencing
+
+以下跨行/跨表事实由唯一领域服务在显式事务中保证，并由数据库条件更新与锁验证：
+
+- `work_item.active_runner_id` 必须指向同 WorkItem、同当前 execution_epoch 的唯一非终态 Runner；创建/清除只经过 RunnerCoordinator；
+- Runner/ToolAttempt 写入必须匹配 `status + execution_epoch + lease_token`；条件更新 0 行即 fencing reject；
+- Approval/Clarification 的 target account 必须与 Run 所属 Session account 相同；
+- ExternalIdentity.principal_type 必须与 PlatformAccount.account_type 相同；service account 不能成为自然人 Approval/Clarification 的 target；
+- Group Reporter 必须是本 GroupRun available member；GroupRun 与 Run 必须属于同一 Session 链；
+- Tool/AgentInvocation/Outbox 相同业务 key 的 request hash 不同必须返回冲突；
+- Artifact DB 元数据与对象存储提交由 Reconciler 依据 artifact_id/checksum 收敛；
+- 用户数据所有查询与写入校验 tenant、内部 account 和父 Session 归属；外部 `asserted_user_id` 绝不直接参与领域 FK。
+
+每项领域不变量必须有至少两个并发事务的竞争测试和故障注入测试，不能只覆盖单线程 happy path。
+
+## 13. 最低索引与容量审查
+
+上线前必须用代表性数据量验证以下热路径的执行计划：
+
+- 待领取 Outbox：`topic + status + available_at`；
+- 租约回收：`status + lease_expires_at`；
+- 用户 Session 列表：`tenant + account + updated_at`；
+- Session/Run 事件续读：`session/run + sequence`；
+- AgentCard 发现：`tenant + visibility + published/group_enabled + tags`；
+- 等待动作：`tenant + target_account + status + created_at`；
+- Group quiescence：`run/work_item/invocation/approval/shared_task status`；
+- Artifact 列表和下载授权：`tenant + owner_account + session + created_at`。
+
+不得用新增 Redis 权威状态掩盖缺失索引；具体容量、SLO 和 HA Gate 见[生产就绪要求](../operations/production-readiness.md)。

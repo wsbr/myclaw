@@ -1,6 +1,8 @@
-# Context、History 与 Memory 实现
+# V1 Context、History 与 Memory（历史实现参考）
 
-本文是第一阶段四类 Policy接口、默认参数、摘要、Group投影、Memory生命周期和可解释记录的唯一实现级定义。
+> **历史 V1 实现参考，非目标设计。** Policy 和 Memory 基础实现仅作为迁移证据；WorkingPlan、Context Manifest、Group 按需共享和禁止采集 Chain-of-Thought 以[综合技术方案](phase-one-agent-native-delivery.md)为准。
+
+本文记录V1四类Policy接口、默认参数、摘要、Group投影、Memory生命周期和可解释记录基线。
 
 ## 1. 策略接口
 
@@ -65,7 +67,7 @@ Candidate必须含 `fact_key/content/source_message_ids/evidence_excerpt/confide
 5. 内容冲突且证据不足时 Candidate rejected，不改 active；
 6. `last_user_edited_at` 晚于 Candidate 创建，或 observed_head_version 已变化且不能证明兼容时，模型 Candidate rejected，用户编辑优先。
 
-模型写入成功、拒绝、失败在来源 Session 写 `memory.updated/candidate_rejected/write_failed` ExecutionEvent，payload 只含 Memory/Candidate ID 和安全原因。用户通过 Memory API 编辑或删除没有所属 Session：创建不可变新版本或标记 deleted，并写不含内容的 PlatformAuditEvent。异步失败不改 Run。
+历史 V1 曾定义 `memory.updated/candidate_rejected/write_failed` Session 事件；这些名称不属于当前稳定 ExecutionEvent，不能迁移。目标实现的用户 Memory 修改/删除创建不可变新版本或 tombstone，并写不含内容的 PlatformAuditEvent；模型异步候选只写受控诊断/审计，失败不改 Run。若未来需要用户可见 Memory 事件，必须先扩展当前 Observability/OpenAPI 稳定集合。
 
 ## 7. Memory Recall
 

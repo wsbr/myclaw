@@ -1,208 +1,347 @@
 # MyClaw 技术设计总览
 
-> 本文描述目标技术架构，不表示当前代码完成度。详细契约以 [权威模块文档](docs/README.md) 为准。
-
-第一阶段实现级设计统一从 [技术设计索引](docs/technical/README.md) 进入；本文件只保留架构摘要与导航。
+> 本文描述目标架构，不表示当前代码完成度。产品语义以[权威模块](docs/README.md)为准；第一阶段实现契约见[第一阶段 Agent-native 交付技术方案](docs/technical/phase-one-agent-native-delivery.md)。
 
 ## 架构目标
 
-MyClaw 将稳定 Agent 身份与不可变 AgentVersion 分离。平台注册可复用能力，Runtime 按 Chat 或已确认图的版本规则固定实际装配与 ExecutionPrincipal，通过持久化 Work Item、Invocation、ExecutionEvent 和 Checkpoint 支持等待、重试、取消与多 Agent 协作。
+MyClaw 的核心是一套模型驱动、可以持久运行和安全行动的 Agent Runtime：
 
 ```text
-Admin Registries
-├── Model Registry
-├── Platform Tool Registry
-├── Skill Registry + Shared Skill Workspace
-├── Sandbox Profile Registry
-└── Policy Registries
+Experience
+├── Chat view
+├── Plan permission mode + WorkingPlan view
+└── Group view + Agent network picker
 
-Execution Runtime
-├── Assembly Resolver
-├── Context / Prompt Builder
-├── Model Adapter
-├── Tool Dispatcher
-├── Agent Invocation Gateway
-├── Durable State Coordinator
-├── Session Sandbox Manager
-├── ExecutionEvent / Checkpoint
-├── ExecutionQueue / Outbox Dispatcher
-└── OTel Trace Exporter
+Agent Runtime
+├── Unified Agent Loop
+├── Context Assembler / Compaction
+├── WorkingPlan projection
+├── Tool / Agent collaboration
+├── Stop / Continuation policy
+└── Message / Artifact delivery
+
+Trusted Execution Kernel
+├── Identity / Authority / Capability snapshot
+├── Agent directory / local resolver
+├── Model adapter / Turn protocol
+├── Invocation dispatcher / approval
+├── Durable state / checkpoint / cancellation
+├── Idempotency / lease / fencing / budget
+└── Event / audit / trace
+
+Infrastructure
+├── MySQL authority
+├── Database Outbox / workers
+├── Redis provisional token bridge
+├── UAT: Local Sandbox / single-node Workspace
+├── Production: Kata/microVM / multi-AZ Workspace / object Artifact
+└── OTel backend
 ```
+
+Runtime 让模型决定如何理解、计划、行动和协作；Kernel 只负责机器事实、权限、可靠性和物理边界。
+
+## 核心不变量
+
+1. **只有一个 Agent Loop**：Chat、Plan、Group 不复制执行内核；
+2. **模式是策略**：差异来自权限、交互和协作能力；
+3. **计划由模型维护**：WorkingPlan 可选、动态、可见，但不驱动业务；
+4. **Group 成员来自工作网**：不依赖模板，不复制 Agent；
+5. **能力机器裁决**：自然语言、Skill 和历史文本不产生权限；
+6. **Tool 类型不被消费**：每次具体 Invocation 独立治理；
+7. **普通消息可以自然结束 Turn**：不存在模型可调用的 `finalize_response`；
+8. **结束与验证分离**：真实执行事实决定 verified，不由模型完成信封决定；
+9. **Evaluator 非必选**：专项评价按场景接入，不进入通用结算主链；
+10. **执行可恢复、历史不可改写**：等待后新建 Runner，终态 Run 不复活；
+11. **Context 是有限资源**：只投影当前决策所需的高信号事实；
+12. **身份、配置、工作与计算分离**：Agent、AgentVersion、WorkItem 和 Runner 不能合并；
+13. **平台内本地寻址**：数据库目录和调度器足够，跨控制域才引入网络 Endpoint；
+14. **最少抽象优先**：新实体必须证明无法由现有原语解决。
 
 ## 核心实体
 
 | 实体 | 技术职责 |
 | --- | --- |
-| `Agent` / `AgentVersion` | 保存稳定身份、所有权、访问范围与不可变发布装配 |
-| `PlatformTool` | 保存平台代码注册的 Tool 元数据、执行类型、启停和 Confirmation Policy |
-| `Skill` / `SkillVersion` | 保存逻辑标识、包位置、版本和 checksum |
-| `Model` | 保存 Provider、Endpoint、凭证引用、默认参数和能力 |
-| `PolicyDefinition` | 保存四类上下文与记忆策略 |
-| `SandboxProfile` / `SessionSandbox` | 保存 Agent 选择和 Session 固定的执行环境 |
-| `UserSession` | 保存用户与入口 Agent 的连续对话 |
-| `WorkItem` | 保存可跨 Runner 持续的业务工作 |
-| `Runner` | 保存一次短生命周期执行及其装配快照 |
-| `ToolInvocation` / `ToolAttempt` | 保存语义 Tool 调用与平台物理尝试 |
-| `AgentInvocation` | 保存经 `invoke_agent` 发生的定向请求与结果 |
-| `Clarification` | 保存可恢复的用户问答等待 |
-| `PlanExecution` | 保存已确认并冻结的 Work Item Graph |
-| `GroupFormationProposal` | 保存确认前关系化 Group revision、Bootstrap、参与者、初始工作和建议边 |
-| `GroupSession` | 保存固定参与者与共享 Message / ExecutionEvent |
-| `GroupRun` | 保存 GroupSession 内一次不可重启的工作周期 |
-| `GroupAgentNode` | 保存 Agent 在 Group 中唯一的参与实例 |
-| `Artifact` | 登记 Session Workspace 中正式发布的文件 |
-| `MemoryHead` / `Memory` | 保存用户事实逻辑槽、不可变版本、来源和唯一 active 版本 |
-| `PlatformAccount` / `AgentApiKey` | 保存统一 userId、基础平台角色和 Agent 绑定的外部凭证 |
-| `ChannelAccount` / `ChannelConversationBinding` | 保存第三方通道与 Session 绑定 |
-| `ExecutionEvent` | 保存事务一致、可续读的执行时间线 |
-| `PlatformAuditEvent` | 保存不占用 Session sequence 的管理面与安全审计 |
-| `NotificationDelivery` | 保存 Channel Session 原来源通知的投递与重试 |
-| `RunnerCheckpoint` | 保存 Runner / Work Item 恢复快照 |
-| `OutboxCommand` | 第一阶段数据库逻辑多 Topic 执行队列 |
+| `Agent` | 稳定逻辑身份、所有权和治理边界，不绑定进程或机器 |
+| `AgentVersion` | 不可变 ModelVersion、Instructions、Tool 选择/registration hash、精确 SkillVersion/checksum、PolicyVersion、SandboxProfileVersion 和协作配置蓝图；Tool 启停/确认/风险/连接配置是实时治理例外 |
+| `AgentCard` | 工作网发现所需的安全能力投影 |
+| `UserSession` | 用户与 Agent 或 Group 的持续上下文 |
+| `Run` | 一次用户请求或协作工作的唯一生命周期与终态权威 |
+| `AgentTurn` / `ProviderAttempt` | 一次模型决定及其安全传输尝试 |
+| `WorkItem` | 可跨等待、恢复和多个 Runner 持续的工作状态 |
+| `Runner` | 由 Runtime Worker 承载的一段短生命周期执行及其 lease/fencing 边界 |
+| `WorkingPlan` / `PlanUpdate` | 任意模式可选的模型工作计划与变更历史 |
+| `CapabilitySnapshot` | 本 Runner 可使用和被拒绝的能力、权限与预算快照 |
+| `ToolInvocation` / `ToolAttempt` | 一次语义行动与其物理执行尝试 |
+| `AgentInvocation` | Agent 间定向工作请求、等待和结果 |
+| `Clarification` / `Approval` | 可恢复的人类输入和高影响确认 |
+| `GroupSession` / `GroupMembership` | 从工作网选出的 Agent 协作空间和成员事件 |
+| `GroupRun` | Group 中一次目标的协作聚合；与 Run 一对一且不复制状态 |
+| `Workspace` / `Artifact` | 强制分区的运行文件空间和不可变正式交付快照 |
+| `ExecutionEvent` / `RunnerCheckpoint` | 可靠时间线和恢复快照 |
+| `OutboxCommand` | 至少一次的后台调度命令 |
 
-## 模式执行聚合
+`TaskBrief`、共享任务列表、质量评审和验证报告都可以作为可选投影或 Artifact 存在，不强制成为每个 Run 的领域前置条件。
+
+## 统一 Agent Loop
 
 ```text
-UserSession
-├── Chat Execution
-├── PlanExecution
-│   └── Frozen Work Item Graph
-└── GroupSession
-    ├── Fixed Agent Participant Graph
-    ├── Shared Messages / ExecutionEvents / Transcript
-    └── GroupRun[]
-        └── WorkItem[] / Runner[]
+Resolve runtime snapshot
+→ Assemble high-signal context
+→ Call model with tools
+→ Model returns:
+   ├── assistant message
+   ├── tool calls
+   └── provider stop reason
+→ Validate and persist requested actions
+→ Execute / wait / return results
+→ Continue the same Run with a new Turn or Runner
+→ Deliver final message when the model naturally stops
 ```
 
-Plan 图节点是 Work Item，确认后完全冻结；Group 图节点是 Agent 参与实例，确认后参与者固定，但图内协作边和节点 Work Item 可以追加。
+模型可以通过 Runtime Coordination Tool 更新计划、请求用户或协作；这些调用具有真实平台语义，但没有“完成整个任务”的控制 Tool。
 
-## 可恢复 Runtime 数据流
+Provider Adapter 只规范：有序 Turn Item、content part、Tool Call/Result 关联、usage、stream event、stop reason、错误和受控的不透明 continuation state。普通最终文本不要求包进复杂 JSON；Tool 参数仍按各 Tool 的小型 schema 校验。
 
-1. Chat 新 Run 解析最新发布 AgentVersion；Plan / Group 使用图确认时固定的 AgentVersion。
-2. 固定原始 ExecutionPrincipal、模式范围和调用链。
-3. 解析唯一 Model、显式 Tool、Skill 最新版本、四类 Policy 和 Agent Catalog。
-4. 加载 Work Item、当前输入及 UserSession / Plan / Group 上下文。
-5. 固定 Runner 快照并组装 Prompt。
-6. 调用模型和显式 Tool。
-7. 遇到用户、Agent 或异步 Tool 等待时，持久化等待对象并结束 Runner。
-8. 等待条件满足后，在同一 Work Item 下创建新 Runner。
-9. 在领域事务中记录状态、ExecutionEvent 和 Outbox。
-10. 结算 Work Item 并执行记忆写入策略。
+## Mode Policy
 
-Runner 不长期挂起，也不原地恢复。正在执行的 Runner 固定 AgentVersion 与实际装配；Skill 在每个新 Runner 启动时按逻辑标识解析并固定 checksum；Sandbox Profile 由 Session 创建时固定。
+Runtime 在同一 Loop 上解析三类策略：
 
-## Prompt 组装
+| 策略 | Chat | Plan | Group |
+| --- | --- | --- | --- |
+| `interaction_policy` | 单 Agent 对话 | 单 Agent + 计划审批 | 多成员可寻址对话 |
+| `permission_mode` | 当前授权 | 批准前 `plan_readonly`，批准后恢复执行权限 | 每个成员自身权限 |
+| `collaboration_policy` | 可选委派，结果回当前 Agent | 可选研究/委派，结果回当前 Agent | 成员消息、调用和共享协作 |
+| `plan_visibility` | 按需显示 | 始终显示 | 成员计划可私有，共享任务可选 |
+
+Policy 不包含业务步骤，也不根据 Plan 节点自动调度 Agent。
+
+## WorkingPlan
+
+WorkingPlan 是当前 Agent 主动维护的高信号状态：
 
 ```text
-Platform Runtime Rules
-Agent name/description/instructions
-已装配 Tool Definitions
-Skill Catalog
-显式绑定 Agent Catalog
-Plan Declared Agent Catalog（Plan）
-Group Agent Catalog（Group）
-Context Policy 结果
-History Policy 结果
-Memory Recall 结果
-当前 Work Item 与执行上下文
-当前定向输入
+plan_id
+session_id / run_id
+owner_agent_id
+summary
+items[]: text + status
+explanation?
+revision
+updated_at
 ```
 
-Group 节点从统一共享记录构建自己的上下文投影，不建立独立聊天 Session。Context / History Policy 只能处理 `group_id + agent_id` 的直接可见范围；其他节点记录必须通过显式查询 Tool 获取。
+模型可以在任何模式调用 `update_plan`。Runtime 保存 revision 和事件，UI 展示当前版本；更新不创造 ToolInvocation、AgentInvocation 或业务授权。
 
-## Invocation 语义
+显式 Plan 模式只通过 `permission_mode=plan_readonly` 阻止写入和外部副作用。用户批准精确 WorkingPlan revision 后写入 `plan.implementation_approved` 事件并恢复后续 Runner 执行权限；若 WorkingPlan 之后继续修订，新 revision 不继承旧批准。
 
-所有 Tool 调用都产生 ToolInvocation：
+## Agent 本地运行、Agent Network 与 Group
 
-- `inline` 在当前 Runner 内返回；
-- `durable_async` 使 Work Item 进入 `waiting_tool`；
-- 平台技术重试属于同一 ToolInvocation，使用相同参数和幂等键；
-- 有副作用且无法确认结果时进入 `outcome_unknown`；
-- 需要轻量确认时进入 `waiting_confirmation`。
+AgentVersion 是配置蓝图，不是常驻服务。一次用户请求、AgentInvocation 或需要处理的 Group 消息创建或恢复 WorkItem；调度器让 Runtime Worker 领取推进权，加载目标 AgentVersion、权威上下文和 CapabilitySnapshot，开始一个 Runner。到达持久等待边界或本段执行结束时 Runner 终结，Agent 身份和 WorkItem 状态继续由数据库保存。
 
-所有 `invoke_agent` 都必须产生定向结果。调用方进入 `waiting_agent`；同一 Runner 可并行发起多个调用，全部进入终态后再恢复调用方。
+```text
+AgentInvocation / Message
+→ CollaborationService 校验主体、策略和可见性
+→ AgentDirectoryService 解析本地 AgentVersion
+→ 调度事务创建或恢复 WorkItem，并创建 queued Runner + Outbox
+→ Runtime Worker 领取 Runner，加载配置并执行统一 Agent Loop
+→ 结果持久化并按 return route 唤醒调用方或写入 Group
+```
 
-## 身份与授权
+平台内没有“每个 Agent 一个 IP/容器”的要求，也不允许 Agent 绕过 CollaborationService 直接互调进程。`agent_id` 是逻辑地址，Runner 所在 Worker 只是临时执行位置。
 
-ExecutionPrincipal 至少记录租户、唯一 `userId`、认证来源、UserSession、入口 Agent、当前 Agent、Plan/Group 范围和 delegation chain。
+AgentVersion 发布后生成 AgentCard 并进入可见范围内的工作网。Group 的成员来源只有两种：
 
-目标 Agent 使用自己的模型、Tool、Skill 和策略，但 Agent 调用不能提权。有效权限是原始主体权限、当前 Agent 装配、模式范围与 Tool/业务系统策略的交集。
+- 用户从工作网直接选择；
+- 当前 Agent 搜索候选并发起邀请或加入建议。
 
-Agent API Key 绑定一个入口 Agent，可创建多把并分别撤销、轮换。外部系统传入经过自身认证的企业 `userId`；API Key 采用固定最小能力集，不承载业务角色或自由组合 Scope。完整定义见 [身份与 Agent API](docs/modules/identity-api.md)。
+Group 不使用角色模板。第一阶段用户选择三个确定 Agent，创建：
 
-第一阶段平台角色为 `user / builder / admin`，Agent 访问范围为 `private / enterprise`。Builder 拥有蓝图但不拥有使用者数据；显式绑定不授予目标 Agent 访问权，组图、图确认和实际 `invoke_agent` 都必须校验原始 `userId`。
+```text
+GroupSession
+├── initiator user / entry agent
+├── GroupMembership[]
+├── GroupMessage[]
+├── optional SharedTask[]
+└── GroupRun[]
+```
 
-## Group 共享记录
+`GroupRunSnapshot` 固定本次使用的成员 AgentVersion、共享范围、权限和预算，保证 UAT 可复现。GroupRun 与 Run 一对一，Run 是 lifecycle、等待和终态的唯一事实源。终局动态加入使用同一 Membership 事件模型；是否允许本 Run 立即生效由 Collaboration Policy 决定，不需要 Charter 模板或 Formation JSON。
 
-GroupSession 共享 Message 与 ExecutionEvent。每条记录保留 sequence、发送者、接收者、类型、Clarification、Work Item、Invocation 和因果引用。
+Group 成员可以直接发消息、调用其他成员、更新共享任务和发布 Artifact。`initiator_agent_id` 只是未指定接收者时的默认对话锚点，没有 Supervisor 权限。每轮 `reporter_agent_id` 只承担结构空闲后的最终汇总责任；Coordinator 用持久 summary epoch 幂等唤醒它，汇总提交且二次确认没有 pending work 后才完成唯一 Run。
 
-消息定向处理：只有接收者被立即唤醒。当前 Agent 的策略只能处理其直接可见投影；其他节点的共享记录只有显式调用查询 Tool 后才进入当前 Runner。Agent 私有装配、记忆、Prompt 和内部推理不进入共享记录。
+第一阶段 Agent Directory 直接查询 MySQL 中的 AgentCard 投影；`group_enabled` 只是候选条件，还必须过滤版本发布状态、可见范围、Collaboration Policy、环境兼容性和可用性。未来跨控制域时由 Agent Gateway 把同一 AgentInvocation 映射到外部协议，本地领域模型不随传输方式分叉。
 
-终态 GroupRun 不能重新激活；相关追问在同一 GroupSession 创建新的 GroupRun。新 GroupRun 重新解析全部固定节点：可用节点固定最新版，停用节点保留为 unavailable 且不能接收新工作；非 owner 停用不阻塞其他节点，owner 必须是可用固定节点。
+## Capability Snapshot
 
-## 一致性、恢复与 Trace
+```text
+effective_capabilities =
+  AgentVersion assembly
+  ∩ original principal authority
+  ∩ session/run permission mode
+  ∩ collaboration boundary
+  ∩ platform governance
+  ∩ remaining hard budget
+```
 
-- Chat 在新 Run 创建时解析最新发布 AgentVersion，Plan / Group 在图确认时固定参与 AgentVersion；
-- Model、Tool 和 Policy 按固定 AgentVersion 解析，仍受平台注册启停治理；
-- Skill 逻辑标识指向最新发布版本，当前 Runner 固定 checksum；
-- Tool Confirmation Policy 在真正执行前读取当前 `never | always` 配置；策略收紧影响尚未执行的调用，策略放宽不自动批准既有等待；
-- Runtime 不进行模型 fallback、Tool 补齐或参数覆盖；
-- 取消停止后续推进但不回滚业务副作用；
-- Session 执行状态与 ExecutionEvent 在同一事务提交，管理面状态与 PlatformAuditEvent 在同一事务提交；
-- RunnerCheckpoint 只负责恢复，Outbox 只负责可靠调度；
-- 第一阶段 Worker 直接轮询一张 `outbox_command` 表，并按 Topic 分池；
-- Redis 作为实时 Token Bridge 的必需但非权威依赖；桥接失败不影响 Run、最终 Message 或可靠事件；
-- 后期可通过同一 ExecutionQueue 接口接入 MQ，Transactional Outbox 仍保留；
-- 同一 Work Item 同时最多一个 active Runner，Worker 使用租约、心跳和 fencing token；
-- 可并发状态使用乐观版本号，Session Event sequence 在短事务中分配；
-- 每个 Runner 创建独立 OTel Trace，异步调用通过 Invocation ID 和 Span Link 关联；
-- Trace 允许异步导出，不作为当前状态、SSE 或恢复依据；
-- 历史重跑默认使用重跑时最新可用配置，不承诺完全确定性复现。
+Snapshot 记录 assembled、effective 和 denied capabilities 及 reason code。Provider 看到的 Tool Definitions 必须与 effective 集合一致。
 
-第一阶段只支持 Checkpoint 恢复和创建引用历史的新 Run。任意 Fork 与确定性 Replay 后置。
+第一阶段 Web 使用登录账号；Agent API 使用绑定入口 Agent 的 API Key，并接受调用方提供的裸 `userId`。两种入口都先解析为租户内不可变 `account_id`，CapabilitySnapshot 只用 `tenant_id + account_id` 作为领域主体键，另记录 `api_key_id`、actor Agent、credential/account-authorization/permission revision 和脱敏后的外部身份证据。raw userId 模式只用于受控 UAT/内网，不能声称已经验证终端用户；生产必须使用 `enterprise_oidc_v1`。
 
-## Sandbox 与文件
+成功调用 Tool 不会从集合中移除它。只有权限、模式、治理、预算或 AgentVersion 发生机器态变化时，后续 Runner 才重新解析能力。
 
-Agent 选择 `sandbox_profile_id`，Session 创建时固定 SessionSandbox。第一阶段只有本地目录隔离的 `local`；Local Sandbox 不是不可信代码安全边界。
+## Tool、Runtime Coordination 与幂等
 
-Session Workspace 使用整体读写锁，`execute` 获取独占锁。默认不主动回收，生命周期与 Session 一致。正式文件仍保存在 Workspace，并以轻量 Artifact 元数据登记。
+### Platform Tool
 
-## Channel
+访问文件、命令、Artifact 或外部系统，例如 `read_file`、`write_file`、`execute` 和 `publish_artifact`。
 
-ChannelPlugin 将第三方消息标准化并通过 ChannelConversationBinding 持续复用 Session。Channel 用户必须映射到唯一 `userId`。任务通知默认投递回 Session 原 Channel；通知失败不改变 Run 状态。
+### Runtime Coordination Tool
 
-## 管理面与执行面
+改变真实协作状态，例如：
 
-管理面负责 Registry、Agent 草稿与发布、Skill 发布、角色和 Agent 访问范围、Tool 启停与 Confirmation Policy、策略选择、Plan Proposal 和 GroupFormationProposal 确认。
+- `update_plan`；
+- `ask_user`；
+- `discover_agents`；
+- `invite_agent` / `invoke_agent`；
+- `send_group_message`；
+- `update_shared_task`。
 
-执行面负责 Runner、Prompt、模型、Tool、定向 Agent 调用、等待恢复、身份校验、ExecutionEvent、Checkpoint、状态和 Trace。执行面不能自行改变 Agent 装配、Plan 图或 Group 参与者集合。
+它们和普通 Tool 一样有明确参数、结果、权限和审计，但不代表业务完成，也不关闭其他能力。
+
+所有有副作用的调用先创建 Invocation。技术重试必须复用同一 Invocation、参数和 operation key；模型在新事实下再次行动则创建新的 Invocation。幂等判断由 Tool 自己声明 scope，不能根据 Tool key 或文件 checksum 粗暴去重。
+
+## Turn 停止与 Run 生命周期
+
+Provider 最终消息且没有 Tool Call 时，当前 Turn 自然停止。Runtime 根据调用位置路由消息：
+
+- 根 Run：交付用户；
+- AgentInvocation：完成本次协作并恢复调用方；
+- Group 成员：写入定向或共享消息；
+- Plan 只读阶段：生成或更新方案并等待用户批准。
+
+Run 的机器状态至少包括：
+
+```text
+active
+waiting_user
+waiting_approval
+waiting_tool
+waiting_agent
+completed
+cancelled
+failed
+```
+
+普通 final message 可以完成一次根 Run，但不能把仍在运行的 Invocation 伪造成成功。若存在明确 pending action，Run 保持 waiting 或 active；如果用户要求提前汇报，消息可以先交付，后台状态继续显示。
+
+## Continuation 与验证
+
+Runtime 可以在模型准备停止时运行轻量 Continuation Check：
+
+1. 是否仍有本 Run 创建且必须等待的 Invocation；
+2. 是否存在未回答 Clarification 或 Approval；
+3. 是否触发取消、硬预算或协议错误；
+4. 当前动作是否违反确定性发布 Gate。
+
+Check 只读取机器事实。需要继续时，把精确事实作为下一 Turn 的 Observation；不调用通用 Evaluator，不让模型声明 required Tool。
+
+结果验证分层：
+
+- `observed`：存在真实 Tool/Agent 结果；
+- `verified`：命中场景定义的确定性检查，例如九例实际 argv、退出码和输出；
+- `reviewed`：可选评审 Agent 或人类完成评价；
+- `accepted`：外部 UAT 或业务 Owner 接受。
+
+这些标签不改变历史事实。未验证结果可以正常交付，但 UI 必须准确显示其状态。
+
+## Context Assembly
+
+Prompt Package 按当前 Turn 动态组装：
+
+```text
+Platform constitution
+AgentVersion instructions
+Current user or agent input
+Effective Tool definitions
+Relevant Skill content
+WorkingPlan summary
+Unconsumed Tool / Agent / human results
+Selected history / memory
+Group scoped messages or shared tasks when relevant
+Budget / permission / environment summary
+```
+
+每段保留来源、版本、visibility 和 token estimate。Context Assembler 优先引用高信号事实，旧 Tool 输出可以压缩为摘要和稳定引用。其他 Agent 的 Instructions、私有 Memory、凭证和 Chain-of-Thought 不进入共享上下文。
+
+## 可靠执行
+
+- 领域状态、ExecutionEvent 和 Outbox 同事务提交；
+- 同一 WorkItem 最多一个 active Runner；
+- Runner 使用 lease、heartbeat、execution epoch 和 fencing；
+- waiting 条件满足后，调度事务创建新 queued Runner 与 Outbox；任意 Runtime Worker 都可以领取，不恢复旧进程，也不要求回到原机器；
+- ToolInvocation 是副作用恢复边界；
+- Provider 在零 payload 的安全条件下才进行透明技术重试；
+- 已产生 Tool Call 或部分副作用后只按权威记录恢复；
+- 预算在 Run 级跨 Runner 累计；
+- Redis、SSE delta 和 OTel 都不是业务事实源；
+- 终态 Run 不重新激活，后续请求创建新 Run 并引用历史。
+
+Session Workspace 物理上可共享，但 File Tool 强制区分每个 Agent 的私有根、Group shared 根和平台只写 Artifact 快照根。`publish_artifact` 复制源字节并固定 checksum/storage key；源文件后续修改不会改变已发布 Artifact。
+
+## 可观测性
+
+每次执行应能查询：
+
+- AgentVersion、Model、Tool、Skill、Sandbox 和权限快照；
+- Context section manifest 与压缩版本；
+- 每个 Turn、ProviderAttempt、Tool Call、Message 和 stop reason；
+- WorkingPlan 更新、Agent 发现、邀请、消息和 Invocation；
+- Approval、等待、恢复、取消、预算和 fencing；
+- Workspace、Artifact、测试和机器验证结果；
+- 最终消息与 Run 终止原因。
+
+不持久化模型私有 Chain-of-Thought；只保存供应商允许的 reasoning summary、模型可见计划、Action 和事实。
+
+## 第一阶段部署
+
+第一阶段继续采用单机 Docker Compose：Web、API、runtime worker、tool/sandbox worker、maintenance、MySQL、Redis 和可查询 OTel 后端。该拓扑只用于受控 UAT，不承诺企业生产 HA、SLO、RPO/RTO 或不可信代码隔离；生产门禁见[生产就绪要求](docs/operations/production-readiness.md)。
+
+## 企业生产部署
+
+生产不延续单机拓扑：`enterprise_production_v1` 使用三可用区 Kubernetes、MySQL 单写 HA 与 PITR、`enterprise_oidc_v1`、Kata/microVM Sandbox、多可用区 Workspace、版本化对象 Artifact、Redis HA 和 OpenTelemetry。Agent 仍是逻辑配置，Runner 仍由共享 Worker 按需承载；生产不会退回“每 Agent 一个 IP/服务”的模型。
+
+生产默认 SLO 为 API 99.90%，MySQL RPO ≤5 分钟/RTO ≤60 分钟；其余性能、Workspace/Artifact 恢复目标、网络、安全、发布和演练合同见[企业生产参考架构](docs/technical/production-reference-architecture.md)与[生产就绪要求](docs/operations/production-readiness.md)。接口实现必须符合 [OpenAPI 3.1](docs/technical/openapi-v1.yaml)。这些文档定义落地方式；当前实现是否已满足仍只由绑定 clean SHA 的测试和演练证据决定。
+
+实现优先级是删除错误 Harness 主链，再增加最少新能力：
+
+1. 删除 `finalize_response`、`required_tool_keys` 和 Tool 类型消费；
+2. 统一 Provider Turn：普通消息 + native Tool Call + stop reason；
+3. 在三个模式共用的 Loop 上实现 Capability、等待和恢复；
+4. 增加任意模式可用的 WorkingPlan；
+5. 把 Plan 改为 permission mode；
+6. 让 Group 从 Agent Network 直接选人并使用 Membership；
+7. 用确定性 UAT Gate 验证九例和 Artifact；
+8. 完成自然语言稳定性、故障注入和恢复测试。
+
+详细实施见[第一阶段 Agent-native 交付技术方案](docs/technical/phase-one-agent-native-delivery.md)。
 
 ## 文档导航
 
-- [文档索引与权威性](docs/README.md)
-- [设计哲学与产品原则](docs/DESIGN_PHILOSOPHY.md)
-- [企业智能体网络最终蓝图](docs/modules/enterprise-agent-network.md)
+- [设计哲学](docs/DESIGN_PHILOSOPHY.md)
+- [产品总览](PRODUCT.md)
+- [Agent-native Harness 调研](docs/technical/agent-native-harness-research.md)
+- [Enterprise Agent Network](docs/modules/enterprise-agent-network.md)
 - [第一阶段交付边界](docs/modules/phase-one-scope.md)
-- [Agent Schema 与装配规则](docs/modules/agent-assembly.md)
-- [Platform Tool Registry](docs/modules/tool-system.md)
-- [Skill 包、同步与版本](docs/modules/skill-system.md)
-- [Model Registry](docs/modules/model-system.md)
-- [上下文与记忆策略](docs/modules/context-memory.md)
-- [身份与 Agent API](docs/modules/identity-api.md)
-- [Sandbox、Workspace 与 Artifact](docs/modules/sandbox-artifact.md)
-- [Channel 与通知](docs/modules/channel-system.md)
-- [Agent 发现与调用](docs/modules/agent-collaboration.md)
-- [Plan 数据模型与生命周期](docs/modules/plan-mode.md)
-- [Group 数据模型与生命周期](docs/modules/group-mode.md)
-- [Runtime、Prompt 与结算](docs/modules/runtime-execution.md)
-- [Runtime 调度与数据库并发](docs/modules/runtime-scheduling.md)
-- [执行事件、Checkpoint 与可观测性](docs/modules/observability.md)
-- [非权威待确认主题](docs/pending/legacy-designs-to-review.md)
-- [第一阶段技术设计索引](docs/technical/README.md)
-- [物理架构](docs/technical/architecture.md)
-- [数据库 Schema](docs/technical/database-schema.md)
-- [状态机与一致性](docs/technical/state-machines.md)
-- [执行事件、平台审计与可见性](docs/technical/events-audit-visibility.md)
-- [Runtime 详细流程](docs/technical/runtime-flows.md)
-- [API、SSE 与前端](docs/technical/api-sse.md)
-- [代码审计与迁移计划](docs/technical/audit-migration-plan.md)
+- [Agent 装配](docs/modules/agent-assembly.md)
+- [Agent 协作](docs/modules/agent-collaboration.md)
+- [Plan 模式](docs/modules/plan-mode.md)
+- [Group 模式](docs/modules/group-mode.md)
+- [Runtime 执行](docs/modules/runtime-execution.md)
+- [第一阶段 Agent-native 交付技术方案](docs/technical/phase-one-agent-native-delivery.md)
+- [数据库契约](docs/technical/database-schema.md)
+- [状态机](docs/technical/state-machines.md)
+- [API 与 SSE](docs/technical/api-sse.md)
+- [OpenAPI 3.1](docs/technical/openapi-v1.yaml)
+- [企业生产参考架构](docs/technical/production-reference-architecture.md)
+- [生产就绪要求](docs/operations/production-readiness.md)
+- [企业生产运行手册](docs/operations/production-runbook.md)

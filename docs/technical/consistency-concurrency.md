@@ -1,6 +1,8 @@
-# 事务、一致性与并发
+# V1 事务、一致性与并发（历史实现参考）
 
-本文是第一阶段原子性、幂等、执行所有权、事件顺序、Workspace 锁和竞态的唯一实现级定义。
+> **历史 V1 实现参考，非目标设计。** 本文只保留事务、lease、fencing、sequence 和 Workspace lock 的迁移证据；当前 Run、Turn、Approval、Group 消息和停止切点以[综合技术方案](phase-one-agent-native-delivery.md)为准。
+
+本文记录V1原子性、幂等、执行所有权、事件顺序、Workspace锁和竞态基线。
 
 ## 1. 领域事务模板
 
@@ -149,29 +151,30 @@ Group 定向消息只为 recipient node 创建 WorkItem，不广播唤醒。`sea
 
 ## 12. Tool Confirmation 即时策略
 
-创建 Invocation 和真正底层执行前都读取 PlatformTool 当前 `enabled/config_version/confirmation_policy`：
+创建 Invocation 和真正底层执行前都读取 PlatformTool 当前 `enabled/config_revision/risk_version/confirmation_policy`：
 
-- `never→always`：只要尚无 running Attempt，事务创建/复用 pending Confirmation，Invocation 转 waiting；
-- `always→never`：新 Invocation 跳过等待；已有 pending 保持，必须由用户决策或取消；
-- 参数改变：原批准不匹配 arguments_hash，必须创建新 Invocation/Confirmation；
+- `never→per_call|session_grant`：只要尚无 running Attempt，且 `session_grant` 未命中有效 Grant，事务创建/复用 pending Approval，Invocation 转 waiting_confirmation；
+- `per_call|session_grant→never`：新 Invocation 跳过等待；已有 pending Approval 保持，必须由用户决策或取消；
+- `per_call↔session_grant`：只影响新 Invocation；切到 session_grant 时重新验证精确 Grant 范围，已有 pending Approval 不自动批准；
+- 参数改变：原批准不匹配 arguments_hash，必须创建新 Invocation/Approval；
 - 已批准后的技术重试：同 Invocation、同 hash、同 principal，不重复确认；
 - Tool 停用：未开始者 failed(tool_disabled)，已执行者按真实结果；重新启用不复活。
 
-管理员不能替用户批准。策略更新使用 config_version，Confirmation 记录决策时看到的 policy_version，便于审计。
+管理员不能替用户批准。策略更新递增 config_revision/risk_version，Approval 与 SessionGrant 记录决策时看到的 revision，便于审计。
 
 ## 13. Run 与模式聚合状态权威
 
-`run.lifecycle/outcome` 是 Chat、Plan 和 GroupRun 的唯一执行权威。`plan_execution` 只保存 definition_status，`group_run` 不保存 status/outcome；API 中的 Plan/GroupRun lifecycle/outcome 通过一对一 Run 读取，因此不存在三套可漂移镜像。
+`run.status` 是 Chat、Plan 和 GroupRun 的唯一执行权威。历史 `plan_execution` 只保存定义状态，`group_run` 不保存 status/outcome；API 中的 Plan/GroupRun 执行状态通过一对一 Run 读取，因此不存在三套可漂移镜像。当前 Plan 已改为 WorkingPlan + permission mode，表中 Plan 行只用于理解旧并发问题，不可作为目标状态机。
 
 | 模式对象 | 定义/容器状态 | 允许的 Run 组合 |
 | --- | --- | --- |
-| Chat | 无额外定义状态 | Run 任一合法 lifecycle；completed 必有 outcome，cancelled outcome=NULL |
-| Plan draft | definition_status=draft | proposal generation 后 Run waiting，wait_reason=graph_confirmation；生成期间可 running |
-| Plan awaiting_confirmation | awaiting_confirmation | Run 必须 waiting/graph_confirmation |
-| Plan frozen | frozen | Run 可 running/waiting/settling/completed/cancelled |
+| Chat | 无额外定义状态 | Run 任一当前合法 status；completed/cancelled/failed 为终态 |
+| Plan draft（旧） | definition_status=draft | 旧 proposal generation 期间映射为 active，等待确认映射为 waiting_approval；目标方案不创建该对象 |
+| Plan awaiting_confirmation（旧） | awaiting_confirmation | 映射为 Run=waiting_approval；目标方案使用 RequiredAction + WorkingPlan revision |
+| Plan frozen（旧） | frozen | 映射为 Run 可 active/waiting_*/completed/cancelled/failed；目标方案没有 frozen 定义态 |
 | Plan cancelled before confirm | cancelled | Run 必须 cancelled |
 | Group Formation | Proposal 自己的状态 | generation Run 只反映生成周期，Proposal awaiting时它已completed；confirmed 后另建GroupRun/Run |
-| GroupRun | 无重复状态 | 关联 Run 可 running/waiting/settling/completed/cancelled；`created` 由“Run=running且尚无Runner started”派生，`waiting_*` 由 Run.wait_reason 派生 |
+| GroupRun | 无重复状态 | 关联 Run 可 active/waiting_user/waiting_approval/waiting_tool/waiting_agent/completed/cancelled/failed；尚无 Runner started 可显示 created，但不是可写状态 |
 
 Plan confirm 同一事务按 `UserSession → Run → PlanExecution` 锁顺序，把 definition awaiting→frozen、Run waiting→running，并创建 WorkItem/Event/Outbox。确认前取消同事务把 definition→cancelled、Run→cancelled。确认后的等待、结算、完成和取消只迁移 Run；Plan 定义不动。GroupRun 创建时必须与 Run 同事务一对一创建，之后只迁移 Run。
 

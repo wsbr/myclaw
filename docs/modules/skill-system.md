@@ -64,7 +64,7 @@ shared-skills/
 
 ## Runtime 加载
 
-Runner 启动时为每个已装配 Skill 解析当前发布版本，固定 `skill_id + version_id + checksum + path`。
+发布 `AgentVersion` 或创建不可变 `draft_test_snapshot` 时，平台为每个已装配 Skill 解析当前发布版本，并固定 `skill_id + skill_version_id + checksum`。Runner 启动时只按该快照解析只读路径，不再读取 Skill 的 current pointer。
 
 初始 Prompt 的 Skill Catalog 只包含：
 
@@ -78,10 +78,11 @@ path
 
 ## 更新语义
 
-- Agent 绑定 Skill 的逻辑 `skill_id`，不固定具体版本。
-- Skill 新版本发布后，下一次 Runner 立即解析到最新版。
-- 已运行中的 Runner 固定启动时的 checksum 和路径，不随别名切换。
-- Runner 快照必须记录实际使用的版本与 checksum；Observability Trace 可以引用该快照。
+- 可编辑 Agent Draft 绑定逻辑 `skill_id`，便于 Builder 选择能力；Draft 页面应同时显示当前解析到的 SkillVersion。
+- 发布 AgentVersion 时把每个逻辑 Skill 解析为精确 `skill_version_id + checksum`，发布事务失败时不得留下部分绑定。
+- Skill 新版本发布不会改变任何已发布 AgentVersion，也不会改变其下一次 Runner 的行为。需要采用新版 Skill 时，Builder 必须重新测试并发布新的 AgentVersion。
+- `draft_test_snapshot` 同样固定精确 SkillVersion，保证测试结果可复现；Draft 在下一次保存或测试时可以重新解析最新版。
+- Runner 快照记录实际使用的 SkillVersion、checksum 和只读路径；Observability Trace 可以引用该快照，但不能把路径作为身份或权限。
 
 ## 脚本与权限
 
@@ -91,6 +92,6 @@ Skill 包允许携带脚本。当前阶段采用可信 Skill 模型，不在上�
 
 `local` 只承诺会话目录隔离与执行生命周期管理，不是不可信代码安全边界。完整规则见 [Sandbox、Workspace 与 Artifact](sandbox-artifact.md)。
 
-后期可以在上传阶段形成 `trusted / unknown / unsafe` 等评估结果，并在 Agent 绑定时根据 Sandbox 安全能力告警或要求改选更安全环境；当前不实现扫描与强制策略。
+`enterprise_production_v1` 不沿用上述可信假设。生产上传必须记录 source/provenance、生成内容 checksum、执行恶意文件/依赖/secret 扫描，并形成 `trusted|unknown|quarantined` 评估；只有受信来源或经人工批准的 unknown 包可发布。脚本只能在 `security_level=microvm` 的 SandboxProfileVersion 中执行，默认拒绝出站且不注入宿主 Secret。扫描规则变化增加 assessment revision；新准入可以阻止旧包的新执行，但不能改写 AgentVersion/SkillVersion 历史。具体隔离和事件处置见[生产参考架构](../technical/production-reference-architecture.md)与[生产运行手册](../operations/production-runbook.md)。
 
 Skill 不声明或扩大 Tool、MCP、Agent 或数据权限。

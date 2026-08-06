@@ -24,22 +24,22 @@ ExecutionEvent 记录需要被用户、API、Group 或审计可靠观察的业�
 
 ```text
 event_id
+tenant_id
 session_id
-run_id
-group_id?
+run_id?
 sequence
 event_type
-actor_type
-actor_id
-target_type?
-target_id?
-entity_type
-entity_id
-entity_version
 visibility
-summary
-payload
-created_at
+actor_kind
+actor_account_id? / actor_agent_id? / actor_runtime_id?
+aggregate_type / aggregate_id / aggregate_version
+cause_type / cause_id
+dedupe_key
+safe_summary
+payload_json
+previous_event_hash / event_hash
+hash_schema_version
+occurred_at
 ```
 
 典型事件包括：
@@ -51,9 +51,50 @@ created_at
 - Clarification 发起和回复；
 - Message 写入；
 - Artifact 发布；
-- Plan / Group Proposal 确认。
+- Session mode、Plan Approval 和 permission mode 变化；
+- WorkingPlan、Group Membership、Group Message、SharedTask 和 Verification 变化。
 
 关键业务状态与对应 ExecutionEvent 必须在同一数据库事务提交。事件引用实体版本，并对同一实体版本和事件类型设置幂等约束。
+
+Session sequence 分配的同一串行点还要按[数据库契约](../technical/database-schema.md)的 `hash_schema_version` 计算 canonical event hash chain。hash 只是篡改检测，不替代数据库权限、备份或外部审计；`enterprise_production_v1` 至少每日验链，由 KMS 签名 head 并把 seal 写入不可覆盖存储。用户/Group SSE 经过 visibility 过滤，不对外声称客户端能验证一条包含不可见事件的完整链。
+
+### 稳定 event_type
+
+event_type 使用 `aggregate.action` 小写 snake_case，不创建同义别名。v1 稳定集合：
+
+```text
+run.created | run.waiting | run.resumed | run.cancellation_requested
+run.completed | run.failed | run.cancelled
+work_item.created | work_item.running | work_item.waiting_user
+work_item.waiting_approval | work_item.waiting_tool | work_item.waiting_agent
+work_item.waiting_resource | work_item.resumed | work_item.succeeded
+work_item.failed | work_item.cancelled | work_item.timed_out | work_item.blocked
+runner.created | runner.started | runner.succeeded | runner.failed | runner.cancelled | runner.lost
+agent_turn.started | agent_turn.waiting_actions | agent_turn.completed | agent_turn.failed
+message.created
+tool_invocation.created | tool_invocation.waiting_confirmation
+tool_invocation.waiting_resource | tool_invocation.queued | tool_invocation.running
+tool_invocation.succeeded | tool_invocation.failed | tool_invocation.rejected
+tool_invocation.cancelled | tool_invocation.outcome_unknown
+agent_invocation.created | agent_invocation.queued | agent_invocation.running
+agent_invocation.succeeded | agent_invocation.failed | agent_invocation.rejected
+agent_invocation.cancelled | agent_invocation.timed_out
+clarification.requested | clarification.answered | clarification.cancelled
+approval.requested | approval.approved | approval.rejected | approval.cancelled
+plan.permission_entered | plan.permission_exited | plan.implementation_approved
+working_plan.updated
+group.created | group.membership_joined | group.membership_ended | group.membership_invitation_rejected
+group.message_created | group.summary_requested | group.summary_delivered
+shared_task.updated
+artifact.published | artifact.unavailable | artifact.restored | artifact.deleted
+notification_delivery.created | notification_delivery.succeeded
+notification_delivery.failed | notification_delivery.dead | notification_delivery.outcome_unknown
+verification.completed | budget.warning | late_result.observed
+```
+
+对象没有发生状态迁移时可以不写事件；如果需要增加事件，必须同时更新数据库/API/OpenAPI 可见 payload 测试。`message.delta` 与 `stream.degraded` 是 Redis provisional frame，不是 ExecutionEvent，不能出现在可靠 event_type 列表或占用 Session sequence。
+
+可靠事件 payload v1 只允许 `schema_version, resource_href, from_status, to_status, reason_code, message_id, action_id, artifact_id, related_ids, changed_fields`；正文和详细对象由授权客户端通过 resource_href 获取。新增 payload 字段必须更新 OpenAPI 并做 visibility/脱敏测试，不能把任意领域 JSON 原样塞入 Event。
 
 ExecutionEvent 追加后不修改。后续状态变化追加新事件。当前状态读取领域表，历史过程读取 ExecutionEvent；历史中的旧状态不是不一致。
 
@@ -106,7 +147,9 @@ Span 可以记录：
 - 经过脱敏的输入输出摘要；
 - Artifact 和领域实体引用。
 
-Runner 诊断还必须区分 `assembled_tool_keys`、实际 `effective_tool_keys` 与 Harness 控制 Tool，并记录 Response Contract、结构化输出模式、Completion Contract、repair 次数、满足/待满足效果和 settlement mode。诊断字段用于解释执行，不能反向决定业务状态。
+Runner 诊断还必须区分 `assembled_tool_keys` 与实际 `effective_tool_keys`，并记录 runtime release、Harness/Context/Compaction/Continuation Policy、Provider Adapter、Tool Schema bundle、experiment cohort、permission mode、WorkingPlan revision、GroupRunSnapshot、Context manifest、AgentTurn、ProviderAttempt、stop reason、累计预算、ActionDecision、Invocation、Verification 和 terminal reason。诊断字段用于解释执行，不能反向决定业务状态。
+
+平台不得采集或推断模型私有 Chain-of-Thought。需要解释决策时保存模型主动给出的 bounded decision summary、Evidence 引用和风险；Trace 不保存隐藏推理、完整 Prompt、凭证或未经脱敏的业务全文。
 
 Observability 数据允许批量、异步导出和独立保留，可能比业务状态晚出现。它不是可靠通知源；即使后期采样或导出失败，也不能影响 ExecutionEvent、Checkpoint 或 Run。
 

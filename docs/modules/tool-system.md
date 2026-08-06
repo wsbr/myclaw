@@ -4,9 +4,11 @@
 
 ## 定义
 
-Platform Tool 是由 MyClaw 后端代码实现、注册并通过 Runtime 调度的动作能力。平台只有一个 Tool Registry，不区分 Built-in Tool 和数据库自定义 Tool 两套体系。
+Platform Tool 是由 MyClaw 后端代码实现、注册并通过 Runtime 调度的环境或业务动作能力。平台只有一个 Platform Tool Registry，不区分 Built-in Tool 和数据库自定义 Tool 两套体系。
 
-`read_file`、`execute`、`invoke_agent`、`search_group_history` 均是普通 Platform Tool。它们可能由核心代码提供，但不会因此被隐式加入 Agent。
+`read_file`、`write_file`、`execute`、`search_group_history`、`publish_artifact` 是 Platform Tool。它们可能由核心代码提供，但不会因此被隐式加入 Agent。
+
+模型还可以通过相同的原生 tool-call 协议调用 `update_plan`、`ask_user`、`discover_agents`、`invoke_agent`、`invite_agent` 和 Group Message 等 **Runtime Coordination Tool**。这类能力由 Runtime 按当前模式、身份和协作关系注入，用于改变真实计划、等待或协作状态；它们不进入 Platform Tool Registry，也不能由 Agent 装配者选择、替换或借此扩大业务权限。两类能力共用调用协议，但治理来源和副作用语义不同。
 
 ## 注册与治理
 
@@ -30,7 +32,7 @@ version
 
 - 查看注册元数据和 Schema；
 - 启用或停用；
-- 在 `never | always` 之间切换 `confirmation_policy`；
+- 在 `never | per_call | session_grant` 之间切换 `confirmation_policy`；
 - 维护平台级连接或运行配置；
 - 执行连通性测试；
 - 查看哪些 Agent 正在使用。
@@ -48,9 +50,12 @@ assembled_tools = resolve(agent_version.tool_keys)
 effective_tools = assembled_tools
                   ∩ enabled_registry_tools
                   ∩ execution_principal_permissions
-                  ∩ current_mode_and_phase_scope
-                  ∩ frozen_plan_or_group_scope
+                  ∩ current_permission_mode
+                  ∩ current_collaboration_or_membership_scope
+                  ∩ remaining_hard_budget
 ```
+
+Runtime Coordination Tool 不包含在 `assembled_tools` 中，其有效集合由当前 `permission_mode`、调用主体、Session/Group Membership、协作策略和预算独立计算。
 
 Runtime 不依据用户消息措辞、Skill 内容、模型文本、Group 开关或历史使用自动添加 Tool。自然语言不需要包含内部 Tool key；相同机器状态下，改写、翻译或标点变化不能改变有效权限。
 
@@ -58,14 +63,16 @@ Runtime 不依据用户消息措辞、Skill 内容、模型文本、Group 开关
 
 ## 调用边界
 
-模型只能看到有效 Tool 集合的定义，也只能调用该集合。Tool Dispatcher 在每次调用时再次校验：
+模型只能看到本 Turn 有效的 Platform Tool 与 Runtime Coordination Tool 定义，也只能调用该集合。Platform Tool Dispatcher 在每次调用时再次校验：
 
 - Tool 在 Runner 快照中；
 - 输入符合 Schema；
 - 平台级配置可用；
 - 调用满足该 Tool 自身的运行时约束。
 
-Harness 可以额外暴露不进入 Platform Tool Registry 的控制 Tool，例如用于提交封闭完成信封的 `finalize_response`。控制 Tool 不能访问业务系统、不能扩大 AgentVersion 权限，并且必须在 Runner 诊断中与业务 Tool 分开记录。
+Runtime Coordination Tool 的执行器必须再次校验身份、模式、Membership 与目标范围，并直接写入相应领域状态和 Event。Harness 不向模型暴露用于定义完成条件或关闭 Tool 集合的控制 Tool。这些协调能力不能声明任务成功、定义必需 Tool 清单或关闭业务能力。Provider 的完整普通消息或 `end_turn` 自然结束当前 Turn，Run 状态继续由 pending Invocation、等待、取消和预算等机器事实决定。
+
+任何模型可调用能力在授权期间都不是一次性槽位。某次 `write_file`、`execute`、`publish_artifact`、`invoke_agent` 或 `search_group_history` 成功后，Runtime 不得仅因“已经用过”就从后续 Turn 的有效集合中移除整个 Tool key。是否重复执行由具体 Invocation、参数、目标资源、因果 Action 和 operation key 判断。
 
 `invoke_agent` 还必须执行 Agent 可发现范围和 Group 参与者集合校验，详见 [Agent 协作](agent-collaboration.md)。
 
@@ -91,7 +98,7 @@ durable_async
 
 ## 平台边界重试
 
-平台重试只处理同一个 ToolInvocation、完全相同参数和幂等键的瞬时技术失败。Agent 看不到中间 ToolAttempt，只看到最终状态和结果。
+平台重试只处理同一个 ToolInvocation、完全相同参数和幂等键的瞬时技术失败。Agent 看不到中间 ToolAttempt，只看到最终状态和结果。Agent 基于新事实再次调用同一 Tool 属于新的业务 Action，不是平台技术重试。
 
 ```text
 ToolInvocation
@@ -104,16 +111,17 @@ ToolInvocation
 
 ## 轻量 Tool Confirmation
 
-第一阶段由 Platform Tool Registry 提供静态策略：
+第一阶段由 Platform Tool Registry 提供默认策略：
 
 ```text
-confirmation_policy: never | always
+confirmation_policy: never | per_call | session_grant
 ```
 
 - `never`：新的 ToolInvocation 直接进入可执行状态；
-- `always`：每一个新的 ToolInvocation 都需要原始用户确认。
+- `per_call`：每一个新的 ToolInvocation 都需要原始用户确认；
+- `session_grant`：用户可以批准严格受限、可撤销、带到期时间的 Session Grant，范围内的后续调用不逐次确认。
 
-策略是平台级实时治理配置，不复制到 AgentVersion，也不允许 Agent 级覆盖。第一阶段不根据参数动态判断风险，不定义通用风险等级、金额策略、组织审批、批量预授权或复杂 Governance Profile。
+策略是平台级实时治理配置，不复制到 AgentVersion，也不允许 Agent 级覆盖。Session Grant 不是 Agent 自我授权，必须绑定 `tenant_id + account_id + account_authorization_revision + session_id + tool_key + sandbox_profile_revision + arguments_constraint_hash + risk_version + expiry`；账号授权、参数、路径、网络、时间或风险版本超出范围时重新确认。第一阶段不定义金额策略、组织审批或复杂 Governance Profile。
 
 需要确认时：
 
@@ -128,7 +136,7 @@ ToolInvocation = waiting_confirmation
 
 平台前端只是默认客户端。外部服务可以通过标准 API 查询 required action 并提交确认或拒绝。Instructions 或 Skill 可以要求 Agent 进行业务上的对话确认，但不能替代 Tool 执行边界的 Confirmation。
 
-只有 ToolInvocation 原始执行 `userId` 对应的用户可以确认或拒绝。Builder 和管理员可以停用 Tool 或取消异常执行，但不能代替用户批准业务操作。
+只有请求 AuthContext 的 `tenant_id + account_id` 与 ToolInvocation 固定主体相同的调用可以确认或拒绝。Web/生产 OIDC 由已验证身份解析该账号；第一阶段 Agent API 由 `X-MyClaw-User-Id` 解析，因此 Key 持有者可以冒充该用户确认，这是当前明确接受且阻断生产就绪的风险。Builder 和管理员可以停用 Tool 或取消异常执行，但不能通过管理角色代替用户批准业务操作。
 
 等待确认时，Runner 保存 Checkpoint 后结束，WorkItem 进入可恢复等待。第一阶段默认不自动超时拒绝；用户可以稍后确认、拒绝或取消执行。
 
@@ -136,8 +144,10 @@ ToolInvocation = waiting_confirmation
 
 Runtime 在底层执行前必须重新读取 Tool 当前启停和 Confirmation Policy，采用以下安全非对称规则：
 
-- `never → always`：尚未开始底层执行的 ToolInvocation 转为 `waiting_confirmation`；
-- `always → never`：新的 ToolInvocation 不再等待，但既有 `waiting_confirmation` 不会被自动批准；
+- 任意策略收紧为 `per_call`：尚未开始底层执行且没有精确批准的 ToolInvocation 转为 `waiting_confirmation`；
+- `per_call → never`：新的 ToolInvocation 不再等待，但既有 `waiting_confirmation` 不会被自动批准；
+- 切换为 `session_grant`：新的调用只有命中有效 Grant 才可执行；既有等待不会仅因策略变化自动批准，用户必须显式批准本次调用或创建并绑定 Grant；
+- Grant 撤销、过期或风险版本变化：尚未开始且依赖该 Grant 的调用重新进入确认；已开始的调用不承诺回滚；
 - Tool 停用：拒绝新调用，尚未开始执行的调用以 `tool_disabled` 结算；
 - 已经进入底层执行的调用不承诺强制中断或回滚；
 - 重新启用 Tool 不复活已经失败、拒绝或取消的 ToolInvocation。
@@ -146,10 +156,13 @@ Runtime 在底层执行前必须重新读取 Tool 当前启停和 Confirmation P
 
 | Tool 类型 | 默认策略 |
 | --- | --- |
-| `read_file`、`invoke_agent`、只读查询 | `never` |
-| `write_file`、`execute`、外部副作用 Tool | `always` |
+| `read_file`、只读查询、登记当前用户 Session 内 Artifact | `never` |
+| Local Workspace 的 `write_file`、`execute` | `session_grant` |
+| 外部不可逆副作用 Tool | `per_call` |
 
 管理员可以在 Tool 列表页根据部署环境调整。后期动态风险判断和垂类审批边界保留在 [待确认旧设计](../pending/legacy-designs-to-review.md)。
+
+`invoke_agent` 的允许与否由 Agent Network 可发现范围、Group Membership、当前 Collaboration Policy 和预算决定，不套用 Platform Tool 的 Confirmation Policy；若未来某类跨组织邀请需要人工审批，应创建明确的 Approval，而不是把它伪装成 Tool 装配配置。
 
 ## 取消
 
@@ -170,4 +183,4 @@ Skill 可以指导 Agent 调用某个 Tool，也可以携带由 `execute` 运行
 - 不扩大 Tool 输入范围或平台授权；
 - 不保证 Agent 已装配它所描述的 Tool。
 
-当前阶段平台不判断装配组合是否合理，由装配者负责选择。
+当前阶段平台不判断装配组合是否合理，由装配者负责选择。确定性 Verification 或可选 Reviewer 可以指出缺少的事实，但不能要求固定 Tool key、临时添加 Tool，或把 Tool 使用历史本身当作业务成功。

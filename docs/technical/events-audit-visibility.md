@@ -1,6 +1,8 @@
-# 执行事件、平台审计与可见性投影
+# V1 执行事件、平台审计与可见性（历史实现参考）
 
-本文是第一阶段 `ExecutionEvent`、`PlatformAuditEvent`、事件幂等与所有用户/Agent 事件查询可见性投影的唯一实现级定义。物理字段见 [数据库 Schema](database-schema.md)，状态迁移见 [状态机](state-machines.md)，HTTP/SSE 外形见 [API 与 SSE](api-sse.md)。
+> **历史 V1 实现参考，非目标设计。** Event/Audit 分层只在被当前方案确认的范围内复用；Turn、WorkingPlan/Approval、Group Membership/Message 和 Verification 以[综合技术方案](phase-one-agent-native-delivery.md)为准。
+
+本文记录V1 `ExecutionEvent`、`PlatformAuditEvent`、事件幂等与用户/Agent查询投影基线。物理字段见[数据库Schema](database-schema.md)，状态迁移见[状态机](state-machines.md)，HTTP/SSE外形见[API与SSE](api-sse.md)。
 
 ## 1. 两类事件的边界
 

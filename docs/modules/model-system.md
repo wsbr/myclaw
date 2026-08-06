@@ -1,46 +1,123 @@
 # Model
 
-本文是模型注册、Agent 选择和失败语义的唯一权威来源。
+本文是模型注册、Agent 选择、Provider 兼容和失败语义的唯一权威来源。
 
 ## Platform Model Registry
 
-模型由平台统一注册和治理。记录至少包含：
+模型使用逻辑项与不可变版本分离：
 
 ```text
-id
-provider
-model_name
-endpoint
-credential_ref
-default_parameters
-capabilities
-enabled
+Model
+├── id / key / name / status
+└── current_version_id
+
+ModelVersion (immutable)
+├── provider / model_name / endpoint
+├── credential_ref / default_parameters
+├── capabilities / adapter protocol
+└── content_hash / published_at
+
+ConformanceRun (append-only evidence)
+├── model_version_id / suite_version
+├── status / result_summary / evidence_artifact
+└── started_at / ended_at
 ```
 
-`credential_ref` 指向安全存储中的凭证，不能把明文凭证注入 Agent 配置或 Prompt。`default_parameters` 由平台管理员为该模型维护，包括 temperature、top_p、max_tokens 等 Provider 参数。`capabilities` 用于平台兼容性判断和展示，至少明确 `streaming`、`native_tool_calling`、`structured_output` 和 `usage_in_stream`；`structured_output` 只能是 `json_schema`、`json_object` 或 `none`。
+`credential_ref` 指向安全存储，明文凭证不能进入 Agent 配置、Prompt、事件和 Trace。Draft 只选择逻辑 `model_id` 并显示当前解析预览；发布 AgentVersion 或 draft_test_snapshot 时固定精确 `model_version_id + content_hash`。Endpoint、model name、参数、能力或 Adapter 协议变化必须发布新 ModelVersion；Secret Manager 中同一 credential reference 的密钥轮换不创建行为版本。
+
+Conformance 结果不写回 ModelVersion。每次测试创建新的 ConformanceRun，API 中的 `latest_conformance` 只是查询投影；准入以当前必需 suite 的最新 terminal passed 证据为准，不改写历史版本。
+
+## 能力声明
+
+至少声明：
+
+```text
+streaming
+native_tool_calling
+parallel_tool_calling: boolean
+tool_result_continuation
+usage_in_stream
+stop_reason
+context_window
+structured_output: json_schema | json_object | none
+```
+
+结构化输出是可选能力，不再作为三模式普通最终响应的必要条件。三模式最低协议是普通 Assistant Message、native Tool Calling、Tool Result 续轮和 stop reason。
+
+能力声明必须由 Conformance Suite 真实探测，不能根据 Provider 名称或文档静态猜测。
 
 ## Agent 选择
 
-每个 Agent 只选择一个 `model_id`：
+每个不可变 AgentVersion 固定 `model_id + model_version_id`：
 
-- Agent 不保存或覆盖底层采样参数；
-- Session 不选择模型；
-- 单次请求不携带模型覆盖；
-- Group 节点使用各自 Agent 已装配的模型；
-- 入口 Agent 使用自己的模型生成初始 Group 图。
+- Chat、Plan、Group 成员都使用自身 AgentVersion 的模型；
+- Session 和单次用户请求不覆盖模型；
+- AgentInvocation 目标使用目标 AgentVersion 的模型；
+- 运行中不因为错误静默切换默认模型；
+- Model 新版本只影响后续 Draft 解析；已发布 AgentVersion 采用新版必须重新测试并发布新的 AgentVersion；
+- ModelVersion 停用阻止新的发布和 Run 准入，但不改写已有执行事实；运行中不得静默切换。
 
-这样模型选择是 Agent 蓝图的一部分，而不是运行时偏好。
+未来若支持模型路由，必须是可观察、版本化、保留 Agent 语义的独立能力，不能作为隐式 fallback。
 
-## 运行与失败
+## Provider Conformance
 
-Runner 启动时解析模型并记录实际 Provider、模型版本标识和平台参数版本。若模型不存在、停用、凭证不可用或 Provider 调用失败，平台明确报告失败。
+连通测试必须覆盖：
 
-Plan Proposal 和 Group Formation 必须根据注册能力选择 Provider 原生结构化协议，并在服务端继续执行 Schema 与图约束校验。普通 Prompt 中写“只返回 JSON”不能替代 `response_format`。Provider 兼容路径和已知限制必须显式记录；例如不支持 `tool_choice=required` 时不能谎报支持，也不能通过切换模型掩盖。
+- 中文流式普通消息；
+- 单 Tool Call；
+- 多轮 Tool Result；
+- 相同 Tool 类型连续两次业务调用；
+- 并行 Tool Call（若声明支持）；
+- Tool 参数 schema 错误与一次修复；
+- 普通最终消息和 stop reason；
+- usage；
+- 零 payload 传输错误安全重试；
+- payload 后错误不盲目重放；
+- 长 Context 和 Compaction 边界；
+- `update_plan`、`ask_user`、`invoke_agent` 等 Runtime Coordination Tool。
 
-传输重试只允许发生在尚未收到任何 payload、尚未提交业务副作用且仍有预算时。收到部分文本或 Tool Call 分片后不得盲目整轮重放。
+只完成普通文本问答，或只完成一次结构化 JSON，不足以标记为适合三模式。
 
-Runtime 不切换到默认模型，也不在请求级 fallback 到其他模型。若未来需要高可用路由，应作为 Model Registry 内部、可观察且不改变 Agent 语义的独立设计重新讨论，不能暗中实现。
+## Adapter 边界
+
+Adapter 只转换：
+
+- system/user/assistant/tool message；
+- 有序 Turn Item 与 text、file/artifact reference、structured data 等 content part；
+- Tool Definition、Tool Call 和 Tool Result 关联；
+- stream delta 与完整消息；
+- stop reason、usage 和错误；
+- Provider 原生 reasoning summary 的受控投影和不透明 continuation state 引用。
+
+Adapter 不做：
+
+- 权限计算；
+- Tool 类型消费；
+- Plan/Group 业务编排；
+- 最终结果评价；
+- 文本 Tool Call 解析；
+- Provider 不兼容时静默换模型。
+
+Adapter 必须保持 Item 顺序、Tool 关联和供应商不透明 continuation state，不能把 provider state 解释为业务完成、权限或可共享推理内容。
+
+普通最终消息不得强制套入 `finalize_response`、Completion Envelope 或统一 Outcome JSON。真正需要机器输入时，由单个 Tool 的小型 schema 约束。
+
+## 重试和失败
+
+Runner 记录实际 Provider、模型标识、参数版本、AgentTurn 和 ProviderAttempt。
+
+透明 Provider 重试仅在同时满足时允许：
+
+- 尚未收到任何 payload；
+- 尚未产生 Tool Call；
+- 尚未提交任何业务副作用；
+- 错误被标记为瞬时可重试；
+- 仍在 Attempt 和预算上限内。
+
+收到部分文本、Tool Call 分片或副作用后不得整轮重放。失败必须区分 authentication、rate limit、timeout、transport、context length、protocol、content filtering 和 provider internal error。
 
 ## 管理界面
 
-模型管理页负责 Provider 连接、Endpoint、凭证、默认参数、能力、启停和连通测试。Agent 页面只显示可选择模型及对装配者有用的能力摘要。
+模型页展示 Endpoint、Credential 状态、参数、能力、探针版本、最后结果和启停。Agent 页面只显示可选择模型及对 Builder 有用的延迟、成本和能力摘要。
+
+Provider ModelVersion 未通过当前 Conformance Suite 时不能被新 AgentVersion 发布为三模式模型。管理页对逻辑 Model 和不可变 ModelVersion 分开展示；编辑配置实际创建新版本，不原地修改历史版本。

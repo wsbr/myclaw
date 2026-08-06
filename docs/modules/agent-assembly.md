@@ -1,138 +1,174 @@
 # Agent 装配
 
-本文是 Agent 身份、不可变发布版本、配置页面和装配约束的唯一权威来源。
+本文是 Agent 身份、专业配置、版本、测试、发布和 AgentCard 的唯一权威来源。
+
+## Agent 是逻辑主体，配置只是其发布蓝图
+
+一个可用 Agent 必须能够独立理解领域目标、使用环境、处理失败并交付结果。`Agent` 保存稳定身份、Owner 和治理边界；平台真正编辑和发布的是它的配置蓝图 `AgentVersion`：
+
+```text
+AgentDefinition
+├── identity and purpose
+├── instructions
+├── model
+├── tools and skills
+├── context and memory policies
+├── sandbox / environment
+├── discovery and collaboration settings
+└── governance metadata
+```
+
+平台不根据“产品经理”“开发”“测试”等名称自动补 Tool、Prompt、权限或工作流。
+
+Agent 平时不对应常驻进程。收到请求后，Runtime 才把指定 AgentVersion 与当前 Session、WorkItem、CapabilitySnapshot 和环境装配成 Runner。相同 AgentVersion 可以并发运行多个 Runner；它们默认是同一 Agent 的执行实例，只有不同 `agent_id` 才表示不同逻辑主体。
 
 ## Agent 与 AgentVersion
 
-Agent 是稳定的逻辑身份，其他 Agent、API Key、Session 和管理关系引用 `agent_id`。可执行装配保存在不可变的 AgentVersion 中：
+`Agent` 是稳定身份，`AgentVersion` 是不可变发布快照：
+
+- Draft 可以编辑和测试；
+- Publish 解析全部依赖、生成不可变版本，并以 CAS 更新 Agent 的当前发布版本指针；
+- Run 保存实际 AgentVersion；
+- WorkItem 保存跨等待工作，Runner 只保存某段连续执行；
+- 新版本不改变已开始的 Run、Invocation 和历史；
+- 停用阻止新的选择，不删除历史事实。
+
+版本至少冻结 Model、Instructions、Tool、Skill、四类 Context/Memory Policy、Sandbox、发现配置及各依赖版本/checksum。Draft 选择逻辑 `model_id/policy_id/sandbox_profile_id/skill_id`，Publish 与 draft_test_snapshot 分别解析并固定 `model_version_id`、四个 `policy_version_id`、`sandbox_profile_version_id`、`skill_version_id + checksum`；Runner 不追随任何 current pointer。Tool 的 `registration_hash` 固定在 AgentVersion，但启停、Confirmation、风险和连接配置是明确的实时治理例外，执行前重读。
+
+工作网默认只投影 Agent 当前有效的发布版本。普通 Chat/Plan 委派在创建 AgentInvocation 时解析并固定目标版本；GroupRun 优先使用自己的成员版本快照。停用 Agent 或撤下当前版本会阻止新的解析，但不改变已经创建的 WorkItem、Invocation 和历史。
+
+## 身份与专业边界
+
+Agent 说明：
+
+- 代表个人、岗位、业务域还是公共能力；
+- 服务对象和专业目标；
+- 擅长完成的结果；
+- 不负责或必须升级的边界；
+- Owner 和治理范围。
+
+身份描述影响模型上下文和网络发现，不直接产生数据或 Tool 权限。
+
+## Instructions 是主要行为载体
+
+Instructions 用自然语言表达：
+
+- 专业知识和判断原则；
+- 工作方法、验证习惯和失败处理；
+- 沟通风格、耐心、严谨程度和协作偏好；
+- 需要的输入、交付格式和风险边界；
+- 何时澄清、何时找人和何时拒绝。
+
+平台可以提供可选标签帮助 Builder 编辑和用户发现，例如 `thorough`、`fast`、`adversarial_review`，但标签不应成为 Runtime 的强制行为状态机。真实人格由 Model、Instructions、Memory、Skill 和经历共同形成。
+
+## Model、Tool、Skill、Memory 与 Environment
+
+- **Model** 提供认知和推理能力；
+- **Tool** 提供真实行动接口；
+- **Skill** 提供可复用方法、参考和脚本；
+- **Context/Memory** 提供当前信息与可持久经验；
+- **Sandbox/Environment** 决定 Agent 实际能观察和改变什么。
+
+这些能力相互正交：Skill 不自动获得 Tool，Agent 名称不自动获得权限，Memory 不等于知识库授权，发现其他 Agent 不等于允许调用。
+
+## AgentCard
+
+发布版本生成面向工作网的 AgentCard：
 
 ```text
-Agent
-├── id
-├── owner_account_id
-├── visibility
-├── status
-├── draft_version_id
-└── current_published_version_id
-
-AgentVersion
-├── id
-├── agent_id
-├── version
-├── publication_status
-└── immutable assembly fields
+agent_id / agent_version_id
+name / description / identity_kind
+domain_tags
+supported_outcomes
+accepted_request_summary
+capabilities_summary
+collaboration_summary
+cost / latency / availability
+trust / owner / governance labels
 ```
 
-编辑发生在草稿。发布时校验完整装配并生成新的不可变 AgentVersion；已发布版本不能原地修改。再次编辑从当前草稿或已发布版本派生新草稿，不覆盖历史执行引用。
+AgentCard 是安全发现投影，不包含 Instructions、私有 Memory、Prompt、凭证和 Chain-of-Thought。AgentCard 变化随新版本发布，不原地修改历史卡片。
 
-## AgentVersion 目标 Schema
+Card 中必须区分 Builder 声明与平台证明：description、domain tags、supported outcomes 属于声明；Owner、发布状态、装配摘要、Eval/运行证据和治理标签由平台派生或签发。推荐可以综合两者，但不能把自述能力显示成已经验证的信誉。
+
+## 工作网发布
+
+当前可持久化的 Agent visibility 只有：
 
 ```text
-id
-agent_id
-version
-publication_status
-name
-description
-instructions
-model_id
-sandbox_profile_id
-tool_keys[]
-skill_ids[]
-bound_agent_ids[]
-context_policy_key
-history_policy_key
-memory_write_policy_key
-memory_recall_policy_key
-group_enabled
-created_by
-published_at
+private | enterprise
 ```
 
-实现可以增加审计字段、租户字段和时间戳，但不能用额外字段恢复本文明确删除的隐式装配方式。
+`private` 只允许 Owner 使用/测试，`enterprise` 表示当前 tenant 内可发现候选；两者仍要经过发布状态、Collaboration Policy、原始账号和环境兼容校验。未来若引入 owner/team/tenant/public-federated 等细粒度 Scope，必须新增版本化 Scope 模型和迁移，不能把这些概念词直接写入当前枚举。
 
-## 字段语义
+还可以配置受信候选、组织标签、可用时间和成本提示。这些影响发现，不预设谁必须调用谁，也不创建 Group 模板。
 
-- `agent_id`：稳定逻辑标识，用于长期引用和调用。
-- `id + version`：不可变装配版本标识。
-- `name`：面向用户展示、搜索和 Agent 发现的名称。
-- `description`：独立数据库字段，说明 Agent 能承担什么任务，是 Agent Catalog 的主要发现信息。
-- `instructions`：装配者唯一可编辑的 Prompt 文本区，描述领域角色、工作方法和约束。
-- `model_id`：唯一模型引用。
-- `sandbox_profile_id`：唯一 Sandbox Profile 引用；Session 创建时固定实际 Profile。
-- `tool_keys[]`：显式选择的 Platform Tool key 集合。
-- `skill_ids[]`：显式选择的 Skill 逻辑标识集合。
-- `bound_agent_ids[]`：本 Agent 可发现的直接绑定 Agent。
-- 四个 `*_policy_key`：分别选择平台注册的上下文、历史、记忆写入和记忆召回策略。
-- `group_enabled`：是否注册到 Group 可发现网络，并让用户和当前 Agent 可以创建 Group Proposal。
-- Agent 的 `status`：逻辑 Agent 是否允许创建新 Run。
-- Agent 的 `visibility`：第一阶段为 `private | enterprise`，完整访问规则见 [身份与 Agent API](identity-api.md)。
+兼容字段 `bound_agent_ids[]` 只可解释为发现快捷方式或受信候选，不表示固定拓扑。`group_enabled` 只表示当前版本是否允许成为 Group 候选，不代表对所有用户可见，不赋予 `invoke_agent` 权限，也不保证当前环境可以成功运行。
 
-Chat 与 Plan 是所有可交互 Agent 的固有执行方式，不增加 `chat_enabled` 或 `plan_enabled`。Group 会改变跨 Agent 发现范围，因此必须显式配置 `group_enabled`。
+## 权限忠实性
 
-## Instructions 与平台 Prompt
+发布版本记录装配能力；每次 Runner 再与原始用户、permission mode、Group Membership、Tool Governance 和预算求交集。
 
-`instructions` 是唯一用户编辑区。以下内容由平台生成，不应暴露为多个可自由拼接的编辑器：
+Runtime 必须忠实于结果：
 
-- Runtime 规则；
-- Tool 定义；
-- Skill Catalog；
-- Agent Catalog；
-- 策略生成的上下文、历史和记忆；
-- 当前执行上下文。
+- 不因 Instructions 看起来需要而补 Tool；
+- 不因 Agent 身份看起来可信而扩大数据；
+- 不因 Provider 不兼容而静默换模型；
+- 不因某 Tool 使用过一次而从版本中删除；
+- 不让目标 Agent 的 Credential 为调用者提权。
 
-因此配置页不提供 Identity、Instructions、Context、Output Format 等多个 Prompt 编辑器。需要结构化领域指令时，装配者在一个 Instructions 文本区内组织。
+## Draft Test
 
-其他 Agent 发现本 Agent 时只能获得 `id + name + description`，不能读取 `instructions`。
+发布前测试至少覆盖：
 
-## 配置页信息架构
+- Model 连通、streaming、Tool Calling 和 stop reason；
+- Tool schema、权限和 Sandbox 可用性；
+- Skill 路径、checksum 和必要资源；
+- Context/Memory Policy 解析；
+- 自然语言领域样例；
+- 缺少权限、Tool 失败和需要澄清的行为；
+- AgentCard 内容与私密信息泄漏检查；
+- 作为单 Agent 和被调用 Agent 的最终消息路由。
 
-### 基础信息
+可加入 Group 的 Agent 还应验证 direct/group Message、共享上下文边界和 AgentInvocation。
 
-编辑草稿中的 `name` 和 `description`，并在 Agent 级维护 `status` 与 `visibility`。
+Draft Test 只能证明当前装配候选，不自动发布，也不代表业务 UAT 已通过。
 
-### 模型与指令
+## Agent 的专业成长
 
-选择一个 `model_id` 和一个 `sandbox_profile_id`，编辑 `instructions`。不提供 temperature、top_p、max_tokens、宿主机路径、容器参数或请求级覆盖。
+运行反馈可以形成改进候选：
 
-### 能力装配
+- Instructions 调整；
+- 新 Skill 或参考资产；
+- Tool 文档和接口改进；
+- Memory 规则调整；
+- 更合适的 Model；
+- AgentCard 描述和发现标签；
+- 领域 Eval 用例。
 
-选择 `tool_keys[]` 与 `skill_ids[]`。Tool 与 Skill 分开展示但不存在依赖关系，也不展示第二套“内置 Tool”选择器。
+企业 Agent 的正式变化由 Builder 或 Owner 审核后发布新版本。个人 Agent 可以在个人数据边界内持续学习偏好，但必须可见、可撤销和可清除。
 
-### 上下文与记忆
+## 第一期 Agent
 
-分别选择四个策略 key，不展示内部 Token 阈值、TTL 或存储后端参数。
+第一阶段使用五个逻辑 Agent：个人工作助手、项目经理、产品、开发和测试。它们是 UAT Fixture，不是平台内置角色。
 
-### 协作与访问
+专业差异必须来自真实 Instructions、Tool、Skill 和环境：
 
-维护直接绑定 Agent 和 `group_enabled`。不允许手写 Capability Manifest、Event Manifest 或 Group JSON。Plan 和 Group 都必须先向用户展示图并获得确认，不提供自动执行策略。
+- 个人助手擅长澄清和整理；
+- 项目经理擅长计划、协调和风险；
+- 产品擅长需求口径和验收；
+- 开发擅长实现、执行和修复；
+- 测试擅长精确用例、反证和复核。
 
-## 装配校验
+产品、开发、测试发布到同一工作网范围，供用户在 Group UAT 中直接选择。Group 不复制其定义，也不通过模板补齐能力。
 
-草稿可以保存不完整状态；发布时至少校验：
+## 禁止设计
 
-- 名称、描述、指令和模型引用符合平台必填规则；
-- Sandbox Profile 存在、启用且满足当前平台兼容条件；
-- 所有引用对象存在且处于可选择状态；
-- 不能绑定自身，绑定集合去重；
-- 策略 key 类型与字段一致；
-- `group_enabled` 与 Agent 的可访问状态一致。
-
-校验不推断 Skill 是否“合理”，也不因为 Skill 文本提及某 Tool 而自动修改 `tool_keys[]`。
-
-## 发布、停用与版本选择
-
-- Chat 每次创建新 Run 时解析 Agent 最新已发布版本；同一 Session 不因此重建。
-- Plan 和 Group 在用户确认图时固定所有参与者的 `agent_version_id`，直到本次 PlanExecution 或 GroupRun 结算。
-- 图确认后发布 Agent 新版本，不改变已经确认的执行。
-- Agent 停用后禁止创建新 Run；已经开始的 Run、PlanExecution 和 GroupRun 可以继续结算。
-- 历史 AgentVersion 可以标记废弃并禁止新 Run 使用，但必须保留历史 Runner 引用。
-- Agent 相互绑定始终绑定稳定 `agent_id`；实际执行时再按当前模式规则解析版本。
-
-Skill 使用独立的热更新规则：AgentVersion 固定 `skill_id` 装配关系，Runner 启动时解析该 Skill 当前有效版本并固定 checksum。完整定义见 [Skill](skill-system.md)。
-
-## 运行时解析
-
-Runtime 先根据 Chat Run 或已确认 Plan / Group 的版本规则取得 AgentVersion，再解析引用。解析结果交给 [Runtime 执行](runtime-execution.md) 固定为 Runner 快照。正在运行的 Runner 不切换 AgentVersion。
-
-`sandbox_profile_id` 是例外：它只在创建 SessionSandbox 时解析。既有 Session 后续 Runner 继续使用 Session 固定的 Sandbox，Agent 修改只影响新 Session。
+- 仅靠名称和短 Prompt 冒充专业 Agent；
+- 用强制 Profile 枚举替代 Instructions、Memory 和 Skill；
+- 根据角色自动授予 Tool 或数据；
+- 把 bound agents 编译成固定调用图；
+- 为 Group 单独复制 Agent 配置；
+- 发布时接受未解析依赖或隐式 fallback；
+- 让新版本改变历史 Run；
+- 在 AgentCard 暴露私有 Prompt、Memory、Credential 或 Chain-of-Thought。

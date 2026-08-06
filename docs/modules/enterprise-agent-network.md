@@ -1,153 +1,282 @@
-# 企业智能体网络最终蓝图
+# Enterprise Agent Network
 
-本文是 MyClaw 长期产品方向的唯一权威来源。它定义产品最终希望形成的企业工作形态，不表示所有能力都进入第一阶段，也不替代各模块的当前执行规则。
+本文是 MyClaw 企业 Agent 工作网和未来跨域联邦的唯一产品权威。它先定义同一 MyClaw 控制域内可以落地的逻辑网络，再说明跨实例、跨组织的演进边界；公网协议不是第一阶段前提，也不能反向增加平台内部复杂度。
 
 ## 产品北极星
 
-MyClaw 希望成为企业内部智能体平台的最佳实践，并承载企业智能体网络的最终形态：
+MyClaw 的终局是由完整 Agent 组成的动态企业工作网：
 
-- 每一个垂类岗位可以拥有自己的岗位 Agent；
-- 每一个业务域可以拥有独立完整的领域 Agent；
-- 每一个人可以装配或使用代表自己的个人 Agent；
-- Agent 可以进入企业网络、发布新版本、更新能力和受控下线；
-- 人发起目标后，Agent 优先承担重复工作、领域判断和跨域协调；
-- Agent 确实缺少信息、判断或授权时，才定向寻找合适的人；
-- 大部分岗位经验逐步沉淀为可复用的 Instructions、Skill、Policy 和受审核记忆能力。
+- 每个人可以拥有代表其偏好、习惯和受托边界的个人 Agent；
+- 每个岗位、专业和业务域可以拥有积累经验的垂类 Agent；
+- 企业公共能力可以作为公共 Agent 被发现和协作；
+- Agent 可以更新版本、沉淀 Skill、形成信誉并受控下线；
+- 人给出目标后，Agent 自主理解、规划、行动、验证和寻找协作者；
+- Agent 缺少信息、授权或价值判断时，才定向找人。
 
-最终目标不是用一个中央超级 Agent 管理所有岗位，也不是把企业工作预先编码成一张固定工作流，而是形成由独立垂类 Agent 组成的、可治理的对等协作网络。
+工作网不是中央超级 Agent，也不是预先配置角色和流程的模板市场。网络价值来自每个节点本身的专业性，以及节点根据真实目标形成合作的能力。
 
-## 企业网络中的 Agent
+## 网络首先是控制平面
 
-Agent 始终是完整工作主体，可以直接服务用户，也可以参与其他 Agent 发起的协作。它可以代表：
-
-- 某个具体个人；
-- 某类工作岗位；
-- 某个业务域或专业团队；
-- 企业公共能力。
-
-上述代表关系不改变 Agent 的基础运行模型。所有 Agent 都使用同一套装配、发布、调用、等待、恢复和可观测机制，不为“子 Agent”或“后台 Agent”建设第二套 Runtime。
-
-Builder 是蓝图维护身份，不天然等于岗位责任人、业务审批人或用户数据所有者。长期治理需要能够表达 Agent 的维护、业务责任和企业归属，但第一阶段只使用基础角色、所有者和 `private | enterprise` 访问范围。
-
-## Agent 生命周期
-
-企业网络中的 Agent 必须具备稳定身份和可审计生命周期：
+同一 MyClaw 平台中的 Agent 主要是数据库中的逻辑身份和版本化配置，不是各自暴露 IP 的常驻服务。工作网分成：
 
 ```text
-创建或装配
-→ 草稿验证
-→ 发布 AgentVersion
-→ 进入企业网络
-→ 持续更新能力
-→ 停用或下线
+Control plane
+Agent / AgentVersion / AgentCard / visibility / Membership / policy
+
+Execution plane
+WorkItem / Runner / AgentInvocation / Message / Artifact / Event
 ```
 
-稳定 `agent_id` 用于发现、绑定和长期引用，不可变 AgentVersion 用于解释具体执行。更新不能改写历史，下线不能抹除已经发生的任务、结果和审计记录。
+控制平面回答“有哪些 Agent、当前能否发现和建立关系”；执行平面按需加载配置、运行 Agent Loop 并传递结果。Agent 空闲时可以没有 Runner，网络节点仍然存在。
 
-个人、岗位、业务域和企业公共 Agent 未来可以具有不同的交接、归档和治理策略，但这些差异不能破坏统一 Agent 模型。
+第一阶段的目录是 MySQL 中的 AgentCard 投影和受治理查询。未来跨 MyClaw 控制域时才增加 Agent Gateway、远程 Endpoint、协议协商和联邦身份；本地调用与远程调用在产品层都保持 AgentInvocation 语义。
 
-## Agent 优先的企业工作方式
+MyClaw Runtime 为了装配本地 Agent 可以读取其 AgentVersion，但协作边界仍把 Agent 视为黑盒：其他 Agent 只能依赖 AgentCard、Message、Task/Invocation、Artifact 和可观察结果，不能读取对方 Prompt、Memory、内部 Tool 或推理。远程 Agent 只需满足同一外部契约，不要求采用 MyClaw Harness。
 
-企业工作默认由人发起目标，而不是由人手工拆解所有跨岗位流程：
+## Agent 是网络节点
+
+Agent 是完整的逻辑工作主体，可以单独面对用户，也可以临时参与多 Agent 协作。它不等于 AgentVersion 配置，也不等于运行该配置的 Runner。它可以代表：
+
+- `personal`：具体个人；
+- `role`：岗位或职责；
+- `domain`：业务域或专业能力；
+- `public`：企业公共服务。
+
+身份分类只影响描述、治理和发现，不产生第二套 Runtime。所有 Agent 共用同一个 Agent Loop、Tool、等待、恢复、计划和消息协议。
+
+Agent 的专业差异来自 Model、Instructions、Tool、Skill、知识、Memory 和历史经验。严谨程度、耐心和协作习惯可以自然写入这些装配内容；平台不需要把人格拆成强制枚举才能形成差异。
+
+## Agent 先专业，再入网
+
+进入工作网的 Agent 至少需要：
+
+1. 清楚说明代表谁、服务谁、擅长什么和不负责什么；
+2. 拥有能完成领域工作的 Model、Instructions、Tool、Skill、知识和环境；
+3. 知道何时验证、何时继续尝试、何时澄清和何时升级；
+4. 能向人和其他 Agent 说明需要的上下文和交付结果；
+5. 对敏感数据、记忆和共享范围有明确边界；
+6. 在领域 UAT 中证明其单体工作质量。
+
+Group 不能用多个空洞角色 Prompt 掩盖单 Agent 能力缺失。
+
+## AgentCard 与发现
+
+AgentVersion 发布后生成面向工作网的 AgentCard：
 
 ```text
-人发起目标
-→ 当前垂类 Agent 理解并处理
-→ 必要时生成 Group Proposal
-→ 多个垂类 Agent 对等协作
-→ 各 Agent 优先独立解决自己的领域工作
-→ 缺少信息、判断或授权时定向找人
-→ Agent 汇总并交付结果
+agent_id / agent_version_id
+name / description / identity_kind
+domain_tags / capabilities
+supported_outcomes
+accepted_request_summary
+tools_and_environment_summary
+cost / latency / availability
+trust / governance labels
+owner / contact boundary
 ```
 
-人在 Agent 之后承担责任与判断，Agent 在人之前挡住大量重复查询、材料整理、系统操作、跨域沟通和过程跟进。平台不以“完全无人化”为目标，也不要求人持续参与每个执行步骤。
+AgentCard 不公开 Instructions、私有 Memory、完整 Prompt、凭证或 Chain-of-Thought。`group_enabled` 只是“可以成为 Group 候选”的声明，不能单独推出 visibility、可调用性、授权或运行可用性。
 
-## Group 的长期定位
+工作网必须区分：
 
-Group 是一个任务发起人与多个垂类 Agent 围绕当前目标形成的协作群：
+- **精确寻址**：已知稳定 `agent_id`，解析当前允许使用的发布版本；
+- **语义发现**：根据能力声明、治理标签、成本和历史质量返回候选。
+
+工作网提供搜索、推荐、组织目录、历史合作和直接 ID 寻址。发现回答“谁可能适合”，不回答“当前是否有权调用”；邀请或调用仍需经过原始用户、Agent 装配、共享范围和平台治理的机器校验。AgentCard 中的能力是声明，平台评测和历史结果是独立证据，不能混成一个可信字段。
+
+## 自然形成协作
+
+```text
+人向当前 Agent 提出目标
+        ↓
+Agent 自主工作并判断是否需要协作
+        ↓
+在工作网搜索或使用已知 Agent
+        ↓
+发出邀请 / 定向工作请求
+        ↓
+对方接受、追问、反提议、拒绝或工作
+        ↓
+形成 Subagent 委派或 Group Membership
+```
+
+平台不要求预先存在 Group 模板、角色槽位或固定调用图。重复业务场景可以保存为用户自己的场景提示、验收夹具或成员收藏，但它们不是 Group 本体。
+
+## 两类多 Agent 关系
+
+### 委派
+
+Chat 或 Plan 中，当前 Agent 为一个有边界的问题调用另一个 Agent。目标 Agent 在独立上下文中工作，最终结果返回调用方，由调用方继续对用户负责。
+
+适合探索、测试、评审、摘要等只需要结果的任务。
+
+### Group
+
+多个 Agent 需要直接通信、共享任务状态、相互质疑或接受用户直接交互时，建立 Group。每个成员保持独立上下文和专业判断，消息不必全部经入口 Agent 转发。
+
+适合复杂协作、竞争性假设、跨专业实现和反复协商。
+
+是否采用单 Agent、委派还是 Group，应由模型结合任务形态、成本和协作收益判断，用户可以直接指定或否决。
+
+## Group 的网络语义
+
+Group 是工作网节点在某个 Session 中形成的逻辑协作子网：
 
 ```text
 GroupSession
-├── 唯一人类参与者：任务发起人
-└── 多个对等垂类 Agent
+├── human initiator
+├── initiator agent
+├── GroupMembership[]
+├── GroupMessage[]
+├── AgentInvocation[]
+├── optional SharedTask[]
+├── Artifact / shared facts
+└── GroupRun[]
 ```
 
-入口 Agent 是首次组图和初始结果交付者，但不是永久 Supervisor。财务、法务、运营、订单等 Agent 各自保持完整领域能力，并可在确认范围内通过 `invoke_agent` 对等协作。
+入口 Agent 只是默认对话锚点：用户没有指定接收者时由它先处理。它不拥有其他成员，不具有额外权限，也不能替其他成员修改结论或隐藏异议。
 
-其他岗位工作人员、责任人或审批人不会因为被某个 Agent 联系而加入 Group，也不会成为 Group Agent Node。他们不自动看到 Group 对话、其他 Agent 工作或完整任务上下文。
+Membership、消息和 Artifact 可以在所有成员都没有 Runner 时持续存在。消息或 AgentInvocation 需要处理时，平台才为目标成员创建或恢复 WorkItem；Group 不是一组长期连接的 Agent 进程。
 
-## 垂类 Agent 背后的人
+成员可以：
 
-最终网络允许垂类 Agent 在无法独立完成工作时，定向联系任务相关的人：
+- 向任一成员发送定向消息或工作请求；
+- 创建、认领、更新或放弃共享任务；
+- 读取被授权的共享事实和 Artifact；
+- 请求其他成员复核或反驳；
+- 直接向任务发起人澄清；
+- 提议邀请新的网络 Agent；
+- 退出或建议替换成员。
 
-- 向任务发起人澄清；
-- 向其他岗位工作人员询问信息或口径；
-- 向责任人发送通知；
-- 向具有业务权限的人请求确认或审批。
+共享任务是协作媒介，不是平台自动执行的 DAG。
 
-联系谁、为什么联系以及需要什么回答，属于垂类 Agent 的领域判断，可以来自 Instructions、Skill、组织目录 Tool 或垂类业务系统。平台不硬编码金额、岗位或业务审批标准。
+## Membership 而不是模板或 Charter
 
-该能力不需要新的执行模式或另一套状态机。长期可以把现有可恢复等待推广为定向用户等待：
+Group 不依赖 Group Template，也不要求模型先生成完整 Formation JSON。成员关系以事件表达：
 
 ```text
-WorkItem = waiting_user
-+ target_user_id
-+ interaction_type
-+ visibility
+invited
+joined
+declined
+left
+removed
+replaced
 ```
 
-目标人回复后，只恢复请求 Agent 的 Work Item。目标人不加入 Group，回复也不自动进入 Group 共享聊天。任务发起人最多看到受控的抽象执行状态，例如“财务 Agent 正在等待外部业务确认”，默认不感知联系人、请求内容和私下回复。
+每个 Membership 记录 Agent、版本解析策略、邀请者、原因、共享上下文范围、有效时间和授权来源。平台还为每个 GroupRun 保存成员与 AgentVersion 快照，用于恢复和审计。
 
-纯通知不进入 `waiting_user`，只产生定向 NotificationDelivery。平台级 Tool Confirmation 继续绑定精确 ToolInvocation；垂类业务确认或审批属于 Agent 的用户等待，二者不能混为同一套业务审批系统。
+成员变化是否可以立即生效，由 Collaboration Policy 决定：
 
-这些能力属于项目后期产品演进，不阻塞第一阶段 Chat、Plan 和最小 Group 闭环。
+- 高风险或未预授权范围：等待用户确认；
+- 用户预授权的候选、预算和数据范围内：可以自动加入；
+- 超过人数、成本、数据或组织边界：拒绝或升级；
+- 第一期 UAT：`fixed_for_run`，本轮不变更成员。
 
-## 网络发现与授权
+动态治理来自可解释的策略和成员事件，而不是版本化大 Charter 文档。
 
-Agent 网络中的发现不等于调用授权。名称和描述帮助 Agent 理解企业内有哪些领域能力，但真正协作仍必须满足：
+## 网络中的三张图
 
-- 目标 Agent 已发布并处于允许参与的状态；
-- 当前模式允许发现目标 Agent；
-- 调用方显式装配 `invoke_agent`；
-- 当前用户有权使用目标 Agent；
-- 数据、Tool 和垂类业务权限均允许本次操作。
+平台区分：
 
-最终网络可以增加组织、岗位、部门和责任关系，但不能建立一个绕过 `userId`、Agent 装配或业务系统授权的隐式超级权限层。
+1. **Discovery Graph**：工作网中谁可以被谁发现，不代表权限；
+2. **Membership Graph**：当前 Group 在某一时间点有哪些成员；
+3. **Interaction Graph**：真实 Message、AgentInvocation、共享任务和 Artifact 关系。
 
-## 能力蒸馏与进化
+不预建第四张“应该怎样协作”的业务图。UI 可以从真实事件生成动态图，但不能用建议边限制模型。
 
-岗位能力的长期沉淀遵循受审核路径：
+## 信息共享
+
+Group 采用“按需共享、可寻址交互”：
+
+- 定向消息只唤醒接收者；
+- Group 消息可以被全体成员按权限读取；
+- Tool/Agent 结果、共享任务、Artifact、测试、决定摘要和风险可以共享；
+- 成员根据当前任务按需检索，不把全量 Transcript 塞入每次 Prompt；
+- Instructions、私有 Memory、完整 Prompt、凭证和原始 Chain-of-Thought 不共享；
+- 新成员只获得明确的 Bootstrap 与之后允许读取的共享事实。
+
+建议可见性为 `private | direct | group | user`，实际投影必须同时满足数据产生者、原始用户和平台策略。
+
+## 专业分歧
+
+Group 不要求虚假共识。成员可以保留反证、风险和不同结论，并直接让用户查看。默认对话锚点在汇总时必须忠实表达影响结果的重要分歧，不能覆盖其他成员记录。
+
+平台不通过通用 Evaluator 裁决专业争论。可以按业务引入评审 Agent、确定性测试或人工决定，但这些都是网络中的可见参与行为，而不是隐藏 Supervisor。
+
+## Group 如何停止
+
+每个 Agent 根据自己的 Turn、任务和环境反馈自然停止或等待。GroupRun 关联 Run 的状态来自真实事件：
+
+- 是否仍有运行中的 Tool/Agent Invocation；
+- 是否有人在等待用户或审批；
+- 是否仍有明确的共享任务处于进行中；
+- 是否被用户取消或达到硬预算。
+
+每个 GroupRun 固定一个 `reporter_agent_id`，默认取本轮入口 Agent。成员空闲且没有 pending action 时，持久化 Coordinator 通过唯一 summary epoch 创建/恢复 Reporter WorkItem；汇总提交并二次确认仍无 pending 后才完成一对一 Run。Reporter 不可用时等待用户从本轮成员中替换。该责任不增加 Reporter 的 Tool、数据或管理权限，也不形成永久 Supervisor。
+
+用户也可以要求任何成员交付阶段性消息。真实测试和 Artifact 决定结果能否标记为 verified，不要求通用 `OutcomeClaim` 或 LLM Evaluator。
+
+## 人与 Agent 社会
+
+任务发起人是 Group 的人类参与者，可以直接进入任一成员上下文、纠正目标、批准行动和结束协作。
+
+某个 Agent 还可以联系 Group 外工作人员、业务责任人或审批人。被联系者不会因此成为 Agent 节点或自动获得 Group 历史；其答复只进入授权的等待上下文。
+
+## 身份和权限
+
+每次 Agent 行动继续代表 Run 创建时固定的内部 `tenant_id + account_id`：
 
 ```text
-Session / Runner 事实
-→ 事实记忆与过程经验
-→ Skill Candidate
-→ 管理员或领域负责人审核
-→ 发布 Skill 或 AgentVersion
+original principal authority
+∩ current AgentVersion capabilities
+∩ current session permission mode
+∩ membership / sharing boundary
+∩ tool and enterprise policy
 ```
 
-平台不得让 Agent 根据少量运行样本自动改写 Instructions、授权或已发布 Skill。进化的目标是把重复劳动和稳定经验沉淀为可复用能力，不是让 Agent 绕过人类治理自我扩权。
+Agent 的信誉和历史合作可以影响推荐排序，不能产生数据或 Tool 权限。另一个 Agent 的服务凭证也不能为调用者提权。
 
-## 第一阶段与最终蓝图的关系
+注册、发现、邀请、调用和授权是五个独立事实：发布 AgentCard 不自动进入所有目录，进入目录不自动允许建组，Membership 不自动扩大数据或 Tool 权限。跨域后还必须证明远程运营方身份、Endpoint 控制权和委托链；这些联邦能力通过 Gateway 增加，不修改平台内 Agent 的身份模型。
 
-[第一阶段交付边界](phase-one-scope.md) 是最终蓝图的可落地骨架，而不是能力上限：
+跨域 AgentCard、Message、Artifact、状态和错误都作为不可信输入处理，继续经过内容边界、Prompt Injection 防护、数据分级、出站策略和审计；网络可达性不能升级为业务信任。
 
-- `user / builder / admin` 与 `private / enterprise` 是第一阶段基础治理；
-- Group 必须展示并由用户确认，是第一阶段安全边界；
-- Group 参与者确认后固定，是第一阶段可解释执行边界；
-- 通知跟随 Session 来源，是第一阶段发起人通知策略；
-- Clarification 默认面向任务发起人，是第一阶段用户等待能力；
-- 岗位责任人定向澄清、组织路由、复杂权限和能力进化均可后置。
+## Agent 成长
 
-未来是否允许预授权 Group 自动执行、版本化 Group Amendment 或更复杂的组织发现，需要单独产品决策。当前文档不承诺这些能力，也不能把第一阶段限制解释为永远禁止合理演进。
+```text
+运行事实 / 用户反馈 / UAT
+→ 可复用经验候选
+→ Instructions / Skill / Memory / Tool 改进
+→ Builder 或 Owner 审核
+→ 新 AgentVersion
+→ 新的独立与协作 Eval
+```
 
-## 方向一致性约束
+个人偏好可以在用户私有边界内持续学习；企业专业能力的发布仍应可审查、可回滚和可追溯。
 
-后续产品设计不得偏离以下方向：
+## 第一期与终局的关系
 
-- 不能把所有岗位 Agent 收缩成一个中央 Agent 的 Prompt 片段；
-- 不能把 Group 改造成固定 Supervisor 驱动的普通工作流；
-- 不能因为引入岗位人员而把 Group 变成多人共享全部上下文的普通群聊；
-- 不能让能力发现自动变成权限授予；
-- 不能让 Agent 进化自动修改授权或绕过审核；
-- 不能为不同入口、岗位或协作模式复制多套用户身份和 Runtime。
+第一阶段使用五个专业 Agent 和确定的容量风险计算器场景：
+
+- 个人助手单独验证 Chat；
+- 项目经理验证显式 Plan 权限模式；
+- 用户从工作网选择产品、开发、测试三个 Agent 建立 Group；
+- GroupRun 保存三名成员的确定版本快照；
+- 成员内部消息、任务、调用、返工和计划保持动态；
+- 本轮禁用动态加人，只记录候选建议或拒绝；
+- 后续阶段在同一 Membership 模型上开启用户确认和预授权加入。
+
+第一期不需要 Group 模板、角色槽位、Charter Revision 或永久 Supervisor。它验证的是最小动态社会骨架，而不是把社会固化成模板。
+
+## 终局底线
+
+- 不让中央 Agent 拥有所有专业判断；
+- 不用 Workflow 模板定义开放协作；
+- 不让发现等于授权；
+- 不把成员锁死在 Group 数据结构中；
+- 不让入口 Agent 成为永久 Supervisor；
+- 不让 Group 复制或修改成员 Agent；
+- 不共享私有 Prompt、Memory、凭证和 Chain-of-Thought；
+- 不用第一阶段固定 UAT 边界限制未来动态加入；
+- 不让多 Agent 数量替代单 Agent 专业质量；
+- 不为平台内每个 Agent 复制公网寻址和常驻服务；
+- 不让跨域协议成为平台内部 Agent Runtime 的前置依赖。

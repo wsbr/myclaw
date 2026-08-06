@@ -1,6 +1,8 @@
-# 第一阶段前端详细设计
+# V1 前端设计（历史实现参考）
 
-本文是第一阶段页面、客户端状态、交互与现有页面处置的唯一实现级定义。React/Vite、Router、TanStack Query、Zustand、Ant Design与React Flow继续使用。
+> **历史 V1 实现参考，非目标设计。** 后台执行、Required Action 和断线恢复仅作为迁移证据；当前 WorkingPlan、Plan 只读批准、工作网选人、Group 消息/实际协作图和 Verification 体验以[综合技术方案](phase-one-agent-native-delivery.md)为准。
+
+本文记录V1页面、客户端状态、交互与现有页面处置基线。React/Vite、Router、TanStack Query、Zustand、Ant Design与React Flow继续使用。
 
 ## 1. 客户端分层
 
@@ -32,7 +34,7 @@
 
 ## 4. 管理页
 
-Tool列表通过分页集合接口展示key、显示名、execution_mode、enabled、confirmation_policy、implementation_version、使用Agent数；行内可启停和切换never/always，详情编辑说明/平台配置、看Schema/连通测试。危险变更显示即时语义。
+Tool列表通过分页集合接口展示key、显示名、execution_mode、enabled、confirmation_policy、implementation_version、使用Agent数；行内可启停并在 `never|per_call|session_grant` 间切换，详情编辑说明/平台配置、看Schema/连通测试。`per_call` 每次创建 Required Action，`session_grant` 仍需用户先授予受限 Grant；危险变更显示即时语义。
 
 Skill页支持拖拽包上传、解析进度、校验错误、版本历史、publish、共享同步状态与checksum；不提供“提示词内容”编辑器。Model页支持创建、编辑、启停和连通测试；Policy/Sandbox页提供分页列表、详情与允许字段编辑。Agent表单只调用 `/agent-options/*` 安全选择集合，不能复用admin详情。管理侧新增Platform Audit分页页，按resource/actor/action/outcome过滤；MCP页面和导航第一阶段移除/后置。
 
@@ -44,7 +46,7 @@ Session页面由左侧历史、顶部模式/后台状态、中央作用域、右
 - Plan：与同Session Chat共享外壳但切换到Plan子空间；终态结果回Chat只显示摘要引用。
 - Group：作为Session子空间；返回Chat只改路由/选中scope，后台继续。
 
-Run卡区分lifecycle与outcome；页面关闭不发送cancel。取消必须二次确认并说明不回滚副作用。
+Run 卡展示权威 status、等待原因和 terminal result；页面关闭不发送 cancel。取消必须二次确认并说明不回滚副作用。
 
 ## 6. Plan图
 

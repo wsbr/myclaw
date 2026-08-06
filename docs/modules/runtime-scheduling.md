@@ -14,6 +14,8 @@ WorkItem / Run：记录业务工作与结算结果
 
 队列消息只传递命令 ID 和领域实体引用。Worker 必须从数据库加载当前事实，不能依赖队列中复制的 Agent、上下文或执行状态。
 
+Runtime Worker 是长期运行的计算服务，Runner 是 Worker 在一段时间内取得某个 WorkItem 推进权后的领域执行记录。一个 Worker 可以先后承载多个 Agent 的 Runner；多个 Runner 也可以在不同时间、不同 Worker 上引用同一 AgentVersion。两者都不能作为 Agent 的稳定身份或状态源。
+
 ## ExecutionQueue 抽象
 
 Runtime 只依赖统一接口：
@@ -54,31 +56,35 @@ outbox_command
 ├── runtime.runner
 ├── runtime.tool
 ├── runtime.sandbox
-└── runtime.delivery
+├── runtime.delivery
+└── runtime.maintenance    # enterprise_production_v1
 ```
 
-建议结构：
+物理字段以[数据库契约](../technical/database-schema.md)为准，逻辑上固定为：
 
 ```text
 id
+tenant_id?
 topic
+command_type
 aggregate_type
 aggregate_id
 partition_key
 priority
+cause_event_id?
+dedupe_key
+payload_json
 available_at
-status
+status: pending | claimed | retry_wait | completed | dead
 attempt_count
-dispatch_lease_owner
-dispatch_lease_expires_at
-payload_ref
-last_error
+claim_owner / claim_token / claim_expires_at
+last_error_code?
+version
 created_at
-published_at?
 completed_at?
 ```
 
-`payload_ref` 只保存必要引用，不复制大段 Prompt、Tool 结果或业务状态。
+`payload_json` 只保存必要 ID/版本/原因引用，不复制大段 Prompt、Tool 结果或业务状态。
 
 ## Topic 职责
 
@@ -89,7 +95,7 @@ completed_at?
 - 取消与超时状态推进；
 - Runner 租约回收；
 - 异步 Tool 回调结算；
-- Clarification、Confirmation 等等待条件满足后的恢复触发。
+- Clarification、Approval 等等待条件满足后的恢复触发。
 
 Control Worker 不能执行模型或脚本，避免控制面被长任务阻塞。
 
@@ -109,7 +115,7 @@ Control Worker 不能执行模型或脚本，避免控制面被长任务阻塞�
 
 处理已经提交的 Channel NotificationDelivery。投递失败独立重试，不改变原 Run 的业务结果。
 
-Skill 同步、Sandbox 回收和 Trace 导出等维护任务可以先使用平台定时任务，后期再增加 `runtime.maintenance`。
+`uat_single_node` 可由平台定时任务执行 Skill 同步、Sandbox 回收和 Trace 导出；`enterprise_production_v1` 使用 `runtime.maintenance`，由多个候选 Maintenance Pod 竞争数据库 lease，不能依赖单一常驻 Pod。
 
 Chat、Plan、Group、财务 Agent 或运营 Agent 不形成不同队列。Topic 只按执行资源和可靠性特征划分。
 
@@ -151,7 +157,7 @@ WorkItem
 └── version
 ```
 
-不同 Work Item 可以并行，因此 Plan 的并行节点和 Group 的多个 Agent 不受此约束影响。
+不同 WorkItem 可以并行，因此同一 Session 的多个 AgentInvocation 和 Group 的多个成员不受此约束影响。
 
 创建 Runner 时必须在一个事务中：
 
@@ -225,7 +231,7 @@ Session 内的 ExecutionEvent 使用单调递增 sequence。为避免并发事�
 
 ```text
 UNIQUE(session_id, sequence)
-UNIQUE(entity_type, entity_id, entity_version, event_type)
+UNIQUE(aggregate_type, aggregate_id, aggregate_version, event_type)
 ```
 
 ## 第一阶段调度策略

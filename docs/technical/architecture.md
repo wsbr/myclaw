@@ -1,6 +1,8 @@
-# 第一阶段物理架构
+# V1 物理架构（历史实现参考）
 
-本文是第一阶段进程边界、单机部署、存储职责、后台命令和 MQ 演进的唯一实现级定义。产品执行语义见 [Runtime 执行](../modules/runtime-execution.md)。
+> **历史 V1 实现参考，非目标设计。** 本文只保留进程、存储和 Outbox 的迁移证据；当前目标架构以[第一阶段 Agent-native 交付技术方案](phase-one-agent-native-delivery.md)为准，不得从本文恢复旧执行语义或设计新接口。
+
+本文记录V1的进程边界、单机部署、存储职责、后台命令和MQ演进基线。产品执行语义见[Runtime执行](../modules/runtime-execution.md)。
 
 ## 1. 进程边界
 

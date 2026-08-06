@@ -1,0 +1,2745 @@
+openapi: 3.1.0
+info:
+  title: MyClaw Agent-native API
+  version: 1.0.0
+  description: |
+    MyClaw v1 external resource and command contract. MySQL domain state is authoritative.
+    Stateful commands require Idempotency-Key; mutable resources additionally require If-Match.
+    Deployments declare exactly one identity_profile. raw_user_id_v1 requires
+    X-MyClaw-User-Id whenever uatAgentApiKey is used and is limited to dev/UAT. The production profile
+    enterprise_oidc_v1 forbids that header and resolves account_id exclusively
+    from verified user, OBO or service-principal tokens.
+  x-contract-authority:
+    database: ./database-schema.md
+    state_machines: ./state-machines.md
+    prose_protocol: ./api-sse.md
+    production_profile: ./production-reference-architecture.md
+  x-cookie-auth-contract:
+    authorization_flow: authorization_code_pkce_s256
+    mutation_csrf_header: X-CSRF-Token
+    mutation_origin_check: required
+    applies_when: webSession authenticates POST, PUT, PATCH, or DELETE
+servers:
+  - url: /api/v1
+security:
+  - webSession: []
+  - enterpriseBearer: []
+  - uatAgentApiKey: []
+    rawUserIdHeader: []
+tags:
+  - name: Identity
+  - name: Accounts
+  - name: Agents
+  - name: Registry
+  - name: Sessions
+  - name: Runs
+  - name: Plans
+  - name: Network
+  - name: Groups
+  - name: Actions
+  - name: Artifacts
+  - name: Events
+  - name: Operations
+
+paths:
+  /auth/me:
+    get:
+      tags: [Identity]
+      operationId: getAuthContext
+      responses:
+        '200':
+          description: Authenticated principal projection.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AuthContextView'}
+        default: {$ref: '#/components/responses/Error'}
+
+  /auth/enterprise/start:
+    get:
+      tags: [Identity]
+      operationId: startEnterpriseLogin
+      security: []
+      parameters:
+        - name: return_to
+          in: query
+          schema: {type: string, maxLength: 2048}
+      responses:
+        '302': {description: Redirect to the configured enterprise IdP.}
+        default: {$ref: '#/components/responses/Error'}
+
+  /auth/enterprise/callback:
+    get:
+      tags: [Identity]
+      operationId: completeEnterpriseLogin
+      security: []
+      parameters:
+        - {name: code, in: query, required: true, schema: {type: string}}
+        - {name: state, in: query, required: true, schema: {type: string}}
+      responses:
+        '302': {description: Login completed and browser redirected.}
+        default: {$ref: '#/components/responses/Error'}
+
+  /auth/logout:
+    post:
+      tags: [Identity]
+      operationId: logoutBrowserSession
+      description: Revokes the current browser session. X-CSRF-Token is required when webSession authenticates the request.
+      security:
+        - webSession: []
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+        - {$ref: '#/components/parameters/CsrfToken'}
+      responses:
+        '204': {description: Session revoked and cookie cleared.}
+        default: {$ref: '#/components/responses/Error'}
+
+  /accounts/me:
+    get:
+      tags: [Accounts]
+      operationId: getMyAccount
+      responses:
+        '200':
+          description: Current platform account.
+          content: {application/json: {schema: {$ref: '#/components/schemas/Account'}}}
+        default: {$ref: '#/components/responses/Error'}
+    patch:
+      tags: [Accounts]
+      operationId: updateMyAccount
+      parameters:
+        - {$ref: '#/components/parameters/IfMatch'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+        - {$ref: '#/components/parameters/RawUserId'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/AccountPatch'}}}
+      responses:
+        '200':
+          description: Updated account.
+          content: {application/json: {schema: {$ref: '#/components/schemas/Account'}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /identity/preprovision:
+    post:
+      tags: [Identity]
+      operationId: preprovisionRawUserAccount
+      description: Available only under raw_user_id_v1; creates or returns a normal user account.
+      x-identity-profiles: [raw_user_id_v1]
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+        - {$ref: '#/components/parameters/RequiredRawUserId'}
+      responses:
+        '200':
+          description: Existing account.
+          content: {application/json: {schema: {$ref: '#/components/schemas/Account'}}}
+        '201':
+          description: Created account.
+          content: {application/json: {schema: {$ref: '#/components/schemas/Account'}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /admin/accounts:
+    get:
+      tags: [Accounts]
+      operationId: listAccounts
+      parameters:
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/Cursor'}
+      responses:
+        '200':
+          description: Account page.
+          content: {application/json: {schema: {$ref: '#/components/schemas/AccountPage'}}}
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Accounts]
+      operationId: createAccount
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/AccountCreate'}}}
+      responses:
+        '201':
+          description: Created account; user accounts receive the base user role, service accounts receive no human role and are authorized only by workload scopes.
+          content: {application/json: {schema: {$ref: '#/components/schemas/Account'}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /admin/accounts/{account_id}/roles:
+    patch:
+      tags: [Accounts]
+      operationId: replaceAccountRoles
+      parameters:
+        - {$ref: '#/components/parameters/AccountId'}
+        - {$ref: '#/components/parameters/IfMatch'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/RolesPatch'}}}
+      responses:
+        '200':
+          description: Updated account.
+          content: {application/json: {schema: {$ref: '#/components/schemas/Account'}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /admin/accounts/{account_id}/status:
+    patch:
+      tags: [Accounts]
+      operationId: updateAccountStatus
+      parameters:
+        - {$ref: '#/components/parameters/AccountId'}
+        - {$ref: '#/components/parameters/IfMatch'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/AccountStatusPatch'}}}
+      responses:
+        '200':
+          description: Updated account.
+          content: {application/json: {schema: {$ref: '#/components/schemas/Account'}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /admin/accounts/{account_id}/external-identities:
+    get:
+      tags: [Accounts, Identity]
+      operationId: listExternalIdentities
+      x-identity-profiles: [enterprise_oidc_v1]
+      parameters:
+        - {$ref: '#/components/parameters/AccountId'}
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/Cursor'}
+      responses:
+        '200': {description: External identity page., content: {application/json: {schema: {$ref: '#/components/schemas/ExternalIdentityPage'}}}}
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Accounts, Identity]
+      operationId: bindExternalIdentity
+      x-identity-profiles: [enterprise_oidc_v1]
+      parameters:
+        - {$ref: '#/components/parameters/AccountId'}
+        - {$ref: '#/components/parameters/IfMatch'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/ExternalIdentityCreate'}}}
+      responses:
+        '201': {description: Verified issuer/subject binding created., content: {application/json: {schema: {$ref: '#/components/schemas/ExternalIdentity'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /admin/accounts/{account_id}/external-identities/{external_identity_id}:
+    delete:
+      tags: [Accounts, Identity]
+      operationId: revokeExternalIdentity
+      x-identity-profiles: [enterprise_oidc_v1]
+      parameters:
+        - {$ref: '#/components/parameters/AccountId'}
+        - {$ref: '#/components/parameters/ExternalIdentityId'}
+        - {$ref: '#/components/parameters/IfMatch'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      responses:
+        '204': {description: External identity binding revoked.}
+        default: {$ref: '#/components/responses/Error'}
+
+  /agents:
+    get:
+      tags: [Agents]
+      operationId: listAgents
+      parameters:
+        - {name: status, in: query, schema: {$ref: '#/components/schemas/AgentStatus'}}
+        - {name: visibility, in: query, schema: {$ref: '#/components/schemas/AgentVisibility'}}
+        - {name: owner, in: query, schema: {type: string, format: uuid}}
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/Cursor'}
+      responses:
+        '200':
+          description: Agent page.
+          content: {application/json: {schema: {$ref: '#/components/schemas/AgentPage'}}}
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Agents]
+      operationId: createAgent
+      parameters:
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/AgentCreate'}}}
+      responses:
+        '201':
+          description: Created Agent with editable draft.
+          content: {application/json: {schema: {$ref: '#/components/schemas/Agent'}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /agents/{agent_id}:
+    get:
+      tags: [Agents]
+      operationId: getAgent
+      parameters: [{$ref: '#/components/parameters/AgentId'}]
+      responses:
+        '200':
+          description: Agent.
+          content: {application/json: {schema: {$ref: '#/components/schemas/Agent'}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /agents/{agent_id}/draft:
+    get:
+      tags: [Agents]
+      operationId: getAgentDraft
+      parameters: [{$ref: '#/components/parameters/AgentId'}]
+      responses:
+        '200':
+          description: Editable draft and resolved dependency preview.
+          content: {application/json: {schema: {$ref: '#/components/schemas/AgentDraft'}}}
+        default: {$ref: '#/components/responses/Error'}
+    patch:
+      tags: [Agents]
+      operationId: updateAgentDraft
+      parameters:
+        - {$ref: '#/components/parameters/AgentId'}
+        - {$ref: '#/components/parameters/IfMatch'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/AgentDraftPatch'}}}
+      responses:
+        '200':
+          description: Updated draft.
+          content: {application/json: {schema: {$ref: '#/components/schemas/AgentDraft'}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /agents/{agent_id}/publish:
+    post:
+      tags: [Agents]
+      operationId: publishAgent
+      parameters:
+        - {$ref: '#/components/parameters/AgentId'}
+        - {$ref: '#/components/parameters/IfMatch'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/PublishAgentRequest'}}}
+      responses:
+        '201':
+          description: Immutable published version.
+          content: {application/json: {schema: {$ref: '#/components/schemas/PublishedAgentVersionEnvelope'}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /agents/{agent_id}/deactivate:
+    post:
+      tags: [Agents]
+      operationId: deactivateAgent
+      parameters:
+        - {$ref: '#/components/parameters/AgentId'}
+        - {$ref: '#/components/parameters/IfMatch'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      responses:
+        '200': {description: Agent deactivated., content: {application/json: {schema: {$ref: '#/components/schemas/Agent'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /agents/{agent_id}/reactivate:
+    post:
+      tags: [Agents]
+      operationId: reactivateAgent
+      parameters:
+        - {$ref: '#/components/parameters/AgentId'}
+        - {$ref: '#/components/parameters/IfMatch'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      responses:
+        '200': {description: Agent reactivated., content: {application/json: {schema: {$ref: '#/components/schemas/Agent'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /agents/{agent_id}/versions:
+    get:
+      tags: [Agents]
+      operationId: listAgentVersions
+      parameters:
+        - {$ref: '#/components/parameters/AgentId'}
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/Cursor'}
+      responses:
+        '200': {description: Version page., content: {application/json: {schema: {$ref: '#/components/schemas/AgentVersionPage'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /agents/{agent_id}/versions/{agent_version_id}:
+    get:
+      tags: [Agents]
+      operationId: getAgentVersion
+      parameters:
+        - {$ref: '#/components/parameters/AgentId'}
+        - {$ref: '#/components/parameters/AgentVersionId'}
+      responses:
+        '200': {description: Immutable version., content: {application/json: {schema: {$ref: '#/components/schemas/AgentVersion'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /agents/{agent_id}/draft/test-runs:
+    post:
+      tags: [Agents]
+      operationId: createDraftTestRun
+      parameters:
+        - {$ref: '#/components/parameters/AgentId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/DraftTestRunRequest'}}}
+      responses:
+        '202': {description: Draft snapshot and private test Run created., content: {application/json: {schema: {$ref: '#/components/schemas/RunEnvelope'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /agents/{agent_id}/api-keys:
+    get:
+      tags: [Identity]
+      operationId: listAgentApiKeys
+      x-identity-profiles: [raw_user_id_v1]
+      parameters:
+        - {$ref: '#/components/parameters/AgentId'}
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/Cursor'}
+      responses:
+        '200': {description: API key metadata page., content: {application/json: {schema: {$ref: '#/components/schemas/ApiKeyPage'}}}}
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Identity]
+      operationId: createAgentApiKey
+      x-identity-profiles: [raw_user_id_v1]
+      parameters:
+        - {$ref: '#/components/parameters/AgentId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/ApiKeyCreate'}}}
+      responses:
+        '201': {description: Key metadata and one-time plaintext secret., content: {application/json: {schema: {$ref: '#/components/schemas/ApiKeyCreated'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /agents/{agent_id}/api-keys/{key_id}/rotate:
+    post:
+      tags: [Identity]
+      operationId: rotateAgentApiKey
+      x-identity-profiles: [raw_user_id_v1]
+      parameters:
+        - {$ref: '#/components/parameters/AgentId'}
+        - {$ref: '#/components/parameters/ApiKeyId'}
+        - {$ref: '#/components/parameters/IfMatch'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      responses:
+        '200': {description: Rotated key and one-time plaintext secret., content: {application/json: {schema: {$ref: '#/components/schemas/ApiKeyCreated'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /agents/{agent_id}/api-keys/{key_id}:
+    delete:
+      tags: [Identity]
+      operationId: revokeAgentApiKey
+      x-identity-profiles: [raw_user_id_v1]
+      parameters:
+        - {$ref: '#/components/parameters/AgentId'}
+        - {$ref: '#/components/parameters/ApiKeyId'}
+        - {$ref: '#/components/parameters/IfMatch'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      responses:
+        '204': {description: Key revoked.}
+        default: {$ref: '#/components/responses/Error'}
+
+  /agent-options/{option_type}:
+    get:
+      tags: [Registry]
+      operationId: listSafeAgentOptions
+      parameters:
+        - name: option_type
+          in: path
+          required: true
+          schema: {type: string, enum: [models, tools, skills, context-policies, memory-policies, sandbox-profiles]}
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/Cursor'}
+      responses:
+        '200': {description: Safe registry option page., content: {application/json: {schema: {$ref: '#/components/schemas/OptionPage'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /admin/models:
+    get:
+      tags: [Registry]
+      operationId: listModels
+      parameters: [{$ref: '#/components/parameters/Limit'}, {$ref: '#/components/parameters/Cursor'}]
+      responses:
+        '200': {description: Logical Model page., content: {application/json: {schema: {$ref: '#/components/schemas/ModelPage'}}}}
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Registry]
+      operationId: createModel
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/ModelCreate'}}}
+      responses:
+        '201': {description: Logical Model created without an active version., content: {application/json: {schema: {$ref: '#/components/schemas/Model'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /admin/models/{model_id}:
+    get:
+      tags: [Registry]
+      operationId: getModel
+      parameters: [{$ref: '#/components/parameters/ModelId'}]
+      responses:
+        '200': {description: Logical Model., content: {application/json: {schema: {$ref: '#/components/schemas/Model'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /admin/models/{model_id}/versions:
+    get:
+      tags: [Registry]
+      operationId: listModelVersions
+      parameters:
+        - {$ref: '#/components/parameters/ModelId'}
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/Cursor'}
+      responses:
+        '200': {description: Immutable ModelVersion page., content: {application/json: {schema: {$ref: '#/components/schemas/ModelVersionPage'}}}}
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Registry]
+      operationId: createModelVersion
+      parameters:
+        - {$ref: '#/components/parameters/ModelId'}
+        - {$ref: '#/components/parameters/IfMatch'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/ModelVersionCreate'}}}
+      responses:
+        '201': {description: Immutable version created; it cannot be activated until the required ConformanceRun passes., content: {application/json: {schema: {$ref: '#/components/schemas/ModelVersion'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /admin/models/{model_id}/versions/{model_version_id}/conformance:
+    post:
+      tags: [Registry]
+      operationId: testModelVersionConformance
+      parameters:
+        - {$ref: '#/components/parameters/ModelId'}
+        - {$ref: '#/components/parameters/ModelVersionId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      responses:
+        '202': {description: Conformance execution accepted., content: {application/json: {schema: {$ref: '#/components/schemas/ConformanceRun'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /admin/models/{model_id}/versions/{model_version_id}/activate:
+    post:
+      tags: [Registry]
+      operationId: activateModelVersion
+      parameters:
+        - {$ref: '#/components/parameters/ModelId'}
+        - {$ref: '#/components/parameters/ModelVersionId'}
+        - {$ref: '#/components/parameters/IfMatch'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      responses:
+        '200': {description: Current pointer updated only when conformance passed., content: {application/json: {schema: {$ref: '#/components/schemas/Model'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /admin/tools:
+    get:
+      tags: [Registry]
+      operationId: listPlatformTools
+      parameters: [{$ref: '#/components/parameters/Limit'}, {$ref: '#/components/parameters/Cursor'}]
+      responses:
+        '200': {description: Code-reconciled Tool page., content: {application/json: {schema: {$ref: '#/components/schemas/PlatformToolPage'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /admin/tools/{tool_id}:
+    get:
+      tags: [Registry]
+      operationId: getPlatformTool
+      parameters: [{$ref: '#/components/parameters/ToolId'}]
+      responses:
+        '200': {description: Platform Tool metadata and live governance., content: {application/json: {schema: {$ref: '#/components/schemas/PlatformTool'}}}}
+        default: {$ref: '#/components/responses/Error'}
+    patch:
+      tags: [Registry]
+      operationId: updatePlatformToolGovernance
+      parameters:
+        - {$ref: '#/components/parameters/ToolId'}
+        - {$ref: '#/components/parameters/IfMatch'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/PlatformToolPatch'}}}
+      responses:
+        '200': {description: Only mutable governance fields updated., content: {application/json: {schema: {$ref: '#/components/schemas/PlatformTool'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /admin/tools/{tool_id}/conformance:
+    post:
+      tags: [Registry]
+      operationId: testPlatformToolConformance
+      parameters:
+        - {$ref: '#/components/parameters/ToolId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      responses:
+        '202': {description: Tool conformance/connectivity execution accepted., content: {application/json: {schema: {$ref: '#/components/schemas/ConformanceRun'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /skills:
+    get:
+      tags: [Registry]
+      operationId: listSkills
+      parameters: [{$ref: '#/components/parameters/Limit'}, {$ref: '#/components/parameters/Cursor'}]
+      responses:
+        '200': {description: Authorized Skill page., content: {application/json: {schema: {$ref: '#/components/schemas/SkillPage'}}}}
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Registry]
+      operationId: createSkill
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/SkillCreate'}}}
+      responses:
+        '201': {description: Logical Skill created., content: {application/json: {schema: {$ref: '#/components/schemas/Skill'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /skills/{skill_id}:
+    get:
+      tags: [Registry]
+      operationId: getSkill
+      parameters: [{$ref: '#/components/parameters/SkillId'}]
+      responses:
+        '200': {description: Logical Skill., content: {application/json: {schema: {$ref: '#/components/schemas/Skill'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /skills/{skill_id}/versions:
+    get:
+      tags: [Registry]
+      operationId: listSkillVersions
+      parameters:
+        - {$ref: '#/components/parameters/SkillId'}
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/Cursor'}
+      responses:
+        '200': {description: Immutable SkillVersion page., content: {application/json: {schema: {$ref: '#/components/schemas/SkillVersionPage'}}}}
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Registry]
+      operationId: uploadSkillVersion
+      parameters:
+        - {$ref: '#/components/parameters/SkillId'}
+        - {$ref: '#/components/parameters/IfMatch'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [package]
+              properties:
+                package: {type: string, contentMediaType: application/zip, contentEncoding: binary}
+      responses:
+        '201': {description: Uploaded immutable package and assessment created., content: {application/json: {schema: {$ref: '#/components/schemas/SkillVersion'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /skills/{skill_id}/versions/{skill_version_id}/publish:
+    post:
+      tags: [Registry]
+      operationId: publishSkillVersion
+      parameters:
+        - {$ref: '#/components/parameters/SkillId'}
+        - {$ref: '#/components/parameters/SkillVersionId'}
+        - {$ref: '#/components/parameters/IfMatch'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      responses:
+        '200': {description: Version published and logical current pointer updated., content: {application/json: {schema: {$ref: '#/components/schemas/SkillVersion'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /admin/skills/{skill_id}/versions/{skill_version_id}/assessment-decision:
+    post:
+      tags: [Registry]
+      operationId: decideSkillAssessment
+      parameters:
+        - {$ref: '#/components/parameters/SkillId'}
+        - {$ref: '#/components/parameters/SkillVersionId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/SkillAssessmentDecisionCreate'}}}
+      responses:
+        '201': {description: Human decision bound to the latest exact assessment revision., content: {application/json: {schema: {$ref: '#/components/schemas/SkillAssessmentDecision'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /admin/policies:
+    get:
+      tags: [Registry]
+      operationId: listPolicies
+      description: Policy definitions/versions are code or GitOps reconciled and read-only through the public admin API.
+      parameters: [{$ref: '#/components/parameters/Limit'}, {$ref: '#/components/parameters/Cursor'}]
+      responses:
+        '200': {description: Policy definition page., content: {application/json: {schema: {$ref: '#/components/schemas/PolicyPage'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /admin/sandbox-profiles:
+    get:
+      tags: [Registry]
+      operationId: listSandboxProfiles
+      description: Sandbox profiles/versions are GitOps reconciled and read-only through the public admin API.
+      parameters: [{$ref: '#/components/parameters/Limit'}, {$ref: '#/components/parameters/Cursor'}]
+      responses:
+        '200': {description: Sandbox profile page., content: {application/json: {schema: {$ref: '#/components/schemas/SandboxProfilePage'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /sessions:
+    get:
+      tags: [Sessions]
+      operationId: listSessions
+      parameters:
+        - {$ref: '#/components/parameters/RawUserId'}
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/Cursor'}
+      responses:
+        '200': {description: Session page., content: {application/json: {schema: {$ref: '#/components/schemas/SessionPage'}}}}
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Sessions]
+      operationId: createSession
+      parameters:
+        - {$ref: '#/components/parameters/RawUserId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/SessionCreate'}}}
+      responses:
+        '201': {description: Session created., content: {application/json: {schema: {$ref: '#/components/schemas/Session'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /sessions/{session_id}:
+    get:
+      tags: [Sessions]
+      operationId: getSession
+      parameters:
+        - {$ref: '#/components/parameters/SessionId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+      responses:
+        '200': {description: Session., content: {application/json: {schema: {$ref: '#/components/schemas/Session'}}}}
+        default: {$ref: '#/components/responses/Error'}
+    delete:
+      tags: [Sessions]
+      operationId: deleteSession
+      parameters:
+        - {$ref: '#/components/parameters/SessionId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+        - {$ref: '#/components/parameters/IfMatch'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      responses:
+        '204': {description: Retention/delete intent accepted.}
+        default: {$ref: '#/components/responses/Error'}
+
+  /sessions/{session_id}/messages:
+    get:
+      tags: [Sessions]
+      operationId: listMessages
+      parameters:
+        - {$ref: '#/components/parameters/SessionId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+        - {name: visibility, in: query, schema: {$ref: '#/components/schemas/Visibility'}}
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/Cursor'}
+      responses:
+        '200': {description: Message page., content: {application/json: {schema: {$ref: '#/components/schemas/MessagePage'}}}}
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Sessions]
+      operationId: createMessageRun
+      parameters:
+        - {$ref: '#/components/parameters/SessionId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/MessageCreate'}}}
+      responses:
+        '202': {description: Durable Message, Run, root WorkItem, Runner, Event and Outbox committed., content: {application/json: {schema: {$ref: '#/components/schemas/MessageRunEnvelope'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /runs/{run_id}:
+    get:
+      tags: [Runs]
+      operationId: getRun
+      parameters:
+        - {$ref: '#/components/parameters/RunId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+      responses:
+        '200': {description: Run, the sole lifecycle authority., content: {application/json: {schema: {$ref: '#/components/schemas/Run'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /runs/{run_id}/work-items:
+    get:
+      tags: [Runs]
+      operationId: listRunWorkItems
+      parameters:
+        - {$ref: '#/components/parameters/RunId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/Cursor'}
+      responses:
+        '200': {description: WorkItem page., content: {application/json: {schema: {$ref: '#/components/schemas/WorkItemPage'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /runs/{run_id}/cancel:
+    post:
+      tags: [Runs]
+      operationId: cancelRun
+      parameters:
+        - {$ref: '#/components/parameters/RunId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+        - {$ref: '#/components/parameters/IfMatch'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/CancelRequest'}}}
+      responses:
+        '202': {description: Cancellation intent committed., content: {application/json: {schema: {$ref: '#/components/schemas/Run'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /work-items/{work_item_id}:
+    get:
+      tags: [Runs]
+      operationId: getWorkItem
+      parameters:
+        - {$ref: '#/components/parameters/WorkItemId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+      responses:
+        '200': {description: WorkItem., content: {application/json: {schema: {$ref: '#/components/schemas/WorkItem'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /runners/{runner_id}:
+    get:
+      tags: [Runs]
+      operationId: getRunner
+      parameters:
+        - {$ref: '#/components/parameters/RunnerId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+      responses:
+        '200': {description: Runner execution segment., content: {application/json: {schema: {$ref: '#/components/schemas/Runner'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /sessions/{session_id}/plan-mode:
+    post:
+      tags: [Plans]
+      operationId: enterPlanMode
+      parameters:
+        - {$ref: '#/components/parameters/SessionId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+        - {$ref: '#/components/parameters/IfMatch'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/EnterPlanRequest'}}}
+      responses:
+        '202': {description: Permission changed to plan_readonly and Plan Run created., content: {application/json: {schema: {$ref: '#/components/schemas/RunEnvelope'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /sessions/{session_id}/plan-mode/exit:
+    post:
+      tags: [Plans]
+      operationId: exitPlanMode
+      parameters:
+        - {$ref: '#/components/parameters/SessionId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+        - {$ref: '#/components/parameters/IfMatch'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      responses:
+        '200': {description: Permission changed to direct without approving implementation., content: {application/json: {schema: {$ref: '#/components/schemas/Session'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /runs/{run_id}/working-plans:
+    get:
+      tags: [Plans]
+      operationId: listWorkingPlans
+      parameters:
+        - {$ref: '#/components/parameters/RunId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+      responses:
+        '200': {description: WorkingPlan page., content: {application/json: {schema: {$ref: '#/components/schemas/WorkingPlanPage'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /working-plans/{working_plan_id}:
+    get:
+      tags: [Plans]
+      operationId: getWorkingPlan
+      parameters:
+        - {$ref: '#/components/parameters/WorkingPlanId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+      responses:
+        '200': {description: WorkingPlan., content: {application/json: {schema: {$ref: '#/components/schemas/WorkingPlan'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /working-plans/{working_plan_id}/updates:
+    get:
+      tags: [Plans]
+      operationId: listWorkingPlanUpdates
+      parameters:
+        - {$ref: '#/components/parameters/WorkingPlanId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/Cursor'}
+      responses:
+        '200': {description: Plan update page., content: {application/json: {schema: {$ref: '#/components/schemas/PlanUpdatePage'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /working-plans/{working_plan_id}/approve-implementation:
+    post:
+      tags: [Plans, Actions]
+      operationId: approveWorkingPlanImplementation
+      parameters:
+        - {$ref: '#/components/parameters/WorkingPlanId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+        - {$ref: '#/components/parameters/IfMatch'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/PlanApprovalRequest'}}}
+      responses:
+        '200': {description: Approval settled and subsequent permission changed to direct., content: {application/json: {schema: {$ref: '#/components/schemas/RequiredAction'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /working-plans/{working_plan_id}/continue-planning:
+    post:
+      tags: [Plans]
+      operationId: continuePlanning
+      parameters:
+        - {$ref: '#/components/parameters/WorkingPlanId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+        - {$ref: '#/components/parameters/IfMatch'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/ContinuePlanningRequest'}}}
+      responses:
+        '202': {description: New planning instruction and resume command committed., content: {application/json: {schema: {$ref: '#/components/schemas/RunEnvelope'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /agent-network/cards:
+    get:
+      tags: [Network]
+      operationId: searchAgentCards
+      parameters:
+        - {$ref: '#/components/parameters/RawUserId'}
+        - {name: query, in: query, schema: {type: string, maxLength: 500}}
+        - {name: domain_tag, in: query, schema: {type: string, maxLength: 100}}
+        - {name: group_enabled, in: query, schema: {type: boolean}}
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/Cursor'}
+      responses:
+        '200': {description: Discoverable AgentCard page., content: {application/json: {schema: {$ref: '#/components/schemas/AgentCardPage'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /agent-network/agents/{agent_id}:
+    get:
+      tags: [Network]
+      operationId: getDiscoverableAgent
+      parameters:
+        - {$ref: '#/components/parameters/AgentId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+      responses:
+        '200': {description: Safe discoverable Agent projection., content: {application/json: {schema: {$ref: '#/components/schemas/AgentCard'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /runs/{run_id}/agent-invocations:
+    post:
+      tags: [Network]
+      operationId: createAgentInvocation
+      description: Runtime-internal by default; external access requires an explicit admin test profile.
+      parameters:
+        - {$ref: '#/components/parameters/RunId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/AgentInvocationCreate'}}}
+      responses:
+        '202': {description: Invocation persisted; rejected invocations are also returned as terminal facts., content: {application/json: {schema: {$ref: '#/components/schemas/AgentInvocation'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /sessions/{session_id}/groups:
+    post:
+      tags: [Groups]
+      operationId: createGroup
+      parameters:
+        - {$ref: '#/components/parameters/SessionId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/GroupCreate'}}}
+      responses:
+        '201': {description: Group and immutable membership snapshot created., content: {application/json: {schema: {$ref: '#/components/schemas/GroupSession'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /groups/{group_id}:
+    get:
+      tags: [Groups]
+      operationId: getGroup
+      parameters:
+        - {$ref: '#/components/parameters/GroupId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+      responses:
+        '200': {description: Group Session., content: {application/json: {schema: {$ref: '#/components/schemas/GroupSession'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /groups/{group_id}/memberships:
+    get:
+      tags: [Groups]
+      operationId: listGroupMemberships
+      parameters:
+        - {$ref: '#/components/parameters/GroupId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/Cursor'}
+      responses:
+        '200': {description: Membership page., content: {application/json: {schema: {$ref: '#/components/schemas/GroupMembershipPage'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /groups/{group_id}/messages:
+    get:
+      tags: [Groups]
+      operationId: listGroupMessages
+      parameters:
+        - {$ref: '#/components/parameters/GroupId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/Cursor'}
+      responses:
+        '200': {description: Group-visible Message page., content: {application/json: {schema: {$ref: '#/components/schemas/MessagePage'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /groups/{group_id}/runs:
+    post:
+      tags: [Groups]
+      operationId: createGroupRun
+      parameters:
+        - {$ref: '#/components/parameters/GroupId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/GroupRunCreate'}}}
+      responses:
+        '202': {description: GroupRun and sole lifecycle Run created atomically., content: {application/json: {schema: {$ref: '#/components/schemas/GroupRun'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /group-runs/{group_run_id}:
+    get:
+      tags: [Groups]
+      operationId: getGroupRun
+      parameters:
+        - {$ref: '#/components/parameters/GroupRunId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+      responses:
+        '200': {description: Group collaboration aggregate embedding its sole Run lifecycle., content: {application/json: {schema: {$ref: '#/components/schemas/GroupRun'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /group-runs/{group_run_id}/members:
+    get:
+      tags: [Groups]
+      operationId: listGroupRunMembers
+      parameters:
+        - {$ref: '#/components/parameters/GroupRunId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+      responses:
+        '200': {description: Immutable member snapshot page., content: {application/json: {schema: {$ref: '#/components/schemas/GroupRunMemberPage'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /group-runs/{group_run_id}/interaction-graph:
+    get:
+      tags: [Groups]
+      operationId: getGroupInteractionGraph
+      parameters:
+        - {$ref: '#/components/parameters/GroupRunId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+      responses:
+        '200': {description: Graph projected only from real messages and AgentInvocations., content: {application/json: {schema: {$ref: '#/components/schemas/InteractionGraph'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /group-runs/{group_run_id}/messages:
+    post:
+      tags: [Groups]
+      operationId: createGroupRunMessage
+      parameters:
+        - {$ref: '#/components/parameters/GroupRunId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/MessageCreate'}}}
+      responses:
+        '202': {description: Message and directed WorkItem committed., content: {application/json: {schema: {$ref: '#/components/schemas/MessageRunEnvelope'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /group-runs/{group_run_id}/reporter:
+    post:
+      tags: [Groups, Actions]
+      operationId: replaceGroupReporter
+      parameters:
+        - {$ref: '#/components/parameters/GroupRunId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+        - {$ref: '#/components/parameters/IfMatch'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/ReporterReplaceRequest'}}}
+      responses:
+        '202': {description: Reporter replacement action settled and Run resumed., content: {application/json: {schema: {$ref: '#/components/schemas/GroupRun'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /group-runs/{group_run_id}/cancel:
+    post:
+      tags: [Groups]
+      operationId: cancelGroupRun
+      parameters:
+        - {$ref: '#/components/parameters/GroupRunId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+        - {$ref: '#/components/parameters/IfMatch'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/CancelRequest'}}}
+      responses:
+        '202': {description: Cancellation intent applied to the sole Run., content: {application/json: {schema: {$ref: '#/components/schemas/GroupRun'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /groups/{group_id}/close:
+    post:
+      tags: [Groups]
+      operationId: closeGroup
+      parameters:
+        - {$ref: '#/components/parameters/GroupId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+        - {$ref: '#/components/parameters/IfMatch'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      responses:
+        '202': {description: Group close and cancellation propagation committed., content: {application/json: {schema: {$ref: '#/components/schemas/GroupSession'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /groups/{group_id}/shared-tasks:
+    get:
+      tags: [Groups]
+      operationId: listSharedTasks
+      parameters:
+        - {$ref: '#/components/parameters/GroupId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/Cursor'}
+      responses:
+        '200': {description: SharedTask page., content: {application/json: {schema: {$ref: '#/components/schemas/SharedTaskPage'}}}}
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Groups]
+      operationId: createSharedTask
+      parameters:
+        - {$ref: '#/components/parameters/GroupId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/SharedTaskCreate'}}}
+      responses:
+        '201': {description: SharedTask created; it does not automatically schedule an Agent., content: {application/json: {schema: {$ref: '#/components/schemas/SharedTask'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /shared-tasks/{shared_task_id}:
+    patch:
+      tags: [Groups]
+      operationId: updateSharedTask
+      parameters:
+        - {$ref: '#/components/parameters/SharedTaskId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+        - {$ref: '#/components/parameters/IfMatch'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/SharedTaskPatch'}}}
+      responses:
+        '200': {description: SharedTask updated., content: {application/json: {schema: {$ref: '#/components/schemas/SharedTask'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /sessions/{session_id}/required-actions:
+    get:
+      tags: [Actions]
+      operationId: listRequiredActions
+      parameters:
+        - {$ref: '#/components/parameters/SessionId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+        - {name: status, in: query, schema: {type: string, enum: [pending, approved, rejected, answered, cancelled]}}
+        - {name: type, in: query, schema: {$ref: '#/components/schemas/RequiredActionType'}}
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/Cursor'}
+      responses:
+        '200': {description: Clarification/Approval union projection., content: {application/json: {schema: {$ref: '#/components/schemas/RequiredActionPage'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /clarifications/{clarification_id}/answer:
+    post:
+      tags: [Actions]
+      operationId: answerClarification
+      parameters:
+        - {$ref: '#/components/parameters/ClarificationId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+        - {$ref: '#/components/parameters/IfMatch'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/ClarificationAnswer'}}}
+      responses:
+        '200': {description: Clarification answered and resume command committed., content: {application/json: {schema: {$ref: '#/components/schemas/RequiredAction'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /approvals/{approval_id}/approve:
+    post:
+      tags: [Actions]
+      operationId: approveAction
+      parameters:
+        - {$ref: '#/components/parameters/ApprovalId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+        - {$ref: '#/components/parameters/IfMatch'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/ApprovalDecision'}}}
+      responses:
+        '200': {description: Approval settled., content: {application/json: {schema: {$ref: '#/components/schemas/RequiredAction'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /approvals/{approval_id}/reject:
+    post:
+      tags: [Actions]
+      operationId: rejectAction
+      parameters:
+        - {$ref: '#/components/parameters/ApprovalId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+        - {$ref: '#/components/parameters/IfMatch'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/ApprovalDecision'}}}
+      responses:
+        '200': {description: Approval rejected., content: {application/json: {schema: {$ref: '#/components/schemas/RequiredAction'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /sessions/{session_id}/workspace:
+    get:
+      tags: [Artifacts]
+      operationId: listWorkspace
+      parameters:
+        - {$ref: '#/components/parameters/SessionId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+        - {name: root, in: query, required: true, schema: {type: string, enum: [private, shared]}}
+        - {name: path, in: query, schema: {type: string, maxLength: 2048}}
+      responses:
+        '200': {description: Authorized logical workspace listing., content: {application/json: {schema: {$ref: '#/components/schemas/WorkspaceListing'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /sessions/{session_id}/artifacts:
+    get:
+      tags: [Artifacts]
+      operationId: listArtifacts
+      parameters:
+        - {$ref: '#/components/parameters/SessionId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+        - {name: visibility, in: query, schema: {$ref: '#/components/schemas/Visibility'}}
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/Cursor'}
+      responses:
+        '200': {description: Artifact page., content: {application/json: {schema: {$ref: '#/components/schemas/ArtifactPage'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /artifacts/{artifact_id}:
+    get:
+      tags: [Artifacts]
+      operationId: getArtifact
+      parameters:
+        - {$ref: '#/components/parameters/ArtifactId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+      responses:
+        '200': {description: Artifact metadata and provenance., content: {application/json: {schema: {$ref: '#/components/schemas/Artifact'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /artifacts/{artifact_id}/download:
+    get:
+      tags: [Artifacts]
+      operationId: downloadArtifact
+      parameters:
+        - {$ref: '#/components/parameters/ArtifactId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+        - {name: Range, in: header, schema: {type: string}}
+      responses:
+        '200': {description: Complete immutable bytes., headers: {ETag: {$ref: '#/components/headers/ChecksumEtag'}}, content: {application/octet-stream: {schema: {type: string, contentEncoding: binary}}}}
+        '206': {description: Requested immutable byte range., headers: {ETag: {$ref: '#/components/headers/ChecksumEtag'}}, content: {application/octet-stream: {schema: {type: string, contentEncoding: binary}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /artifacts/{artifact_id}/delete:
+    post:
+      tags: [Artifacts]
+      operationId: requestArtifactDeletion
+      parameters:
+        - {$ref: '#/components/parameters/ArtifactId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+        - {$ref: '#/components/parameters/IfMatch'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      responses:
+        '202': {description: Audited deletion intent accepted; Retention will move the resource through unavailable to deleted after hold and recovery-window checks., content: {application/json: {schema: {$ref: '#/components/schemas/Artifact'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /artifacts/{artifact_id}/cancel-deletion:
+    post:
+      tags: [Artifacts]
+      operationId: cancelArtifactDeletion
+      description: Owner-only cancellation during the deletion recovery window; does not perform storage-incident restoration.
+      parameters:
+        - {$ref: '#/components/parameters/ArtifactId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+        - {$ref: '#/components/parameters/IfMatch'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      responses:
+        '200': {description: Original immutable object and checksum revalidated and visibility restored., content: {application/json: {schema: {$ref: '#/components/schemas/Artifact'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /runs/{run_id}/verification-results:
+    get:
+      tags: [Runs]
+      operationId: listVerificationResults
+      parameters:
+        - {$ref: '#/components/parameters/RunId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+      responses:
+        '200': {description: VerificationResult page., content: {application/json: {schema: {$ref: '#/components/schemas/VerificationResultPage'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /runs/{run_id}/timeline:
+    get:
+      tags: [Runs]
+      operationId: getRunTimeline
+      parameters:
+        - {$ref: '#/components/parameters/RunId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+      responses:
+        '200': {description: Authorized timeline projection., content: {application/json: {schema: {$ref: '#/components/schemas/Timeline'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /runners/{runner_id}/trace:
+    get:
+      tags: [Runs]
+      operationId: getRunnerTrace
+      parameters:
+        - {$ref: '#/components/parameters/RunnerId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+      responses:
+        '200': {description: Redacted diagnostic trace projection., content: {application/json: {schema: {$ref: '#/components/schemas/TraceProjection'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /memories:
+    get:
+      tags: [Sessions]
+      operationId: listMemories
+      parameters:
+        - {$ref: '#/components/parameters/RawUserId'}
+        - {name: scope, in: query, schema: {type: string, enum: [user, user_agent]}}
+        - {name: agent_id, in: query, schema: {type: string, format: uuid}}
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/Cursor'}
+      responses:
+        '200': {description: Current account Memory page., content: {application/json: {schema: {$ref: '#/components/schemas/MemoryPage'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /memories/{memory_id}:
+    get:
+      tags: [Sessions]
+      operationId: getMemory
+      parameters:
+        - {$ref: '#/components/parameters/MemoryId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+      responses:
+        '200': {description: Memory head and accessible provenance., content: {application/json: {schema: {$ref: '#/components/schemas/Memory'}}}}
+        default: {$ref: '#/components/responses/Error'}
+    patch:
+      tags: [Sessions]
+      operationId: updateMemory
+      parameters:
+        - {$ref: '#/components/parameters/MemoryId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+        - {$ref: '#/components/parameters/IfMatch'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/MemoryPatch'}}}
+      responses:
+        '200': {description: New MemoryVersion created and head advanced., content: {application/json: {schema: {$ref: '#/components/schemas/Memory'}}}}
+        default: {$ref: '#/components/responses/Error'}
+    delete:
+      tags: [Sessions]
+      operationId: deleteMemory
+      parameters:
+        - {$ref: '#/components/parameters/MemoryId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+        - {$ref: '#/components/parameters/IfMatch'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      responses:
+        '204': {description: Memory tombstone committed; future recall stops immediately.}
+        default: {$ref: '#/components/responses/Error'}
+
+  /sessions/{session_id}/events:
+    get:
+      tags: [Events]
+      operationId: listSessionEvents
+      parameters:
+        - {$ref: '#/components/parameters/SessionId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+        - {$ref: '#/components/parameters/AfterSequence'}
+        - {$ref: '#/components/parameters/ScanLimit'}
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200': {description: Reliable authorized event scan., content: {application/json: {schema: {$ref: '#/components/schemas/EventScan'}}}}
+        '410': {$ref: '#/components/responses/CursorExpired'}
+        default: {$ref: '#/components/responses/Error'}
+
+  /sessions/{session_id}/events/stream:
+    get:
+      tags: [Events]
+      operationId: streamSessionEvents
+      parameters:
+        - {$ref: '#/components/parameters/SessionId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+        - {$ref: '#/components/parameters/AfterSequence'}
+        - {name: Last-Event-ID, in: header, schema: {type: integer, format: int64, minimum: 0}}
+      responses:
+        '200':
+          description: Reliable SSE stream. id is the scanned session sequence; cursor frames advance over invisible events.
+          headers:
+            Cache-Control: {schema: {type: string, const: no-cache}}
+          content:
+            text/event-stream:
+              schema: {type: string}
+        '410': {$ref: '#/components/responses/CursorExpired'}
+        default: {$ref: '#/components/responses/Error'}
+
+  /runs/{run_id}/events:
+    get:
+      tags: [Events]
+      operationId: listRunEvents
+      parameters:
+        - {$ref: '#/components/parameters/RunId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+        - {$ref: '#/components/parameters/AfterSequence'}
+        - {$ref: '#/components/parameters/ScanLimit'}
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200': {description: Run-filtered scan using the parent Session sequence., content: {application/json: {schema: {$ref: '#/components/schemas/EventScan'}}}}
+        '410': {$ref: '#/components/responses/CursorExpired'}
+        default: {$ref: '#/components/responses/Error'}
+
+  /health/live:
+    get:
+      tags: [Operations]
+      operationId: getLiveness
+      security: []
+      responses:
+        '200': {description: Process is alive., content: {application/json: {schema: {$ref: '#/components/schemas/Health'}}}}
+
+  /health/ready:
+    get:
+      tags: [Operations]
+      operationId: getReadiness
+      security: []
+      responses:
+        '200': {description: Instance can serve its declared deployment profile., content: {application/json: {schema: {$ref: '#/components/schemas/DeploymentHealth'}}}}
+        '503': {description: Required dependency or contract is not ready., content: {application/json: {schema: {$ref: '#/components/schemas/DeploymentHealth'}}}}
+
+components:
+  securitySchemes:
+    webSession:
+      type: apiKey
+      in: cookie
+      name: myclaw_session
+      description: Opaque SameSite secure browser session resolved to an internal account_id; state-changing requests also follow x-cookie-auth-contract.
+    enterpriseBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Verified OIDC user, OBO, or service-principal token; available only under enterprise_oidc_v1.
+    uatAgentApiKey:
+      type: http
+      scheme: bearer
+      bearerFormat: MyClaw-Agent-Key
+      description: Opaque Agent API key; available only under raw_user_id_v1 and valid only together with rawUserIdHeader.
+    rawUserIdHeader:
+      type: apiKey
+      in: header
+      name: X-MyClaw-User-Id
+      description: Caller assertion paired with uatAgentApiKey; forbidden under enterprise_oidc_v1.
+
+  parameters:
+    AccountId: {name: account_id, in: path, required: true, schema: {type: string, format: uuid}}
+    ExternalIdentityId: {name: external_identity_id, in: path, required: true, schema: {type: string, format: uuid}}
+    AgentId: {name: agent_id, in: path, required: true, schema: {type: string, format: uuid}}
+    AgentVersionId: {name: agent_version_id, in: path, required: true, schema: {type: string, format: uuid}}
+    ModelId: {name: model_id, in: path, required: true, schema: {type: string, format: uuid}}
+    ModelVersionId: {name: model_version_id, in: path, required: true, schema: {type: string, format: uuid}}
+    ToolId: {name: tool_id, in: path, required: true, schema: {type: string, format: uuid}}
+    SkillId: {name: skill_id, in: path, required: true, schema: {type: string, format: uuid}}
+    SkillVersionId: {name: skill_version_id, in: path, required: true, schema: {type: string, format: uuid}}
+    ApiKeyId: {name: key_id, in: path, required: true, schema: {type: string, format: uuid}}
+    SessionId: {name: session_id, in: path, required: true, schema: {type: string, format: uuid}}
+    RunId: {name: run_id, in: path, required: true, schema: {type: string, format: uuid}}
+    WorkItemId: {name: work_item_id, in: path, required: true, schema: {type: string, format: uuid}}
+    RunnerId: {name: runner_id, in: path, required: true, schema: {type: string, format: uuid}}
+    WorkingPlanId: {name: working_plan_id, in: path, required: true, schema: {type: string, format: uuid}}
+    GroupId: {name: group_id, in: path, required: true, schema: {type: string, format: uuid}}
+    GroupRunId: {name: group_run_id, in: path, required: true, schema: {type: string, format: uuid}}
+    SharedTaskId: {name: shared_task_id, in: path, required: true, schema: {type: string, format: uuid}}
+    ClarificationId: {name: clarification_id, in: path, required: true, schema: {type: string, format: uuid}}
+    ApprovalId: {name: approval_id, in: path, required: true, schema: {type: string, format: uuid}}
+    ArtifactId: {name: artifact_id, in: path, required: true, schema: {type: string, format: uuid}}
+    MemoryId: {name: memory_id, in: path, required: true, schema: {type: string, format: uuid}}
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      schema: {type: string, minLength: 16, maxLength: 128, pattern: '^[A-Za-z0-9._:-]+$'}
+    IfMatch:
+      name: If-Match
+      in: header
+      required: true
+      description: Quoted optimistic version of the mutable aggregate named by the operation; child-version commands use the parent logical resource version.
+      schema: {type: string, pattern: '^"[0-9]+"$'}
+    CsrfToken:
+      name: X-CSRF-Token
+      in: header
+      required: false
+      description: Required for every state-changing request authenticated by webSession; ignored as an authentication factor for Bearer requests.
+      x-required-when: webSession
+      schema: {type: string, minLength: 32, maxLength: 256, pattern: '^[A-Za-z0-9._~-]+$'}
+    RawUserId:
+      name: X-MyClaw-User-Id
+      in: header
+      required: false
+      description: Required only under raw_user_id_v1 and forbidden under every production profile.
+      schema: {type: string, minLength: 1, maxLength: 191, pattern: '^[^\x00-\x1F\x7F]+$'}
+    RequiredRawUserId:
+      name: X-MyClaw-User-Id
+      in: header
+      required: true
+      schema: {type: string, minLength: 1, maxLength: 191, pattern: '^[^\x00-\x1F\x7F]+$'}
+    Limit: {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 50}}
+    Cursor: {name: cursor, in: query, schema: {type: string, maxLength: 4096}}
+    AfterSequence: {name: after_sequence, in: query, schema: {type: integer, format: int64, minimum: 0, default: 0}}
+    ScanLimit: {name: scan_limit, in: query, schema: {type: integer, minimum: 1, maximum: 1000, default: 500}}
+
+  headers:
+    ChecksumEtag:
+      description: Quoted SHA-256 checksum of immutable artifact bytes.
+      schema: {type: string, pattern: '^"[a-f0-9]{64}"$'}
+
+  responses:
+    Error:
+      description: Stable structured error.
+      content: {application/json: {schema: {$ref: '#/components/schemas/ErrorEnvelope'}}}
+    CursorExpired:
+      description: Requested sequence is outside the retained reliable-event window.
+      content: {application/json: {schema: {$ref: '#/components/schemas/CursorExpiredError'}}}
+
+  schemas:
+    Uuid: {type: string, format: uuid}
+    Timestamp: {type: string, format: date-time}
+    Sha256: {type: string, pattern: '^[a-f0-9]{64}$'}
+    AgentStatus: {type: string, enum: [draft, published, inactive]}
+    AgentVisibility: {type: string, enum: [private, enterprise]}
+    PermissionMode: {type: string, enum: [direct, plan_readonly]}
+    RunMode: {type: string, enum: [chat, plan, group]}
+    RunStatus: {type: string, enum: [active, waiting_user, waiting_approval, waiting_tool, waiting_agent, completed, cancelled, failed]}
+    WaitReason: {type: [string, 'null'], enum: [waiting_user, waiting_approval, waiting_tool, waiting_agent, null]}
+    Visibility: {type: string, enum: [private, direct, group, user]}
+    WorkItemStatus: {type: string, enum: [queued, running, waiting_user, waiting_approval, waiting_tool, waiting_agent, waiting_resource, succeeded, failed, cancelled, timed_out, blocked]}
+    RunnerStatus: {type: string, enum: [queued, running, succeeded, failed, cancelled, lost]}
+    RequiredActionType: {type: string, enum: [plan_implementation, tool, membership, session_grant, reporter_selection, clarification]}
+    RequiredActionStatus: {type: string, enum: [pending, approved, rejected, answered, cancelled]}
+    EventType:
+      type: string
+      enum:
+        - run.created
+        - run.waiting
+        - run.resumed
+        - run.cancellation_requested
+        - run.completed
+        - run.failed
+        - run.cancelled
+        - work_item.created
+        - work_item.running
+        - work_item.waiting_user
+        - work_item.waiting_approval
+        - work_item.waiting_tool
+        - work_item.waiting_agent
+        - work_item.waiting_resource
+        - work_item.resumed
+        - work_item.succeeded
+        - work_item.failed
+        - work_item.cancelled
+        - work_item.timed_out
+        - work_item.blocked
+        - runner.created
+        - runner.started
+        - runner.succeeded
+        - runner.failed
+        - runner.cancelled
+        - runner.lost
+        - agent_turn.started
+        - agent_turn.waiting_actions
+        - agent_turn.completed
+        - agent_turn.failed
+        - message.created
+        - tool_invocation.created
+        - tool_invocation.waiting_confirmation
+        - tool_invocation.waiting_resource
+        - tool_invocation.queued
+        - tool_invocation.running
+        - tool_invocation.succeeded
+        - tool_invocation.failed
+        - tool_invocation.rejected
+        - tool_invocation.cancelled
+        - tool_invocation.outcome_unknown
+        - agent_invocation.created
+        - agent_invocation.queued
+        - agent_invocation.running
+        - agent_invocation.succeeded
+        - agent_invocation.failed
+        - agent_invocation.rejected
+        - agent_invocation.cancelled
+        - agent_invocation.timed_out
+        - clarification.requested
+        - clarification.answered
+        - clarification.cancelled
+        - approval.requested
+        - approval.approved
+        - approval.rejected
+        - approval.cancelled
+        - plan.permission_entered
+        - plan.permission_exited
+        - plan.implementation_approved
+        - working_plan.updated
+        - group.created
+        - group.membership_joined
+        - group.membership_ended
+        - group.membership_invitation_rejected
+        - group.message_created
+        - group.summary_requested
+        - group.summary_delivered
+        - shared_task.updated
+        - artifact.published
+        - artifact.unavailable
+        - artifact.restored
+        - artifact.deleted
+        - notification_delivery.created
+        - notification_delivery.succeeded
+        - notification_delivery.failed
+        - notification_delivery.dead
+        - notification_delivery.outcome_unknown
+        - verification.completed
+        - budget.warning
+        - late_result.observed
+    JsonObject: {type: object, additionalProperties: true}
+    LinkMap: {type: object, additionalProperties: {type: string}}
+
+    AuthContextView:
+      type: object
+      additionalProperties: false
+      required: [tenant_id, account_id, account_type, canonical_user_id, authentication_source, identity_profile, external_identity_id, api_key_id, asserted_user_id, entry_agent_id, client_id, roles, scopes, credential_revision, account_authorization_revision, request_id]
+      properties:
+        tenant_id: {$ref: '#/components/schemas/Uuid'}
+        account_id: {$ref: '#/components/schemas/Uuid'}
+        account_type: {type: string, enum: [user, service]}
+        canonical_user_id: {type: string, maxLength: 191}
+        authentication_source: {type: string, enum: [web_session, agent_api_key, oidc_user, oidc_obo, service_principal]}
+        identity_profile: {type: string, enum: [raw_user_id_v1, enterprise_oidc_v1]}
+        external_identity_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        api_key_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        asserted_user_id: {type: [string, 'null'], maxLength: 191}
+        entry_agent_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        client_id: {type: [string, 'null'], maxLength: 255}
+        roles: {type: array, uniqueItems: true, items: {type: string, enum: [user, builder, admin]}}
+        scopes: {type: array, uniqueItems: true, items: {type: string, minLength: 1, maxLength: 191}}
+        credential_revision: {type: integer, format: int64, minimum: 1}
+        account_authorization_revision: {type: integer, format: int64, minimum: 1}
+        request_id: {$ref: '#/components/schemas/Uuid'}
+      allOf:
+        - if: {properties: {identity_profile: {const: raw_user_id_v1}}, required: [identity_profile]}
+          then:
+            properties:
+              authentication_source: {enum: [web_session, agent_api_key]}
+              external_identity_id: {type: 'null'}
+        - if: {properties: {identity_profile: {const: enterprise_oidc_v1}}, required: [identity_profile]}
+          then:
+            properties:
+              authentication_source: {enum: [oidc_user, oidc_obo, service_principal]}
+              external_identity_id: {$ref: '#/components/schemas/Uuid'}
+              api_key_id: {type: 'null'}
+              asserted_user_id: {type: 'null'}
+              entry_agent_id: {type: 'null'}
+        - if: {properties: {authentication_source: {const: agent_api_key}}, required: [authentication_source]}
+          then:
+            properties:
+              account_type: {const: user}
+              api_key_id: {$ref: '#/components/schemas/Uuid'}
+              asserted_user_id: {type: string, minLength: 1, maxLength: 191}
+              entry_agent_id: {$ref: '#/components/schemas/Uuid'}
+              client_id: {type: 'null'}
+        - if: {properties: {authentication_source: {const: web_session}}, required: [authentication_source]}
+          then:
+            properties:
+              account_type: {const: user}
+              api_key_id: {type: 'null'}
+              asserted_user_id: {type: 'null'}
+              entry_agent_id: {type: 'null'}
+              client_id: {type: 'null'}
+        - if: {properties: {authentication_source: {const: service_principal}}, required: [authentication_source]}
+          then: {properties: {account_type: {const: service}, client_id: {type: string, minLength: 1, maxLength: 255}, roles: {type: array, maxItems: 0}}}
+        - if: {properties: {authentication_source: {enum: [oidc_user, oidc_obo]}}, required: [authentication_source]}
+          then: {properties: {account_type: {const: user}, client_id: {type: string, minLength: 1, maxLength: 255}}}
+
+    Account:
+      type: object
+      additionalProperties: false
+      required: [id, tenant_id, canonical_user_id, display_name, account_type, status, roles, authorization_revision, version]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        tenant_id: {$ref: '#/components/schemas/Uuid'}
+        canonical_user_id: {type: string, maxLength: 191}
+        display_name: {type: string, maxLength: 191}
+        account_type: {type: string, enum: [user, service]}
+        status: {type: string, enum: [active, suspended, closed]}
+        roles: {type: array, uniqueItems: true, items: {type: string, enum: [user, builder, admin]}}
+        authorization_revision: {type: integer, format: int64, minimum: 1}
+        version: {type: integer, format: int64, minimum: 1}
+      allOf:
+        - if: {properties: {account_type: {const: user}}, required: [account_type]}
+          then: {properties: {roles: {type: array, minItems: 1, contains: {const: user}}}}
+        - if: {properties: {account_type: {const: service}}, required: [account_type]}
+          then: {properties: {roles: {type: array, maxItems: 0}}}
+    AccountCreate:
+      type: object
+      additionalProperties: false
+      required: [canonical_user_id, display_name, account_type]
+      properties:
+        canonical_user_id: {type: string, minLength: 1, maxLength: 191}
+        display_name: {type: string, minLength: 1, maxLength: 191}
+        account_type: {type: string, enum: [user, service], default: user}
+    AccountPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties: {display_name: {type: string, minLength: 1, maxLength: 191}}
+    RolesPatch:
+      type: object
+      additionalProperties: false
+      required: [roles]
+      properties: {roles: {type: array, minItems: 1, uniqueItems: true, items: {type: string, enum: [user, builder, admin]}}}
+    AccountStatusPatch:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties: {status: {type: string, enum: [active, suspended, closed]}}
+    AccountPage: {$ref: '#/components/schemas/GenericAccountPage'}
+    GenericAccountPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/Account'}}, next_cursor: {type: [string, 'null']}}
+    ExternalIdentity:
+      type: object
+      additionalProperties: false
+      required: [id, account_id, issuer, subject, principal_type, status, claims_revision, version]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        account_id: {$ref: '#/components/schemas/Uuid'}
+        issuer: {type: string, format: uri, pattern: '^https://', maxLength: 512}
+        subject: {type: string, minLength: 1, maxLength: 255}
+        principal_type: {type: string, enum: [user, service]}
+        status: {type: string, enum: [active, revoked]}
+        claims_revision: {type: integer, format: int64, minimum: 1}
+        version: {type: integer, format: int64, minimum: 1}
+    ExternalIdentityCreate:
+      type: object
+      additionalProperties: false
+      required: [issuer, subject, principal_type]
+      properties:
+        issuer: {type: string, format: uri, pattern: '^https://', maxLength: 512}
+        subject: {type: string, minLength: 1, maxLength: 255}
+        principal_type: {type: string, enum: [user, service]}
+    ExternalIdentityPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/ExternalIdentity'}}, next_cursor: {type: [string, 'null']}}
+
+    Agent:
+      type: object
+      additionalProperties: false
+      required: [id, owner_account_id, visibility, status, current_published_version_id, draft_version_id, version]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        owner_account_id: {$ref: '#/components/schemas/Uuid'}
+        visibility: {$ref: '#/components/schemas/AgentVisibility'}
+        status: {$ref: '#/components/schemas/AgentStatus'}
+        current_published_version_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        draft_version_id: {$ref: '#/components/schemas/Uuid'}
+        version: {type: integer, format: int64, minimum: 1}
+    AgentCreate:
+      type: object
+      additionalProperties: false
+      required: [name, visibility]
+      properties: {name: {type: string, minLength: 1, maxLength: 191}, visibility: {$ref: '#/components/schemas/AgentVisibility'}}
+    AgentDraft:
+      type: object
+      additionalProperties: false
+      required: [id, agent_id, draft_revision, name, instructions, model_id, tool_ids, skill_ids, context_policy_id, history_policy_id, memory_write_policy_id, memory_recall_policy_id, sandbox_profile_id, group_enabled, resolved_dependency_preview, version]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        agent_id: {$ref: '#/components/schemas/Uuid'}
+        draft_revision: {type: integer, format: int64, minimum: 1}
+        name: {type: string, minLength: 1, maxLength: 191}
+        description: {type: string, maxLength: 4000}
+        instructions: {type: string, minLength: 1}
+        model_id: {$ref: '#/components/schemas/Uuid'}
+        tool_ids: {type: array, uniqueItems: true, items: {$ref: '#/components/schemas/Uuid'}}
+        skill_ids: {type: array, uniqueItems: true, items: {$ref: '#/components/schemas/Uuid'}}
+        context_policy_id: {$ref: '#/components/schemas/Uuid'}
+        history_policy_id: {$ref: '#/components/schemas/Uuid'}
+        memory_write_policy_id: {$ref: '#/components/schemas/Uuid'}
+        memory_recall_policy_id: {$ref: '#/components/schemas/Uuid'}
+        sandbox_profile_id: {$ref: '#/components/schemas/Uuid'}
+        group_enabled: {type: boolean}
+        resolved_dependency_preview: {$ref: '#/components/schemas/FrozenDependencyPreview'}
+        version: {type: integer, format: int64, minimum: 1}
+    AgentDraftPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        expected_draft_revision: {type: integer, format: int64, minimum: 1}
+        name: {type: string, minLength: 1, maxLength: 191}
+        description: {type: string, maxLength: 4000}
+        instructions: {type: string, minLength: 1}
+        model_id: {$ref: '#/components/schemas/Uuid'}
+        tool_ids: {type: array, uniqueItems: true, items: {$ref: '#/components/schemas/Uuid'}}
+        skill_ids: {type: array, uniqueItems: true, items: {$ref: '#/components/schemas/Uuid'}}
+        context_policy_id: {$ref: '#/components/schemas/Uuid'}
+        history_policy_id: {$ref: '#/components/schemas/Uuid'}
+        memory_write_policy_id: {$ref: '#/components/schemas/Uuid'}
+        memory_recall_policy_id: {$ref: '#/components/schemas/Uuid'}
+        sandbox_profile_id: {$ref: '#/components/schemas/Uuid'}
+        group_enabled: {type: boolean}
+    PublishAgentRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_draft_revision]
+      properties: {expected_draft_revision: {type: integer, format: int64, minimum: 1}}
+    FrozenSkill:
+      type: object
+      additionalProperties: false
+      required: [skill_id, skill_version_id, checksum]
+      properties: {skill_id: {$ref: '#/components/schemas/Uuid'}, skill_version_id: {$ref: '#/components/schemas/Uuid'}, checksum: {$ref: '#/components/schemas/Sha256'}}
+    FrozenTool:
+      type: object
+      additionalProperties: false
+      required: [tool_id, registration_hash]
+      properties: {tool_id: {$ref: '#/components/schemas/Uuid'}, registration_hash: {$ref: '#/components/schemas/Sha256'}}
+    FrozenDependency:
+      type: object
+      additionalProperties: false
+      required: [definition_id, version_id, content_hash]
+      properties: {definition_id: {$ref: '#/components/schemas/Uuid'}, version_id: {$ref: '#/components/schemas/Uuid'}, content_hash: {$ref: '#/components/schemas/Sha256'}}
+    FrozenDependencyPreview:
+      type: object
+      additionalProperties: false
+      required: [model, context_policy, history_policy, memory_write_policy, memory_recall_policy, sandbox_profile, skills]
+      properties:
+        model: {$ref: '#/components/schemas/FrozenDependency'}
+        context_policy: {$ref: '#/components/schemas/FrozenDependency'}
+        history_policy: {$ref: '#/components/schemas/FrozenDependency'}
+        memory_write_policy: {$ref: '#/components/schemas/FrozenDependency'}
+        memory_recall_policy: {$ref: '#/components/schemas/FrozenDependency'}
+        sandbox_profile: {$ref: '#/components/schemas/FrozenDependency'}
+        skills: {type: array, items: {$ref: '#/components/schemas/FrozenSkill'}}
+    AgentVersion:
+      type: object
+      additionalProperties: false
+      required: [id, agent_id, publication_status, content_hash, model_id, model_version_id, context_policy_version_id, history_policy_version_id, memory_write_policy_version_id, memory_recall_policy_version_id, sandbox_profile_id, sandbox_profile_version_id, group_enabled, tools, skills, frozen_dependencies, version]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        agent_id: {$ref: '#/components/schemas/Uuid'}
+        publication_status: {type: string, enum: [published, deprecated, draft_test_snapshot]}
+        version_no: {type: [integer, 'null'], minimum: 1}
+        content_hash: {$ref: '#/components/schemas/Sha256'}
+        model_id: {$ref: '#/components/schemas/Uuid'}
+        model_version_id: {$ref: '#/components/schemas/Uuid'}
+        context_policy_version_id: {$ref: '#/components/schemas/Uuid'}
+        history_policy_version_id: {$ref: '#/components/schemas/Uuid'}
+        memory_write_policy_version_id: {$ref: '#/components/schemas/Uuid'}
+        memory_recall_policy_version_id: {$ref: '#/components/schemas/Uuid'}
+        sandbox_profile_id: {$ref: '#/components/schemas/Uuid'}
+        sandbox_profile_version_id: {$ref: '#/components/schemas/Uuid'}
+        group_enabled: {type: boolean}
+        tools: {type: array, items: {$ref: '#/components/schemas/FrozenTool'}}
+        skills: {type: array, items: {$ref: '#/components/schemas/FrozenSkill'}}
+        frozen_dependencies: {$ref: '#/components/schemas/FrozenDependencyPreview'}
+        version: {type: integer, format: int64, minimum: 1}
+    PublishedAgentVersionEnvelope:
+      type: object
+      additionalProperties: false
+      required: [published_version]
+      properties: {published_version: {$ref: '#/components/schemas/AgentVersion'}}
+    AgentPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/Agent'}}, next_cursor: {type: [string, 'null']}}
+    AgentVersionPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/AgentVersion'}}, next_cursor: {type: [string, 'null']}}
+    DraftTestRunRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_draft_revision, content]
+      properties: {expected_draft_revision: {type: integer, minimum: 1}, content: {type: string, minLength: 1}}
+
+    ApiKeyMetadata:
+      type: object
+      additionalProperties: false
+      required: [id, agent_id, name, prefix, status, credential_revision, version]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        agent_id: {$ref: '#/components/schemas/Uuid'}
+        name: {type: string}
+        prefix: {type: string}
+        status: {type: string, enum: [active, revoked, expired]}
+        credential_revision: {type: integer, format: int64, minimum: 1}
+        expires_at: {oneOf: [{$ref: '#/components/schemas/Timestamp'}, {type: 'null'}]}
+        last_used_at: {oneOf: [{$ref: '#/components/schemas/Timestamp'}, {type: 'null'}]}
+        version: {type: integer, format: int64, minimum: 1}
+    ApiKeyCreate:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties: {name: {type: string, minLength: 1, maxLength: 191}, caller_label: {type: string, maxLength: 191}, expires_at: {oneOf: [{$ref: '#/components/schemas/Timestamp'}, {type: 'null'}]}}
+    ApiKeyCreated:
+      type: object
+      additionalProperties: false
+      required: [key, secret]
+      properties: {key: {$ref: '#/components/schemas/ApiKeyMetadata'}, secret: {type: string, writeOnly: true}}
+    ApiKeyPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/ApiKeyMetadata'}}, next_cursor: {type: [string, 'null']}}
+    Option:
+      type: object
+      additionalProperties: false
+      required: [id, key, name, enabled, version]
+      properties: {id: {$ref: '#/components/schemas/Uuid'}, key: {type: string}, name: {type: string}, enabled: {type: boolean}, version: {type: integer, format: int64, minimum: 1}, capability_summary: {$ref: '#/components/schemas/JsonObject'}}
+    OptionPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/Option'}}, next_cursor: {type: [string, 'null']}}
+
+    Model:
+      type: object
+      additionalProperties: false
+      required: [id, key, name, current_version_id, status, version]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        key: {type: string, minLength: 1, maxLength: 191}
+        name: {type: string, minLength: 1, maxLength: 191}
+        current_version_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        status: {type: string, enum: [active, inactive]}
+        version: {type: integer, format: int64, minimum: 1}
+    ModelCreate:
+      type: object
+      additionalProperties: false
+      required: [key, name]
+      properties: {key: {type: string, minLength: 1, maxLength: 191}, name: {type: string, minLength: 1, maxLength: 191}}
+    ModelPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/Model'}}, next_cursor: {type: [string, 'null']}}
+    ModelVersion:
+      type: object
+      additionalProperties: false
+      required: [id, model_id, version_no, provider, model_name, endpoint, credential_ref, default_parameters, capabilities, latest_conformance, content_hash, published_at]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        model_id: {$ref: '#/components/schemas/Uuid'}
+        version_no: {type: integer, format: int64, minimum: 1}
+        provider: {type: string, minLength: 1, maxLength: 191}
+        model_name: {type: string, minLength: 1, maxLength: 191}
+        endpoint: {type: string, format: uri}
+        credential_ref: {type: string, minLength: 1, maxLength: 512}
+        default_parameters: {$ref: '#/components/schemas/JsonObject'}
+        capabilities: {$ref: '#/components/schemas/ModelCapabilities'}
+        latest_conformance:
+          oneOf:
+            - {$ref: '#/components/schemas/ConformanceRun'}
+            - {type: 'null'}
+        content_hash: {$ref: '#/components/schemas/Sha256'}
+        published_at: {$ref: '#/components/schemas/Timestamp'}
+    ModelVersionCreate:
+      type: object
+      additionalProperties: false
+      required: [provider, model_name, endpoint, credential_ref, default_parameters, capabilities]
+      properties:
+        provider: {type: string, minLength: 1, maxLength: 191}
+        model_name: {type: string, minLength: 1, maxLength: 191}
+        endpoint: {type: string, format: uri}
+        credential_ref: {type: string, minLength: 1, maxLength: 512}
+        default_parameters: {$ref: '#/components/schemas/JsonObject'}
+        capabilities: {$ref: '#/components/schemas/ModelCapabilities'}
+    ModelCapabilities:
+      type: object
+      additionalProperties: false
+      required: [streaming, native_tool_calling, parallel_tool_calling, tool_result_continuation, usage_in_stream, stop_reason, context_window, structured_output]
+      properties:
+        streaming: {type: boolean}
+        native_tool_calling: {type: boolean, const: true}
+        parallel_tool_calling: {type: boolean}
+        tool_result_continuation: {type: boolean, const: true}
+        usage_in_stream: {type: boolean}
+        stop_reason: {type: boolean, const: true}
+        context_window: {type: integer, minimum: 1}
+        structured_output: {type: string, enum: [json_schema, json_object, none]}
+    ModelVersionPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/ModelVersion'}}, next_cursor: {type: [string, 'null']}}
+    ConformanceRun:
+      type: object
+      additionalProperties: false
+      required: [id, subject_type, subject_id, suite_version, status]
+      properties: {id: {$ref: '#/components/schemas/Uuid'}, subject_type: {type: string, enum: [model_version, platform_tool, channel_plugin, sandbox_profile_version]}, subject_id: {$ref: '#/components/schemas/Uuid'}, suite_version: {type: string}, status: {type: string, enum: [queued, running, passed, failed]}}
+
+    PlatformTool:
+      type: object
+      additionalProperties: false
+      required: [id, key, name, description, implementation_ref, input_schema, output_schema, execution_mode, side_effect, supports_cancel, supports_status_lookup, registration_hash, enabled, confirmation_policy, config_revision, risk_version, version]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        key: {type: string}
+        name: {type: string}
+        description: {type: string}
+        implementation_ref: {type: string}
+        input_schema: {$ref: '#/components/schemas/JsonObject'}
+        output_schema: {$ref: '#/components/schemas/JsonObject'}
+        execution_mode: {type: string, enum: [inline, durable_async]}
+        side_effect: {type: string, enum: [none, idempotent, non_idempotent]}
+        supports_cancel: {type: boolean}
+        supports_status_lookup: {type: boolean}
+        registration_hash: {$ref: '#/components/schemas/Sha256'}
+        enabled: {type: boolean}
+        confirmation_policy: {type: string, enum: [never, per_call, session_grant]}
+        platform_config_ref: {type: [string, 'null']}
+        config_revision: {type: integer, format: int64, minimum: 1}
+        risk_version: {type: integer, format: int64, minimum: 1}
+        version: {type: integer, format: int64, minimum: 1}
+    PlatformToolPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        name: {type: string, minLength: 1, maxLength: 191}
+        description: {type: string}
+        enabled: {type: boolean}
+        confirmation_policy: {type: string, enum: [never, per_call, session_grant]}
+        platform_config_ref: {type: [string, 'null']}
+    PlatformToolPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/PlatformTool'}}, next_cursor: {type: [string, 'null']}}
+
+    Skill:
+      type: object
+      additionalProperties: false
+      required: [id, owner_account_id, name, description, current_version_id, status, version]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        owner_account_id: {$ref: '#/components/schemas/Uuid'}
+        name: {type: string, minLength: 1, maxLength: 191}
+        description: {type: string}
+        current_version_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        status: {type: string, enum: [active, inactive]}
+        version: {type: integer, format: int64, minimum: 1}
+    SkillCreate:
+      type: object
+      additionalProperties: false
+      required: [name, description]
+      properties: {name: {type: string, minLength: 1, maxLength: 191}, description: {type: string}}
+    SkillVersion:
+      type: object
+      additionalProperties: false
+      required: [id, skill_id, version_no, checksum, status, latest_assessment_id, assessment_status, content_hash, created_at, version]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        skill_id: {$ref: '#/components/schemas/Uuid'}
+        version_no: {type: integer, format: int64, minimum: 1}
+        checksum: {$ref: '#/components/schemas/Sha256'}
+        status: {type: string, enum: [uploaded, published, deprecated, quarantined]}
+        latest_assessment_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        assessment_status: {type: string, enum: [pending, trusted, unknown, quarantined]}
+        content_hash: {$ref: '#/components/schemas/Sha256'}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        version: {type: integer, format: int64, minimum: 1}
+    SkillPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/Skill'}}, next_cursor: {type: [string, 'null']}}
+    SkillVersionPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/SkillVersion'}}, next_cursor: {type: [string, 'null']}}
+    SkillAssessmentDecisionCreate:
+      type: object
+      additionalProperties: false
+      required: [assessment_id, decision, reason]
+      properties: {assessment_id: {$ref: '#/components/schemas/Uuid'}, decision: {type: string, enum: [approved, rejected]}, reason: {type: string, minLength: 1, maxLength: 2000}}
+    SkillAssessmentDecision:
+      type: object
+      additionalProperties: false
+      required: [id, assessment_id, decision, decided_by_account_id, reason, created_at]
+      properties: {id: {$ref: '#/components/schemas/Uuid'}, assessment_id: {$ref: '#/components/schemas/Uuid'}, decision: {type: string, enum: [approved, rejected]}, decided_by_account_id: {$ref: '#/components/schemas/Uuid'}, reason: {type: string}, created_at: {$ref: '#/components/schemas/Timestamp'}}
+
+    PolicyDefinition:
+      type: object
+      additionalProperties: false
+      required: [id, key, policy_type, name, description, current_version_id, status, current_version_hash, version]
+      properties: {id: {$ref: '#/components/schemas/Uuid'}, key: {type: string}, policy_type: {type: string, enum: [context, history, memory_write, memory_recall]}, name: {type: string}, description: {type: string}, current_version_id: {$ref: '#/components/schemas/Uuid'}, status: {type: string, enum: [active, inactive]}, current_version_hash: {$ref: '#/components/schemas/Sha256'}, version: {type: integer, format: int64, minimum: 1}}
+    PolicyPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/PolicyDefinition'}}, next_cursor: {type: [string, 'null']}}
+    SandboxProfile:
+      type: object
+      additionalProperties: false
+      required: [id, key, name, sandbox_type, current_version_id, status, security_level, current_version_hash, version]
+      properties: {id: {$ref: '#/components/schemas/Uuid'}, key: {type: string}, name: {type: string}, sandbox_type: {type: string, enum: [local, remote_isolated]}, current_version_id: {$ref: '#/components/schemas/Uuid'}, status: {type: string, enum: [active, inactive]}, security_level: {type: string, enum: [dev_directory, microvm]}, current_version_hash: {$ref: '#/components/schemas/Sha256'}, version: {type: integer, format: int64, minimum: 1}}
+    SandboxProfilePage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/SandboxProfile'}}, next_cursor: {type: [string, 'null']}}
+
+    Session:
+      type: object
+      additionalProperties: false
+      required: [id, entry_agent_id, origin, status, permission_mode, permission_revision, version]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        entry_agent_id: {$ref: '#/components/schemas/Uuid'}
+        origin: {type: string, enum: [web, api, channel]}
+        status: {type: string, enum: [active, closed, archived]}
+        permission_mode: {$ref: '#/components/schemas/PermissionMode'}
+        permission_revision: {type: integer, format: int64, minimum: 1}
+        version: {type: integer, format: int64, minimum: 1}
+    SessionCreate:
+      type: object
+      additionalProperties: false
+      required: [entry_agent_id]
+      properties: {entry_agent_id: {$ref: '#/components/schemas/Uuid'}}
+    SessionPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/Session'}}, next_cursor: {type: [string, 'null']}}
+    Message:
+      type: object
+      additionalProperties: false
+      required: [id, session_id, sender_kind, visibility, content, content_hash, sequence, created_at]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        session_id: {$ref: '#/components/schemas/Uuid'}
+        run_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        sender_kind: {type: string, enum: [user, agent, runtime]}
+        sender_agent_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        recipient_agent_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        visibility: {$ref: '#/components/schemas/Visibility'}
+        content: {type: string}
+        content_hash: {$ref: '#/components/schemas/Sha256'}
+        sequence: {type: integer, format: int64, minimum: 1}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+    MessageCreate:
+      type: object
+      additionalProperties: false
+      required: [content]
+      properties: {content: {type: string, minLength: 1}, recipient_agent_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}}
+    MessagePage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/Message'}}, next_cursor: {type: [string, 'null']}}
+    Run:
+      type: object
+      additionalProperties: false
+      required: [id, session_id, mode, status, wait_reason, terminal_reason, permission_mode_snapshot, version]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        session_id: {$ref: '#/components/schemas/Uuid'}
+        mode: {$ref: '#/components/schemas/RunMode'}
+        status: {$ref: '#/components/schemas/RunStatus'}
+        wait_reason: {$ref: '#/components/schemas/WaitReason'}
+        terminal_reason: {type: [string, 'null']}
+        permission_mode_snapshot: {$ref: '#/components/schemas/PermissionMode'}
+        cancellation_requested_at: {oneOf: [{$ref: '#/components/schemas/Timestamp'}, {type: 'null'}]}
+        completed_at: {oneOf: [{$ref: '#/components/schemas/Timestamp'}, {type: 'null'}]}
+        version: {type: integer, format: int64, minimum: 1}
+    RunEnvelope:
+      type: object
+      additionalProperties: false
+      required: [run, required_actions, links]
+      properties: {run: {$ref: '#/components/schemas/Run'}, required_actions: {type: array, items: {$ref: '#/components/schemas/RequiredAction'}}, links: {$ref: '#/components/schemas/LinkMap'}}
+    MessageRunEnvelope:
+      type: object
+      additionalProperties: false
+      required: [message, run, required_actions, links]
+      properties: {message: {$ref: '#/components/schemas/Message'}, run: {$ref: '#/components/schemas/Run'}, required_actions: {type: array, items: {$ref: '#/components/schemas/RequiredAction'}}, links: {$ref: '#/components/schemas/LinkMap'}}
+    CancelRequest:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties: {reason: {type: string, minLength: 1, maxLength: 1000}}
+    WorkItem:
+      type: object
+      additionalProperties: false
+      required: [id, run_id, agent_id, agent_version_id, purpose, status, execution_epoch, version]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        run_id: {$ref: '#/components/schemas/Uuid'}
+        agent_id: {$ref: '#/components/schemas/Uuid'}
+        agent_version_id: {$ref: '#/components/schemas/Uuid'}
+        purpose: {type: string, enum: [root, delegation, group_message, group_summary]}
+        status: {$ref: '#/components/schemas/WorkItemStatus'}
+        wait_reason: {type: [string, 'null']}
+        active_runner_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        execution_epoch: {type: integer, format: int64, minimum: 1}
+        version: {type: integer, format: int64, minimum: 1}
+    WorkItemPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/WorkItem'}}, next_cursor: {type: [string, 'null']}}
+    Runner:
+      type: object
+      additionalProperties: false
+      required: [id, work_item_id, execution_epoch, status, version]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        work_item_id: {$ref: '#/components/schemas/Uuid'}
+        execution_epoch: {type: integer, format: int64, minimum: 1}
+        status: {$ref: '#/components/schemas/RunnerStatus'}
+        started_at: {oneOf: [{$ref: '#/components/schemas/Timestamp'}, {type: 'null'}]}
+        ended_at: {oneOf: [{$ref: '#/components/schemas/Timestamp'}, {type: 'null'}]}
+        failure_code: {type: [string, 'null']}
+        version: {type: integer, format: int64, minimum: 1}
+
+    EnterPlanRequest:
+      type: object
+      additionalProperties: false
+      required: [goal]
+      properties: {goal: {type: string, minLength: 1}}
+    WorkingPlan:
+      type: object
+      additionalProperties: false
+      required: [id, session_id, run_id, owner_agent_id, summary, revision, status, version]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        session_id: {$ref: '#/components/schemas/Uuid'}
+        run_id: {$ref: '#/components/schemas/Uuid'}
+        owner_agent_id: {$ref: '#/components/schemas/Uuid'}
+        summary: {type: string}
+        revision: {type: integer, format: int64, minimum: 1}
+        status: {type: string, enum: [active, superseded, closed]}
+        version: {type: integer, format: int64, minimum: 1}
+    WorkingPlanPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/WorkingPlan'}}, next_cursor: {type: [string, 'null']}}
+    PlanUpdate:
+      type: object
+      additionalProperties: false
+      required: [id, working_plan_id, revision, items, content_hash]
+      properties: {id: {$ref: '#/components/schemas/Uuid'}, working_plan_id: {$ref: '#/components/schemas/Uuid'}, revision: {type: integer, format: int64, minimum: 1}, items: {type: array, items: {$ref: '#/components/schemas/JsonObject'}}, explanation: {type: string}, content_hash: {$ref: '#/components/schemas/Sha256'}}
+    PlanUpdatePage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/PlanUpdate'}}, next_cursor: {type: [string, 'null']}}
+    PlanApprovalRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_revision, subject_hash]
+      properties: {expected_revision: {type: integer, format: int64, minimum: 1}, subject_hash: {$ref: '#/components/schemas/Sha256'}}
+    ContinuePlanningRequest:
+      type: object
+      additionalProperties: false
+      required: [instruction, expected_revision]
+      properties: {instruction: {type: string, minLength: 1}, expected_revision: {type: integer, format: int64, minimum: 1}}
+
+    AgentCard:
+      type: object
+      additionalProperties: false
+      required: [agent_id, agent_version_id, card_content_hash, declaration, attestation, availability]
+      properties:
+        agent_id: {$ref: '#/components/schemas/Uuid'}
+        agent_version_id: {$ref: '#/components/schemas/Uuid'}
+        card_content_hash: {$ref: '#/components/schemas/Sha256'}
+        declaration: {$ref: '#/components/schemas/JsonObject'}
+        attestation: {$ref: '#/components/schemas/JsonObject'}
+        availability: {type: string, enum: [available, unavailable]}
+    AgentCardPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/AgentCard'}}, next_cursor: {type: [string, 'null']}}
+    AgentInvocationCreate:
+      type: object
+      additionalProperties: false
+      required: [caller_work_item_id, target_agent_id, return_route, content, operation_key]
+      properties:
+        caller_work_item_id: {$ref: '#/components/schemas/Uuid'}
+        target_agent_id: {$ref: '#/components/schemas/Uuid'}
+        return_route: {type: string, enum: [caller, direct, group]}
+        content: {type: string, minLength: 1}
+        operation_key: {type: string, minLength: 1, maxLength: 191}
+    AgentInvocation:
+      type: object
+      additionalProperties: false
+      required: [id, run_id, caller_work_item_id, caller_agent_id, target_agent_id, return_route, status, operation_key, request_hash, version]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        run_id: {$ref: '#/components/schemas/Uuid'}
+        caller_work_item_id: {$ref: '#/components/schemas/Uuid'}
+        caller_agent_id: {$ref: '#/components/schemas/Uuid'}
+        target_agent_id: {$ref: '#/components/schemas/Uuid'}
+        target_agent_version_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        target_work_item_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        return_route: {type: string, enum: [caller, direct, group]}
+        status: {type: string, enum: [created, queued, running, succeeded, failed, cancelled, timed_out, rejected]}
+        operation_key: {type: string}
+        request_hash: {$ref: '#/components/schemas/Sha256'}
+        error_code: {type: [string, 'null']}
+        version: {type: integer, format: int64, minimum: 1}
+
+    GroupCreate:
+      type: object
+      additionalProperties: false
+      required: [member_agent_ids, goal]
+      properties:
+        member_agent_ids: {type: array, minItems: 2, uniqueItems: true, items: {$ref: '#/components/schemas/Uuid'}}
+        goal: {type: string, minLength: 1}
+        reporter_agent_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        shared_context_refs: {type: array, uniqueItems: true, items: {$ref: '#/components/schemas/Uuid'}}
+    GroupSession:
+      type: object
+      additionalProperties: false
+      required: [id, session_id, status, initiator_agent_id, membership_policy, version]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        session_id: {$ref: '#/components/schemas/Uuid'}
+        status: {type: string, enum: [open, closed, archived]}
+        initiator_agent_id: {$ref: '#/components/schemas/Uuid'}
+        membership_policy: {type: string, enum: [fixed_for_run, dynamic_future]}
+        version: {type: integer, format: int64, minimum: 1}
+    GroupMembership:
+      type: object
+      additionalProperties: false
+      required: [id, group_session_id, agent_id, status, version]
+      properties: {id: {$ref: '#/components/schemas/Uuid'}, group_session_id: {$ref: '#/components/schemas/Uuid'}, agent_id: {$ref: '#/components/schemas/Uuid'}, status: {type: string, enum: [invited, joined, declined, cancelled, left, removed]}, version: {type: integer, format: int64, minimum: 1}}
+    GroupMembershipPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/GroupMembership'}}, next_cursor: {type: [string, 'null']}}
+    GroupRunCreate:
+      type: object
+      additionalProperties: false
+      required: [content]
+      properties:
+        content: {type: string, minLength: 1}
+        recipient_agent_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        reporter_agent_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        reference_run_ids: {type: array, uniqueItems: true, items: {$ref: '#/components/schemas/Uuid'}}
+    GroupRunMember:
+      type: object
+      additionalProperties: false
+      required: [agent_id, agent_version_id, participation_status]
+      properties: {agent_id: {$ref: '#/components/schemas/Uuid'}, agent_version_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}, participation_status: {type: string, enum: [available, unavailable]}, unavailable_reason: {type: [string, 'null']}}
+    GroupRunMemberPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/GroupRunMember'}}, next_cursor: {type: [string, 'null']}}
+    GroupRun:
+      type: object
+      additionalProperties: false
+      required: [id, group_session_id, reporter_agent_id, summary_epoch, delivered_summary_epoch, run, members, version]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        group_session_id: {$ref: '#/components/schemas/Uuid'}
+        reporter_agent_id: {$ref: '#/components/schemas/Uuid'}
+        summary_epoch: {type: integer, format: int64, minimum: 0}
+        delivered_summary_epoch: {type: integer, format: int64, minimum: 0}
+        run: {$ref: '#/components/schemas/Run'}
+        members: {type: array, items: {$ref: '#/components/schemas/GroupRunMember'}}
+        version: {type: integer, format: int64, minimum: 1}
+    ReporterReplaceRequest:
+      type: object
+      additionalProperties: false
+      required: [reporter_agent_id, clarification_id]
+      properties: {reporter_agent_id: {$ref: '#/components/schemas/Uuid'}, clarification_id: {$ref: '#/components/schemas/Uuid'}}
+    InteractionGraph:
+      type: object
+      additionalProperties: false
+      required: [nodes, edges]
+      properties:
+        nodes: {type: array, items: {$ref: '#/components/schemas/GroupRunMember'}}
+        edges: {type: array, items: {type: object, additionalProperties: false, required: [source_agent_id, target_agent_id, cause_type, cause_id], properties: {source_agent_id: {$ref: '#/components/schemas/Uuid'}, target_agent_id: {$ref: '#/components/schemas/Uuid'}, cause_type: {type: string, enum: [message, agent_invocation]}, cause_id: {$ref: '#/components/schemas/Uuid'}}}}
+    SharedTask:
+      type: object
+      additionalProperties: false
+      required: [id, group_session_id, title, status, depends_on_task_ids, result_refs, version]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        group_session_id: {$ref: '#/components/schemas/Uuid'}
+        group_run_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        title: {type: string, minLength: 1}
+        description: {type: string}
+        status: {type: string, enum: [pending, in_progress, completed, blocked, cancelled]}
+        assignee_agent_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        depends_on_task_ids: {type: array, uniqueItems: true, items: {$ref: '#/components/schemas/Uuid'}}
+        result_refs: {type: array, items: {$ref: '#/components/schemas/SharedTaskResultRef'}}
+        version: {type: integer, format: int64, minimum: 1}
+    SharedTaskResultRef:
+      type: object
+      additionalProperties: false
+      required: [ref_type, ref_id]
+      properties:
+        ref_type: {type: string, enum: [artifact, message, verification]}
+        ref_id: {$ref: '#/components/schemas/Uuid'}
+    SharedTaskCreate:
+      type: object
+      additionalProperties: false
+      required: [title]
+      properties: {title: {type: string, minLength: 1}, description: {type: string}, group_run_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}, assignee_agent_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}, depends_on_task_ids: {type: array, uniqueItems: true, items: {$ref: '#/components/schemas/Uuid'}}}
+    SharedTaskPatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties: {title: {type: string, minLength: 1}, description: {type: string}, status: {type: string, enum: [pending, in_progress, completed, blocked, cancelled]}, assignee_agent_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}, depends_on_task_ids: {type: array, uniqueItems: true, items: {$ref: '#/components/schemas/Uuid'}}, result_refs: {type: array, items: {$ref: '#/components/schemas/SharedTaskResultRef'}}}
+    SharedTaskPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/SharedTask'}}, next_cursor: {type: [string, 'null']}}
+
+    RequiredAction:
+      type: object
+      additionalProperties: false
+      required: [id, type, status, run_id, work_item_id, version, presentation, action]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        type: {$ref: '#/components/schemas/RequiredActionType'}
+        status: {$ref: '#/components/schemas/RequiredActionStatus'}
+        run_id: {$ref: '#/components/schemas/Uuid'}
+        work_item_id: {$ref: '#/components/schemas/Uuid'}
+        version: {type: integer, format: int64, minimum: 1}
+        subject_hash: {oneOf: [{$ref: '#/components/schemas/Sha256'}, {type: 'null'}]}
+        presentation: {$ref: '#/components/schemas/JsonObject'}
+        action: {type: object, additionalProperties: false, required: [method, href], properties: {method: {type: string, enum: [POST]}, href: {type: string}}}
+    RequiredActionPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/RequiredAction'}}, next_cursor: {type: [string, 'null']}}
+    ClarificationAnswer:
+      type: object
+      additionalProperties: false
+      required: [answer]
+      properties: {answer: {type: string, minLength: 1}}
+    ApprovalDecision:
+      type: object
+      additionalProperties: false
+      required: [subject_hash]
+      properties: {subject_hash: {$ref: '#/components/schemas/Sha256'}, reason: {type: string, maxLength: 2000}}
+
+    WorkspaceEntry:
+      type: object
+      additionalProperties: false
+      required: [logical_root, relative_path, size_bytes, checksum, generation]
+      properties: {logical_root: {type: string, enum: [private_agent, group_shared]}, relative_path: {type: string}, size_bytes: {type: integer, format: int64, minimum: 0}, checksum: {$ref: '#/components/schemas/Sha256'}, generation: {type: integer, format: int64, minimum: 1}}
+    WorkspaceListing:
+      type: object
+      additionalProperties: false
+      required: [items, root, path]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/WorkspaceEntry'}}, root: {type: string, enum: [private, shared]}, path: {type: string}}
+    Artifact:
+      type: object
+      additionalProperties: false
+      required: [id, session_id, name, mime_type, size_bytes, checksum, visibility, status, availability_reason, published_at, deletion_requested_at, deleted_at, provenance, created_at, version]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        session_id: {$ref: '#/components/schemas/Uuid'}
+        group_session_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        name: {type: string}
+        mime_type: {type: string}
+        size_bytes: {oneOf: [{type: integer, format: int64, minimum: 0}, {type: 'null'}]}
+        checksum: {oneOf: [{$ref: '#/components/schemas/Sha256'}, {type: 'null'}]}
+        visibility: {$ref: '#/components/schemas/Visibility'}
+        status: {type: string, enum: [publishing, published, unavailable, deleted]}
+        availability_reason: {type: [string, 'null'], enum: [publish_failed, storage_fault, checksum_mismatch, deletion_pending, retention_expired, null]}
+        published_at: {oneOf: [{$ref: '#/components/schemas/Timestamp'}, {type: 'null'}]}
+        deletion_requested_at: {oneOf: [{$ref: '#/components/schemas/Timestamp'}, {type: 'null'}]}
+        deleted_at: {oneOf: [{$ref: '#/components/schemas/Timestamp'}, {type: 'null'}]}
+        parent_artifact_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        provenance: {$ref: '#/components/schemas/JsonObject'}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        version: {type: integer, format: int64, minimum: 1}
+      allOf:
+        - if: {properties: {status: {const: publishing}}, required: [status]}
+          then:
+            properties:
+              size_bytes: {type: 'null'}
+              checksum: {type: 'null'}
+              availability_reason: {type: 'null'}
+              published_at: {type: 'null'}
+              deletion_requested_at: {type: 'null'}
+              deleted_at: {type: 'null'}
+        - if: {properties: {status: {const: published}}, required: [status]}
+          then:
+            properties:
+              size_bytes: {type: integer, format: int64, minimum: 0}
+              checksum: {$ref: '#/components/schemas/Sha256'}
+              availability_reason: {type: 'null'}
+              published_at: {$ref: '#/components/schemas/Timestamp'}
+              deletion_requested_at: {type: 'null'}
+              deleted_at: {type: 'null'}
+        - if: {properties: {status: {const: unavailable}}, required: [status]}
+          then:
+            properties:
+              availability_reason: {type: string, enum: [publish_failed, storage_fault, checksum_mismatch, deletion_pending, retention_expired]}
+              deleted_at: {type: 'null'}
+        - if: {properties: {status: {const: deleted}}, required: [status]}
+          then:
+            properties:
+              availability_reason: {type: string, enum: [publish_failed, storage_fault, checksum_mismatch, deletion_pending, retention_expired]}
+              deleted_at: {$ref: '#/components/schemas/Timestamp'}
+        - if: {properties: {availability_reason: {const: publish_failed}}, required: [availability_reason]}
+          then:
+            properties:
+              published_at: {type: 'null'}
+              deletion_requested_at: {type: 'null'}
+        - if: {properties: {availability_reason: {enum: [storage_fault, checksum_mismatch, deletion_pending, retention_expired]}}, required: [availability_reason]}
+          then:
+            properties:
+              size_bytes: {type: integer, format: int64, minimum: 0}
+              checksum: {$ref: '#/components/schemas/Sha256'}
+              published_at: {$ref: '#/components/schemas/Timestamp'}
+        - if: {properties: {availability_reason: {enum: [deletion_pending, retention_expired]}}, required: [availability_reason]}
+          then:
+            properties:
+              deletion_requested_at: {$ref: '#/components/schemas/Timestamp'}
+    ArtifactPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/Artifact'}}, next_cursor: {type: [string, 'null']}}
+    VerificationResult:
+      type: object
+      additionalProperties: false
+      required: [id, run_id, rule_key, rule_version, verification_epoch, status, observed_facts, missing_facts, source_refs, created_at]
+      properties: {id: {$ref: '#/components/schemas/Uuid'}, run_id: {$ref: '#/components/schemas/Uuid'}, rule_key: {type: string}, rule_version: {type: string}, verification_epoch: {type: integer, format: int64, minimum: 1}, status: {type: string, enum: [passed, failed, insufficient_evidence]}, observed_facts: {type: array, items: {$ref: '#/components/schemas/JsonObject'}}, missing_facts: {type: array, items: {$ref: '#/components/schemas/JsonObject'}}, source_refs: {type: array, items: {$ref: '#/components/schemas/VerificationEvidenceRef'}}, created_at: {$ref: '#/components/schemas/Timestamp'}}
+    VerificationEvidenceRef:
+      type: object
+      additionalProperties: false
+      required: [evidence_type, ref_id, external_fact_ref, workspace_generation, checksum]
+      properties:
+        evidence_type: {type: string, enum: [tool_attempt, artifact, workspace_checksum, business_fact]}
+        ref_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        external_fact_ref: {type: [string, 'null'], maxLength: 2048}
+        workspace_generation: {oneOf: [{type: integer, format: int64, minimum: 1}, {type: 'null'}]}
+        checksum: {oneOf: [{$ref: '#/components/schemas/Sha256'}, {type: 'null'}]}
+      allOf:
+        - if: {properties: {evidence_type: {enum: [tool_attempt, artifact]}}, required: [evidence_type]}
+          then: {properties: {ref_id: {$ref: '#/components/schemas/Uuid'}, external_fact_ref: {type: 'null'}, workspace_generation: {type: 'null'}}}
+        - if: {properties: {evidence_type: {const: workspace_checksum}}, required: [evidence_type]}
+          then: {properties: {ref_id: {$ref: '#/components/schemas/Uuid'}, external_fact_ref: {type: 'null'}, workspace_generation: {type: integer, format: int64, minimum: 1}, checksum: {$ref: '#/components/schemas/Sha256'}}}
+        - if: {properties: {evidence_type: {const: business_fact}}, required: [evidence_type]}
+          then: {properties: {ref_id: {type: 'null'}, external_fact_ref: {type: string, minLength: 1, maxLength: 2048}, workspace_generation: {type: 'null'}, checksum: {$ref: '#/components/schemas/Sha256'}}}
+    VerificationResultPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/VerificationResult'}}, next_cursor: {type: [string, 'null']}}
+    Timeline:
+      type: object
+      additionalProperties: false
+      required: [run_id, items]
+      properties: {run_id: {$ref: '#/components/schemas/Uuid'}, items: {type: array, items: {$ref: '#/components/schemas/JsonObject'}}}
+    TraceProjection:
+      type: object
+      additionalProperties: false
+      required: [runner_id, trace_id, spans, redacted]
+      properties: {runner_id: {$ref: '#/components/schemas/Uuid'}, trace_id: {type: string}, spans: {type: array, items: {$ref: '#/components/schemas/JsonObject'}}, redacted: {type: boolean, const: true}}
+    Memory:
+      type: object
+      additionalProperties: false
+      required: [id, scope, fact_key, content, status, current_version_no, content_hash, policy_version_id, source_refs, version]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        scope: {type: string, enum: [user, user_agent]}
+        agent_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        fact_key: {type: string, maxLength: 191}
+        content: {type: string}
+        status: {type: string, enum: [active, deleted]}
+        current_version_no: {type: integer, format: int64, minimum: 1}
+        content_hash: {$ref: '#/components/schemas/Sha256'}
+        policy_version_id: {$ref: '#/components/schemas/Uuid'}
+        source_refs: {type: array, items: {$ref: '#/components/schemas/Uuid'}}
+        version: {type: integer, format: int64, minimum: 1}
+    MemoryPatch:
+      type: object
+      additionalProperties: false
+      required: [content]
+      properties: {content: {type: string, minLength: 1}}
+    MemoryPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/Memory'}}, next_cursor: {type: [string, 'null']}}
+
+    ExecutionEvent:
+      type: object
+      additionalProperties: false
+      required: [event_id, session_id, sequence, event_type, visibility, aggregate_type, aggregate_id, aggregate_version, summary, payload, occurred_at]
+      properties:
+        event_id: {$ref: '#/components/schemas/Uuid'}
+        session_id: {$ref: '#/components/schemas/Uuid'}
+        run_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        sequence: {type: integer, format: int64, minimum: 1}
+        event_type: {$ref: '#/components/schemas/EventType'}
+        visibility: {$ref: '#/components/schemas/Visibility'}
+        aggregate_type: {type: string}
+        aggregate_id: {$ref: '#/components/schemas/Uuid'}
+        aggregate_version: {type: integer, format: int64, minimum: 1}
+        summary: {type: string, description: Authorized safe projection of database safe_summary.}
+        payload: {$ref: '#/components/schemas/EventPayload'}
+        occurred_at: {$ref: '#/components/schemas/Timestamp'}
+    EventPayload:
+      type: object
+      additionalProperties: false
+      required: [schema_version, resource_href]
+      properties:
+        schema_version: {type: integer, const: 1}
+        resource_href: {type: string}
+        from_status: {type: [string, 'null']}
+        to_status: {type: [string, 'null']}
+        reason_code: {type: [string, 'null']}
+        message_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        action_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        artifact_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        related_ids: {type: array, uniqueItems: true, items: {$ref: '#/components/schemas/Uuid'}}
+        changed_fields: {type: array, uniqueItems: true, items: {type: string}}
+    EventScan:
+      type: object
+      additionalProperties: false
+      required: [items, scanned_through_sequence, session_high_watermark, has_more]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/ExecutionEvent'}}
+        scanned_through_sequence: {type: integer, format: int64, minimum: 0}
+        session_high_watermark: {type: integer, format: int64, minimum: 0}
+        has_more: {type: boolean}
+
+    ErrorCode:
+      type: string
+      enum: [authentication_required, invalid_token, identity_mapping_required, invalid_identity_profile, user_id_required, invalid_user_id, forbidden, not_found, version_conflict, idempotency_conflict, immutable_resource, action_already_resolved, approval_subject_changed, skill_assessment_required, agent_unavailable, group_member_unavailable, reporter_unavailable, permission_mode_denied, tool_registration_changed, sandbox_profile_incompatible, artifact_unavailable, legal_hold_active, budget_exhausted, outcome_unknown, event_cursor_expired, dependency_unavailable, rate_limited, domain_validation]
+      x-http-status-map:
+        authentication_required: 401
+        invalid_token: 401
+        identity_mapping_required: 403
+        invalid_identity_profile: 400
+        user_id_required: 400
+        invalid_user_id: 400
+        forbidden: 403
+        not_found: 404
+        version_conflict: 409
+        idempotency_conflict: 409
+        immutable_resource: 409
+        action_already_resolved: 409
+        approval_subject_changed: 409
+        skill_assessment_required: 422
+        agent_unavailable: 422
+        group_member_unavailable: 422
+        reporter_unavailable: 422
+        permission_mode_denied: 403
+        tool_registration_changed: 409
+        sandbox_profile_incompatible: 422
+        artifact_unavailable: 409
+        legal_hold_active: 409
+        budget_exhausted: 429
+        outcome_unknown: 409
+        event_cursor_expired: 410
+        dependency_unavailable: 503
+        rate_limited: 429
+        domain_validation: 422
+    ErrorBody:
+      type: object
+      additionalProperties: false
+      required: [code, message, request_id, retryable, details]
+      properties: {code: {$ref: '#/components/schemas/ErrorCode'}, message: {type: string}, request_id: {$ref: '#/components/schemas/Uuid'}, retryable: {type: boolean}, details: {$ref: '#/components/schemas/JsonObject'}}
+    ErrorEnvelope:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties: {error: {$ref: '#/components/schemas/ErrorBody'}}
+    CursorExpiredError:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: object
+          additionalProperties: false
+          required: [code, message, request_id, retryable, details]
+          properties:
+            code: {type: string, const: event_cursor_expired}
+            message: {type: string}
+            request_id: {$ref: '#/components/schemas/Uuid'}
+            retryable: {type: boolean, const: false}
+            details:
+              type: object
+              additionalProperties: false
+              required: [earliest_sequence, resync_href]
+              properties:
+                earliest_sequence: {type: integer, format: int64, minimum: 1}
+                resync_href: {type: string}
+    Health:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties: {status: {type: string, const: ok}}
+    DeploymentHealth:
+      type: object
+      additionalProperties: false
+      required: [status, deployment_profile, identity_profile, git_sha, image_digest, schema_head, openapi_sha256, configuration_revision, dependencies]
+      properties:
+        status: {type: string, enum: [ready, not_ready]}
+        deployment_profile: {type: string, enum: [dev, uat_single_node, enterprise_production_v1]}
+        identity_profile: {type: string, enum: [raw_user_id_v1, enterprise_oidc_v1]}
+        git_sha: {type: string, pattern: '^[a-f0-9]{40}$'}
+        image_digest: {type: string, pattern: '^sha256:[a-f0-9]{64}$'}
+        schema_head: {type: string}
+        openapi_sha256: {$ref: '#/components/schemas/Sha256'}
+        configuration_revision: {type: string}
+        dependencies: {type: object, additionalProperties: {type: string, enum: [ready, degraded, unavailable]}}

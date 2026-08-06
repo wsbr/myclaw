@@ -1,4 +1,6 @@
-# 第一阶段交付状态与验收证据
+# V1 第一阶段交付状态与验收证据（历史）
+
+> **历史V1交付证据。** 本文不证明Agent-native v2已经完成；新的完成定义和发布门禁以[第一阶段综合技术方案](phase-one-agent-native-delivery.md)为准。
 
 本文维护 MyClaw 第一阶段的实现缺口和证据契约。产品边界只来自[第一阶段交付边界](../modules/phase-one-scope.md)；本文不扩展验收标准，也不把旧 Commit 的测试结果当成当前发布证据。
 
@@ -21,7 +23,7 @@
 | Frontend 构建不确定且使用开发预览服务器 | 固定 pnpm 10.15.0 与 lockfile，Docker 内 `--frozen-lockfile`，Nginx 提供静态 SPA 和 `/healthz` | Frontend build Job + production image build + Docker healthcheck |
 | 无入口限流 | Redis 固定窗口；认证主体/IP 先 HMAC，不保存原始值；Redis 故障显式降级而不破坏数据库权威路径 | `test_rate_limit.py`；429 header 与降级 header 行为 |
 | 无 Retention/Cleanup | 单 leader、受限批次，只清理过期 operational rows，并写 `retention.cleanup` 审计 | `test_retention_service.py` 与配置下限测试 |
-| 缺少备份恢复与事故处置 | 提供压缩逻辑备份、SHA-256 验证、显式恢复确认和故障矩阵 | [生产运行手册](../operations/phase-one-runbook.md) 与 `deploy/scripts/` |
+| 缺少备份恢复与事故处置 | 提供压缩逻辑备份、SHA-256 验证、显式恢复确认和故障矩阵 | [第一阶段 UAT 运行手册](../operations/phase-one-runbook.md) 与 `deploy/scripts/` |
 | 真实模型结果和七场景证据分散 | 一个 API 综合测试按七场景逐项记录 JUnit suite property，另有 Chromium UI 测试 | `test_phase_one_acceptance.py`、`test_ui_acceptance.py`、正式 evidence manifest |
 | Group/Plan 视图无法处理模型临时请求的 Tool Confirmation/Clarification | required action 卡片改为三种会话模式共用；Chromium 通过页面按钮批准或填写回答，并继续严格等待 GroupRun 完成 | 真实模型浏览器测试的 required-action POST 必须成功、次数有界，最终完成断言仍保留 |
 | 真实模型偶发返回不可解析的 Plan/Group 结构化提案 | OpenAI-compatible streaming 传递冻结的 temperature/max_tokens；严格校验失败时使用 savepoint 回滚，仅排队一次 fenced repair Runner，不保存原始无效输出；第二次无效仍失败 | 模型参数转发、单次 epoch/attempt 递增、第二次拒绝重试单测；真实 API 与 Chromium 仍要求有效图并完成 |

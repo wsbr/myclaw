@@ -1,4 +1,6 @@
-# 三模式 Agent Harness 稳定性优化方案
+# V1 三模式 Agent Harness 稳定性方案（历史）
+
+> **历史补丁方案，已被取代。** 本文保留2026-08-03 UAT后的分析和实现记录，不再定义目标架构。`finalize_response`、模型`required_tool_keys`、Tool类型一次性消费和冻结Plan DAG均不得进入Agent-native v2；当前权威见[第一阶段 Agent-native 交付技术方案](phase-one-agent-native-delivery.md)。
 
 ## 1. 文档目的与结论
 
