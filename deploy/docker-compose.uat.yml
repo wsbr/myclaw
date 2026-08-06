@@ -84,7 +84,7 @@ services:
 
   runtime-worker:
     <<: *backend-common
-    command: python -m app.workers.runtime_worker_v1
+    command: python -m app.workers.runtime_worker
     environment:
       <<: *app-environment
       OTEL_SERVICE_NAME: myclaw-uat-runtime-worker

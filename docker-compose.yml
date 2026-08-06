@@ -58,7 +58,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    command: python -m app.workers.runtime_worker_v1
+    command: python -m app.workers.runtime_worker
     env_file: .env
     environment:
       - MYCLAW_ENVIRONMENT=production

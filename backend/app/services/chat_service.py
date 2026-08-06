@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.models.agent_v1 import AgentAssemblyVersion, AgentBlueprint
 from app.models.common import utcnow, uuid7
-from app.models.foundation import UserSession
+from app.models.foundation import PlatformAccount, UserSession
 from app.models.registry import SandboxProfile
 from app.models.runtime_v1 import DurableRunner, Message, Run, SessionSandbox, Workspace, WorkItem
 from app.persistence.reliable_writes import ExecutionEventWriter, OutboxWriter
@@ -37,10 +37,15 @@ async def create_user_session(
         and (agent.status != "published" or agent.current_published_version_id is None)
     ):
         raise AgentUnavailable("Agent is not available for new sessions")
+    account_id = await db.scalar(select(PlatformAccount.id).where(
+        PlatformAccount.user_id == user_id, PlatformAccount.status == "active",
+    ))
     session = UserSession(
-        id=uuid7(), user_id=user_id, entry_agent_id=entry_agent_id,
+        id=uuid7(), user_id=user_id, account_id=account_id,
+        entry_agent_id=entry_agent_id,
         status="active", title=title, origin_type=origin_type,
         origin_api_key_id=origin_api_key_id, next_event_sequence=1,
+        permission_mode="standard", permission_revision=1,
     )
     db.add(session)
     await db.flush()
@@ -120,18 +125,24 @@ async def enqueue_chat_message(
     run = Run(
         id=uuid7(), session_id=session.id, user_id=user_id, mode="chat",
         execution_kind=execution_kind, lifecycle="running", wait_reason=None,
-        outcome=None, entry_agent_id=agent.id, started_at=utcnow(),
+        status="active", outcome=None, entry_agent_id=agent.id,
+        permission_mode=session.permission_mode, hard_budget_snapshot={},
+        started_at=utcnow(),
     )
     work = WorkItem(
         id=uuid7(), run_id=run.id, session_id=session.id, user_id=user_id,
         mode="chat", owner_agent_id=agent.id, agent_version_id=agent_version_id,
-        goal=content, status="queued", execution_epoch=1, attempt_no=1,
+        goal=content, purpose="root_request", status="queued",
+        resume_cursor={}, execution_epoch=1, attempt_no=1,
     )
     runner = DurableRunner(
         id=uuid7(), work_item_id=work.id, run_id=run.id, session_id=session.id,
         agent_id=agent.id, agent_version_id=agent_version_id, execution_epoch=1,
+        fencing_token=1,
         status="queued", principal_snapshot={
-            "user_id": user_id, "session_id": session.id,
+            "account_id": session.account_id, "user_id": user_id,
+            "session_id": session.id,
+            "permission_revision": session.permission_revision,
             "entry_agent_id": agent.id, "current_agent_id": agent.id,
             "mode": "chat", "delegation_chain": [],
         }, assembly_snapshot={"agent_version_id": agent_version_id},
@@ -147,6 +158,7 @@ async def enqueue_chat_message(
     db.add(run)
     await db.flush()
     await persist_new_work_runner(db, work, runner)
+    run.root_work_item_id = work.id
     db.add(message)
     await db.flush()
 

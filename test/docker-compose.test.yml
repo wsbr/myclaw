@@ -102,7 +102,7 @@ services:
     build:
       context: ../backend
       dockerfile: Dockerfile
-    command: python -m app.workers.runtime_worker_v1
+    command: python -m app.workers.runtime_worker
     env_file: .env.test
     environment:
       DATABASE_URL: mysql+aiomysql://myclaw:mypassword@mysql-test:3306/myclaw_test
