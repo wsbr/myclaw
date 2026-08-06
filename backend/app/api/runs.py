@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
+from app.api.sessions import _owned_session
 from app.deps import CurrentAccount, SessionActor, get_session_actor
 from app.models.common import utcnow, uuid7
 from app.models.foundation import IdempotencyRecord, UserSession
@@ -20,7 +21,14 @@ from app.models.runtime_v1 import (
 from app.persistence.reliable_writes import ExecutionEventWriter, OutboxWriter
 from app.persistence.runtime_graph import persist_replacement_runner
 from app.services.notification_delivery_service import create_notification_delivery_if_channel
-from app.schemas.runtime_v1 import RunCancelRequest, RunnerResponse, RunResponse, WorkItemResponse
+from app.schemas.runtime_v1 import (
+    AgentInvocationCreateRequest, RunCancelRequest, RunnerResponse,
+    RunResponse, WorkItemResponse,
+)
+from app.services.agent_invocation_service import (
+    AgentInvocationRejected, dispatch_agent_invocation,
+    persist_rejected_agent_invocation,
+)
 from app.services.visible_events import VisibleEventProjection, event_public_dict
 from app.services.cursor_service import SortKey, paginate_scalars
 
@@ -97,6 +105,140 @@ async def get_run(
     current: SessionActor = Depends(get_session_actor),
 ):
     return RunResponse.model_validate(await _owned_run(db, run_id, current))
+
+
+@router.get("/sessions/{session_id}/runs", response_model=dict)
+async def list_session_runs(
+    session_id: str, mode: str | None = None,
+    db: AsyncSession = Depends(get_db),
+    current: SessionActor = Depends(get_session_actor),
+):
+    await _owned_session(db, session_id, current)
+    if mode is not None and mode not in {"chat", "plan", "group"}:
+        raise HTTPException(status_code=422, detail={"code": "invalid_run_mode"})
+    statement = select(Run).where(Run.session_id == session_id)
+    if mode is not None:
+        statement = statement.where(Run.mode == mode)
+    rows = list(await db.scalars(statement.order_by(Run.created_at.desc(), Run.id.desc())))
+    return {
+        "items": [RunResponse.model_validate(row).model_dump(mode="json") for row in rows],
+        "next_cursor": None,
+    }
+
+
+def _agent_invocation_view(row: AgentInvocation) -> dict:
+    return {
+        "id": row.id,
+        "run_id": row.run_id,
+        "caller_work_item_id": row.caller_work_item_id,
+        "caller_agent_id": row.caller_agent_id,
+        "target_work_item_id": row.target_work_item_id,
+        "target_agent_id": row.target_agent_id,
+        "target_agent_version_id": row.target_agent_version_id,
+        "return_route": row.return_route,
+        "request_text": row.request_text,
+        "operation_key": row.operation_key,
+        "request_hash": row.request_hash,
+        "status": row.status,
+        "result_summary": row.result_summary,
+        "error_code": row.error_code,
+        "result_message_id": row.result_message_id,
+        "created_at": row.created_at.isoformat(),
+        "completed_at": row.completed_at.isoformat() if row.completed_at else None,
+        "version": row.version,
+    }
+
+
+@router.get("/runs/{run_id}/agent-invocations", response_model=dict)
+async def list_run_agent_invocations(
+    run_id: str,
+    db: AsyncSession = Depends(get_db),
+    current: SessionActor = Depends(get_session_actor),
+):
+    await _owned_run(db, run_id, current)
+    rows = list(await db.scalars(select(AgentInvocation).where(
+        AgentInvocation.run_id == run_id,
+    ).order_by(AgentInvocation.created_at, AgentInvocation.id)))
+    return {"items": [_agent_invocation_view(row) for row in rows], "next_cursor": None}
+
+
+@router.post("/runs/{run_id}/agent-invocations", status_code=202)
+async def create_agent_invocation_for_admin_test(
+    run_id: str, body: AgentInvocationCreateRequest,
+    idempotency_key: str = Header(alias="Idempotency-Key"),
+    db: AsyncSession = Depends(get_db),
+    current: SessionActor = Depends(get_session_actor),
+):
+    """Provide the explicitly-admin test profile from the public contract.
+
+    Normal collaboration is model-driven through ``invoke_agent``.  This
+    endpoint cannot interrupt a running model turn or choose a collaborator on
+    its behalf; it can only attach a test invocation to a caller already in a
+    durable ``waiting_agent`` state.
+    """
+    if "admin" not in current.roles:
+        raise HTTPException(status_code=403, detail={"code": "admin_required"})
+    request = {"run_id": run_id, **body.model_dump(mode="json")}
+    record, replay = await _idempotency(
+        db, current, "admin_create_agent_invocation", idempotency_key, request,
+    )
+    if replay and record.response_snapshot:
+        return record.response_snapshot
+    run = await _owned_run(db, run_id, current, lock=True)
+    if body.return_route != "caller":
+        raise HTTPException(
+            status_code=409, detail={"code": "unsupported_return_route"},
+        )
+    caller_work = await db.scalar(select(WorkItem).where(
+        WorkItem.id == body.caller_work_item_id,
+        WorkItem.run_id == run.id,
+    ).with_for_update())
+    if (
+        caller_work is None or caller_work.status != "waiting_agent"
+        or caller_work.active_runner_id is not None
+    ):
+        raise HTTPException(
+            status_code=409, detail={"code": "caller_not_waiting_agent"},
+        )
+    caller_runner = await db.scalar(select(DurableRunner).where(
+        DurableRunner.work_item_id == caller_work.id,
+    ).order_by(DurableRunner.execution_epoch.desc()).limit(1))
+    if caller_runner is None:
+        raise HTTPException(
+            status_code=409, detail={"code": "resume_checkpoint_unavailable"},
+        )
+    arguments = {"agent_id": body.target_agent_id, "task": body.content, "input": {}}
+    try:
+        invocation = await dispatch_agent_invocation(
+            db, operation_key=body.operation_key,
+            provider_call_id=f"admin-test-{record.id}",
+            caller_runner=caller_runner, caller_work=caller_work,
+            run=run, arguments=arguments,
+        )
+    except AgentInvocationRejected as error:
+        try:
+            invocation = await persist_rejected_agent_invocation(
+                db, caller_runner=caller_runner, caller_work=caller_work,
+                run=run, arguments=arguments, operation_key=body.operation_key,
+                reason=str(error),
+            )
+        except AgentInvocationRejected as collision:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "agent_invocation_idempotency_collision"},
+            ) from collision
+        if invocation is None:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "agent_invocation_rejected", "message": str(error)},
+            )
+    response = _agent_invocation_view(invocation)
+    record.resource_type, record.resource_id, record.http_status = (
+        "agent_invocation", invocation.id, 202,
+    )
+    record.response_snapshot = response
+    await db.commit()
+    return response
 
 
 @router.get("/runs/{run_id}/timeline")

@@ -7,8 +7,8 @@ import json
 
 from sqlalchemy import select
 
-from app.models.common import uuid7
-from app.models.runtime_v1 import PlanUpdate, WorkingPlan
+from app.models.common import utcnow, uuid7
+from app.models.runtime_v1 import Approval, PlanUpdate, Run, WorkingPlan
 from app.persistence.reliable_writes import ExecutionEventWriter
 
 
@@ -74,6 +74,14 @@ async def update_working_plan(
             raise WorkingPlanConflict("each plan item requires non-empty text")
         if item.get("status") not in {"pending", "in_progress", "completed"}:
             raise WorkingPlanConflict("invalid plan item status")
+    # Locking the Run serializes first-plan creation as well as subsequent
+    # revision CAS updates. Locking only a possibly absent WorkingPlan row
+    # would allow two revision-1 heads to be created concurrently.
+    run = await db.scalar(
+        select(Run).where(Run.id == run_id).with_for_update()
+    )
+    if run is None or run.session_id != session_id:
+        raise WorkingPlanConflict("working plan Run is unavailable")
     plan = await db.scalar(
         select(WorkingPlan).where(
             WorkingPlan.run_id == run_id,
@@ -115,7 +123,8 @@ async def update_working_plan(
     plan.version += 1
     db.add(update)
     await db.flush()
-    await ExecutionEventWriter(db).append(
+    events = ExecutionEventWriter(db)
+    await events.append(
         session_id=session_id, run_id=run_id,
         event_type="working_plan.updated",
         event_dedupe_key=f"working_plan:{plan.id}:revision:{revision}",
@@ -129,4 +138,32 @@ async def update_working_plan(
         },
         correlation_id=run_id,
     )
+    stale_approvals = list(await db.scalars(select(Approval).where(
+        Approval.kind == "plan_implementation",
+        Approval.subject_type == "working_plan",
+        Approval.subject_id == plan.id,
+        Approval.status == "pending",
+        Approval.subject_version != revision,
+    ).with_for_update()))
+    for approval in stale_approvals:
+        approval.status = "cancelled"
+        approval.decision_reason = "working_plan_revision_changed"
+        approval.decided_at = utcnow()
+        approval.version += 1
+        await events.append(
+            session_id=session_id, run_id=run_id,
+            event_type="approval.cancelled",
+            event_dedupe_key=f"approval:{approval.id}:cancelled:revision:{revision}",
+            actor_type="service", actor_id="working-plan",
+            entity_type="approval", entity_id=approval.id,
+            entity_version=approval.version, visibility="user",
+            summary="Previous Plan approval invalidated by a newer revision",
+            payload={
+                "approval_id": approval.id,
+                "working_plan_id": plan.id,
+                "superseded_revision": approval.subject_version,
+                "current_revision": revision,
+            },
+            correlation_id=run_id,
+        )
     return working_plan_view(plan, update)

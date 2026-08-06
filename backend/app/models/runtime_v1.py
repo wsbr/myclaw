@@ -470,6 +470,9 @@ class Approval(Base, TimestampMixin, VersionMixin):
     )
     subject_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Immutable inputs used to recompute the subject hash at decision time.
+    # This is deliberately authorization metadata, not presentation text.
+    subject_snapshot: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     idempotency_key: Mapped[str] = mapped_column(String(191), nullable=False)
     presentation: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
@@ -689,19 +692,28 @@ class AgentInvocation(Base, TimestampMixin, VersionMixin):
             "status IN ('created','queued','running','succeeded','failed','cancelled','timed_out','rejected')",
             name="ck_agent_invocation_status",
         ),
+        CheckConstraint(
+            "return_route IN ('caller','direct','group')",
+            name="ck_agent_invocation_return_route",
+        ),
         UniqueConstraint("caller_work_item_id", "idempotency_key", name="uq_agent_invocation_business_key"),
+        UniqueConstraint("caller_work_item_id", "operation_key", name="uq_agent_invocation_operation"),
         UniqueConstraint("target_work_item_id", name="uq_agent_invocation_target_work"),
         Index("ix_agent_invocation_caller_batch_status", "caller_work_item_id", "batch_key", "status"),
+        Index("ix_agent_invocation_run_status", "run_id", "status", "created_at"),
         Index("ix_agent_invocation_target_work", "target_work_item_id"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
+    run_id: Mapped[str] = mapped_column(String(36), ForeignKey("run.id"), nullable=False)
     caller_work_item_id: Mapped[str] = mapped_column(String(36), ForeignKey("work_item.id"), nullable=False)
     caller_runner_id: Mapped[str] = mapped_column(String(36), ForeignKey("runner_v1.id"), nullable=False)
+    caller_agent_id: Mapped[str] = mapped_column(String(36), ForeignKey("agent.id"), nullable=False)
     target_work_item_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("work_item.id"))
     target_agent_id: Mapped[str] = mapped_column(String(36), ForeignKey("agent.id"), nullable=False)
-    target_agent_version_id: Mapped[str] = mapped_column(String(36), ForeignKey("agent_version.id"), nullable=False)
+    target_agent_version_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("agent_version.id"))
     mode: Mapped[str] = mapped_column(String(20), nullable=False)
+    return_route: Mapped[str] = mapped_column(String(20), default="caller", nullable=False)
     request_text: Mapped[str] = mapped_column(Text, nullable=False)
     context_snapshot: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     status: Mapped[str] = mapped_column(String(24), default="created", nullable=False)
@@ -711,6 +723,11 @@ class AgentInvocation(Base, TimestampMixin, VersionMixin):
     error_code: Mapped[str | None] = mapped_column(String(100))
     error_detail: Mapped[str | None] = mapped_column(Text)
     idempotency_key: Mapped[str] = mapped_column(String(191), nullable=False)
+    operation_key: Mapped[str] = mapped_column(String(191), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    authorization_snapshot: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    result_message_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("message.id"))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
 
 
 class RunnerSkillSnapshot(Base):

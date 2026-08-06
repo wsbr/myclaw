@@ -9,9 +9,14 @@ from sqlalchemy import select
 
 from app.core.tool_registry.base import RuntimeContext, ToolResult
 from app.models.common import uuid7
-from app.models.runtime_v1 import Clarification, Message
+from app.models.runtime_v1 import DurableRunner, Clarification, Message, Run, WorkItem
 from app.persistence.reliable_writes import ExecutionEventWriter
 from app.services.working_plan_service import WorkingPlanConflict, update_working_plan
+from app.services.agent_directory_service import agent_card_view, discover_agent_cards
+from app.services.agent_invocation_service import (
+    AgentInvocationRejected, dispatch_agent_invocation,
+    persist_rejected_agent_invocation,
+)
 
 
 RUNTIME_COORDINATION_DEFINITIONS = ({
@@ -60,6 +65,43 @@ RUNTIME_COORDINATION_DEFINITIONS = ({
         "additionalProperties": False,
     },
     "source": "runtime",
+}, {
+    "name": "discover_agents",
+    "description": (
+        "Search the governed Agent Network for current professional candidates. "
+        "Discovery does not itself authorize or invoke a candidate."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "maxLength": 500},
+            "domain_tags": {
+                "type": "array", "maxItems": 20,
+                "items": {"type": "string", "minLength": 1, "maxLength": 100},
+            },
+            "group_enabled": {"type": "boolean"},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 100},
+        },
+        "additionalProperties": False,
+    },
+    "source": "runtime",
+}, {
+    "name": "invoke_agent",
+    "description": (
+        "Invoke one authorized Agent for a bounded professional request and wait "
+        "durably for its result. Choose candidates yourself from current evidence."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "agent_id": {"type": "string", "minLength": 1, "maxLength": 191},
+            "task": {"type": "string", "minLength": 1, "maxLength": 16000},
+            "input": {"type": "object"},
+        },
+        "required": ["agent_id", "task"],
+        "additionalProperties": False,
+    },
+    "source": "runtime",
 })
 
 for _definition in RUNTIME_COORDINATION_DEFINITIONS:
@@ -102,6 +144,54 @@ async def dispatch_coordination_tool(
             status="succeeded", summary=f"Working plan revision {view['revision']} saved",
             data={"working_plan": view},
         ), False, None
+
+    if name == "discover_agents":
+        cards = await discover_agent_cards(
+            db, account_id=context.account_id, actor_agent_id=context.agent_id,
+            query=arguments.get("query"),
+            domain_tags=list(arguments.get("domain_tags") or []),
+            group_enabled=arguments.get("group_enabled"),
+            limit=int(arguments.get("limit") or 20),
+        )
+        return ToolResult(
+            status="succeeded",
+            summary=f"Discovered {len(cards)} governed Agent candidate(s)",
+            data={"candidates": [agent_card_view(card) for card in cards]},
+        ), False, None
+
+    if name == "invoke_agent":
+        caller_runner = await db.get(DurableRunner, context.runner_id)
+        caller_work = await db.get(WorkItem, work_item_id)
+        run = await db.get(Run, run_id)
+        if caller_runner is None or caller_work is None or run is None:
+            return ToolResult(
+                status="failed", summary="AgentInvocation runtime graph is unavailable",
+                error_code="runtime_context_required",
+                error="AgentInvocation runtime graph is unavailable",
+                error_category="permanent",
+            ), False, None
+        try:
+            invocation = await dispatch_agent_invocation(
+                db, operation_key=operation_key, provider_call_id=provider_call_id,
+                caller_runner=caller_runner, caller_work=caller_work,
+                run=run, arguments=arguments,
+            )
+        except AgentInvocationRejected as error:
+            rejected = await persist_rejected_agent_invocation(
+                db, caller_runner=caller_runner, caller_work=caller_work,
+                run=run, arguments=arguments, operation_key=operation_key,
+                reason=str(error),
+            )
+            return ToolResult(
+                status="failed", summary=str(error),
+                data={"agent_invocation_id": rejected.id if rejected else None},
+                error_code="agent_invocation_rejected", error=str(error),
+                error_category="authorization",
+            ), False, None
+        return ToolResult(
+            status="succeeded", summary="Waiting for the invoked Agent",
+            data={"agent_invocation_id": invocation.id, "status": invocation.status},
+        ), True, "agent"
 
     if name != "ask_user":
         return ToolResult(

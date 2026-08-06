@@ -9,7 +9,8 @@ from sqlalchemy import select
 from app.core.tool_registry.base import ToolResult
 from app.models.common import uuid7
 from app.models.runtime_v1 import (
-    Approval, Clarification, DurableRunner, ToolInvocation, WorkItem, Run,
+    AgentInvocation, Approval, Clarification, DurableRunner, ToolInvocation,
+    WorkItem, Run,
 )
 from app.persistence.reliable_writes import ExecutionEventWriter, OutboxWriter
 from app.persistence.runtime_graph import persist_replacement_runner
@@ -90,13 +91,19 @@ async def has_pending_actions(db, *, work_item_id: str) -> bool:
     pending_clarification = await db.scalar(select(Clarification.id).where(
         Clarification.work_item_id == work_item_id, Clarification.status == "open",
     ).limit(1))
-    return bool(pending_tool or pending_approval or pending_clarification)
+    pending_agent = await db.scalar(select(AgentInvocation.id).where(
+        AgentInvocation.caller_work_item_id == work_item_id,
+        AgentInvocation.status.in_(("created", "queued", "running")),
+    ).limit(1))
+    return bool(
+        pending_tool or pending_approval or pending_clarification or pending_agent
+    )
 
 
 async def queue_work_item_resume(
     db, *, work: WorkItem, run: Run, source_runner: DurableRunner,
     pending_results: list[dict], reason: str, caused_by_event_id: str,
-    actor_id: str,
+    actor_id: str, principal_snapshot_updates: dict | None = None,
 ) -> DurableRunner:
     if work.active_runner_id is not None:
         raise RuntimeError("WorkItem already has an active Runner")
@@ -114,7 +121,10 @@ async def queue_work_item_resume(
         session_id=run.session_id, agent_id=source_runner.agent_id,
         agent_version_id=source_runner.agent_version_id,
         execution_epoch=work.execution_epoch, fencing_token=work.execution_epoch,
-        status="queued", principal_snapshot=dict(source_runner.principal_snapshot or {}),
+        status="queued", principal_snapshot={
+            **dict(source_runner.principal_snapshot or {}),
+            **dict(principal_snapshot_updates or {}),
+        },
         assembly_snapshot=dict(source_runner.assembly_snapshot or {}), prompt_manifest={},
         input_snapshot={
             **dict(source_runner.input_snapshot or {}),

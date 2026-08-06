@@ -16,6 +16,7 @@ from app.models.common import uuid7
 from app.models.registry import ModelVersion, PlatformTool, SkillVersion
 from app.models.runtime_v1 import CapabilitySnapshot, DurableRunner
 from app.runtime.coordination_tools import RUNTIME_COORDINATION_DEFINITIONS
+from app.services.agent_directory_service import discover_agent_cards
 
 
 class SnapshotResolutionError(RuntimeError):
@@ -71,12 +72,20 @@ class SnapshotResolver:
         effective_keys: list[str] = []
         denied: list[dict[str, str]] = []
         definitions: list[dict[str, Any]] = []
+        runtime_coordination_names = {
+            item["name"] for item in RUNTIME_COORDINATION_DEFINITIONS
+        }
         readonly = permission_mode in {"readonly", "plan_readonly"}
         budget_blocked = bool((hard_budget or {}).get("tool_calls_remaining") == 0)
         for frozen in frozen_tools:
             tool = tools_by_id.get(frozen.platform_tool_id)
             if tool is None:
                 raise SnapshotResolutionError(f"frozen Tool {frozen.platform_tool_id} is missing")
+            if tool.tool_key in runtime_coordination_names:
+                # Runtime coordination semantics win over an older assembly's
+                # Platform Tool of the same name. Provider schemas must contain
+                # each Tool name exactly once.
+                continue
             assembled_keys.append(tool.tool_key)
             reason = None
             if frozen.tool_registration_hash != tool.registration_hash:
@@ -114,6 +123,18 @@ class SnapshotResolver:
             effective_keys.append(name)
             definitions.append(dict(definition))
 
+        discoverable_cards = await discover_agent_cards(
+            db,
+            account_id=execution_principal.get("account_id"),
+            actor_agent_id=runner.agent_id,
+            limit=100,
+        )
+        discover_scope = {
+            "agent_ids": [card.agent_id for card in discoverable_cards],
+            "agent_version_ids": [card.agent_version_id for card in discoverable_cards],
+            "source": "current_published_agent_cards",
+        }
+
         frozen_skills = list(await db.scalars(
             select(AgentVersionSkill)
             .where(AgentVersionSkill.agent_version_id == assembly.id)
@@ -137,6 +158,8 @@ class SnapshotResolver:
             "assembled_tool_keys": assembled_keys,
             "effective_tool_keys": effective_keys,
             "denied_capabilities": denied,
+            "discoverable_agents_scope": discover_scope,
+            "callable_agents_scope": discover_scope,
             "permission_mode": permission_mode,
             "governance_versions": {
                 "tools": {tool.tool_key: tool.config_version for tool in tool_rows},
@@ -155,7 +178,9 @@ class SnapshotResolver:
             id=uuid7(), runner_id=runner.id, work_item_id=runner.work_item_id,
             agent_version_id=assembly.id, execution_principal=execution_principal,
             assembled_tool_keys=assembled_keys, effective_tool_keys=effective_keys,
-            denied_capabilities=denied, discoverable_agents_scope={}, callable_agents_scope={},
+            denied_capabilities=denied,
+            discoverable_agents_scope=discover_scope,
+            callable_agents_scope=discover_scope,
             permission_mode=permission_mode,
             governance_versions=payload["governance_versions"],
             budget_snapshot=hard_budget or {}, runtime_release_id=settings.runtime_release_id,

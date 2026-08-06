@@ -16,7 +16,6 @@ from app.models.runtime_v1 import (
     Approval, Clarification, DurableRunner, Run, SessionGrant,
     ToolConfirmation, ToolInvocation, WorkItem,
 )
-from app.models.plan_v1 import PlanExecution
 from app.models.group_v1 import GroupFormationProposal
 from app.persistence.reliable_writes import ExecutionEventWriter, OutboxWriter
 from app.persistence.runtime_graph import persist_replacement_runner
@@ -28,6 +27,7 @@ from app.api.sessions import _idempotency as _session_idempotency, _owned_sessio
 from app.services.runtime_resume_service import (
     has_pending_actions, queue_work_item_resume, tool_continuation,
 )
+from app.services.plan_mode_service import PlanSubjectChanged, assert_current_plan_subject
 from datetime import timedelta
 
 router = APIRouter(tags=["required-actions"])
@@ -81,7 +81,7 @@ async def list_required_actions(
     allowed_types = {
         "clarification", "tool", "session_grant", "membership",
         "plan_implementation", "reporter_selection",
-        "tool_confirmation", "plan_confirmation", "group_confirmation",
+        "tool_confirmation", "group_confirmation",
     }
     if action_type is not None and action_type not in allowed_types:
         raise HTTPException(status_code=422, detail={"code": "invalid_required_action_type"})
@@ -140,25 +140,6 @@ async def list_required_actions(
         item = view(confirmation, invocation).model_dump(mode="json")
         item["type"] = "tool_confirmation"
         items.append(item)
-    plans = (await db.execute(
-        select(PlanExecution, Run)
-        .join(Run, Run.id == PlanExecution.run_id)
-        .where(
-            PlanExecution.user_id == current.account.user_id,
-            PlanExecution.definition_status == "awaiting_confirmation",
-            Run.lifecycle == "waiting", Run.wait_reason == "graph_confirmation",
-        )
-        .order_by(PlanExecution.created_at, PlanExecution.id)
-    )).all()
-    items.extend({
-        "id": plan.id, "type": "plan_confirmation", "status": "pending",
-        "session_id": plan.session_id, "run_id": plan.run_id, "work_item_id": None,
-        "version": plan.version, "graph_revision": plan.graph_revision,
-        "created_at": plan.created_at.isoformat(), "expires_at": None,
-        "presentation": {"title": "Confirm Plan", "summary": plan.goal[:500]},
-        "action": {"method": "POST", "href": f"/api/v1/plans/{plan.id}/confirm",
-                   "required_fields": ["expected_graph_revision"]},
-    } for plan, _ in plans)
     formations = list(await db.scalars(select(GroupFormationProposal).where(
         GroupFormationProposal.user_id == current.account.user_id,
         GroupFormationProposal.status == "awaiting_confirmation",
@@ -246,6 +227,109 @@ async def decide_approval(
         })
     if body.subject_hash != approval.subject_hash:
         raise HTTPException(status_code=409, detail={"code": "approval_subject_changed"})
+    if (
+        approval.kind == "plan_implementation"
+        and approval.subject_type == "working_plan"
+    ):
+        try:
+            session, run, work, plan, _update = await assert_current_plan_subject(
+                db, approval=approval, lock=True,
+            )
+        except PlanSubjectChanged:
+            raise HTTPException(
+                status_code=409, detail={"code": "approval_subject_changed"},
+            )
+        if run.status != "waiting_approval" or work.status != "waiting_approval":
+            raise HTTPException(
+                status_code=409, detail={"code": "approval_subject_changed"},
+            )
+        source_runner = await db.scalar(select(DurableRunner).where(
+            DurableRunner.work_item_id == work.id,
+        ).order_by(DurableRunner.execution_epoch.desc()).limit(1))
+        if source_runner is None:
+            raise HTTPException(
+                status_code=409, detail={"code": "resume_checkpoint_unavailable"},
+            )
+        approval.status = "approved" if decision == "approve" else "rejected"
+        approval.decision_reason = body.reason
+        approval.decided_by_account_id = actor.account.id
+        approval.decided_at = utcnow()
+        approval.version += 1
+        if decision == "approve":
+            session.permission_mode = "direct"
+            session.permission_revision += 1
+            session.version += 1
+            run.permission_mode = "direct"
+            run.version += 1
+        decided = await ExecutionEventWriter(db).append(
+            session_id=session.id, run_id=run.id,
+            event_type=f"approval.{approval.status}",
+            event_dedupe_key=f"approval:{approval.id}:{approval.status}",
+            actor_type=actor.principal_type, actor_id=actor.principal_id,
+            entity_type="approval", entity_id=approval.id,
+            entity_version=approval.version, visibility="user",
+            summary=(
+                f"Plan revision {plan.revision} approved for implementation"
+                if decision == "approve"
+                else f"Plan revision {plan.revision} rejected"
+            ),
+            payload={
+                "approval_id": approval.id,
+                "working_plan_id": plan.id,
+                "plan_revision": plan.revision,
+                "permission_revision": session.permission_revision,
+            },
+            correlation_id=run.id,
+        )
+        await queue_work_item_resume(
+            db, work=work, run=run, source_runner=source_runner,
+            pending_results=[{
+                "role": "user",
+                "content": (
+                    f"The user approved WorkingPlan revision {plan.revision}. Continue "
+                    "implementation in this same Session and WorkItem. Revise the plan "
+                    "when execution evidence changes."
+                    if decision == "approve"
+                    else (
+                        f"The user rejected WorkingPlan revision {plan.revision}. "
+                        f"Reason: {body.reason or 'No reason supplied'}. Continue read-only "
+                        "planning and call update_plan with a new revision before presenting again."
+                    )
+                ),
+            }],
+            reason=(
+                "plan_implementation_approved"
+                if decision == "approve" else "plan_implementation_rejected"
+            ),
+            caused_by_event_id=decided.id,
+            actor_id="plan-control",
+            principal_snapshot_updates=(
+                {
+                    "permission_revision": session.permission_revision,
+                    "mode": "plan",
+                }
+                if decision == "approve" else None
+            ),
+        )
+        response = approval_view(approval, None)
+        response["session"] = {
+            "id": session.id,
+            "permission_mode": session.permission_mode,
+            "permission_revision": session.permission_revision,
+            "interaction_mode": session.interaction_mode,
+            "interaction_revision": session.interaction_revision,
+            "version": session.version,
+        }
+        response["run"] = {
+            "id": run.id, "status": run.status,
+            "permission_mode": run.permission_mode, "version": run.version,
+        }
+        record.resource_type, record.resource_id, record.http_status = (
+            "approval", approval.id, 200,
+        )
+        record.response_snapshot = response
+        await db.commit()
+        return response
     if approval.subject_type != "tool_invocation":
         raise HTTPException(status_code=409, detail={"code": "unsupported_approval_subject"})
     invocation = await db.scalar(select(ToolInvocation).where(

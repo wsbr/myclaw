@@ -134,6 +134,10 @@ class UserSession(Base, TimestampMixin, VersionMixin):
     __table_args__ = (
         CheckConstraint("status IN ('active','closed','archived')", name="ck_user_session_status"),
         CheckConstraint("origin_type IN ('web','api','channel')", name="ck_user_session_origin"),
+        CheckConstraint(
+            "interaction_mode IN ('chat','plan')",
+            name="ck_user_session_interaction_mode",
+        ),
         UniqueConstraint("id", "user_id", name="uq_user_session_id_user"),
         Index("ix_user_session_owner_status", "user_id", "status", "updated_at"),
     )
@@ -159,6 +163,15 @@ class UserSession(Base, TimestampMixin, VersionMixin):
         String(32), default="direct", nullable=False
     )
     permission_revision: Mapped[int] = mapped_column(BigInteger, default=1, nullable=False)
+    # Group is an associated collaboration resource, not a Session mode.  This
+    # field records the user's current Chat/Plan interaction choice while
+    # permission_mode remains the independent machine authorization boundary.
+    interaction_mode: Mapped[str] = mapped_column(
+        String(16), default="chat", nullable=False
+    )
+    interaction_revision: Mapped[int] = mapped_column(
+        BigInteger, default=1, nullable=False
+    )
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
 
 

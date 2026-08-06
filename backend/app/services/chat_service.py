@@ -46,6 +46,7 @@ async def create_user_session(
         status="active", title=title, origin_type=origin_type,
         origin_api_key_id=origin_api_key_id, next_event_sequence=1,
         permission_mode="direct", permission_revision=1,
+        interaction_mode="chat", interaction_revision=1,
     )
     db.add(session)
     await db.flush()
@@ -98,6 +99,7 @@ async def enqueue_chat_message(
     idempotency_record_id: str,
     agent_version_id: str | None = None,
     execution_kind: str = "normal",
+    mode: str | None = None,
 ) -> tuple[Message, Run, WorkItem, DurableRunner]:
     content = content.strip()
     if not content:
@@ -119,13 +121,19 @@ async def enqueue_chat_message(
     elif agent_version_id is None:
         raise ValueError("draft test requires a fixed Agent version")
 
+    resolved_mode = mode or (
+        "plan" if session.permission_mode == "plan_readonly" else "chat"
+    )
+    if resolved_mode not in {"chat", "plan"}:
+        raise ValueError("session messages support only chat or plan mode")
+
     message = Message(
         id=uuid7(), session_id=session.id, user_id=user_id, scope_type="chat",
         sender_type="user", sender_user_id=user_id, recipient_type="session",
         role="user", content=content, content_format="markdown", status="committed",
     )
     run = Run(
-        id=uuid7(), session_id=session.id, user_id=user_id, mode="chat",
+        id=uuid7(), session_id=session.id, user_id=user_id, mode=resolved_mode,
         execution_kind=execution_kind, lifecycle="running", wait_reason=None,
         status="active", outcome=None, entry_agent_id=agent.id,
         permission_mode=session.permission_mode, hard_budget_snapshot={},
@@ -133,7 +141,7 @@ async def enqueue_chat_message(
     )
     work = WorkItem(
         id=uuid7(), run_id=run.id, session_id=session.id, user_id=user_id,
-        mode="chat", owner_agent_id=agent.id, agent_version_id=agent_version_id,
+        mode=resolved_mode, owner_agent_id=agent.id, agent_version_id=agent_version_id,
         goal=content, purpose="root_request", status="queued",
         resume_cursor={}, execution_epoch=1, attempt_no=1,
     )
@@ -149,7 +157,7 @@ async def enqueue_chat_message(
                 "agent_api_key" if session.origin_type == "api" else "web_session"
             ),
             "entry_agent_id": agent.id, "current_agent_id": agent.id,
-            "mode": "chat", "delegation_chain": [],
+            "mode": resolved_mode, "delegation_chain": [],
         }, assembly_snapshot={"agent_version_id": agent_version_id},
         prompt_manifest={}, input_snapshot={"message_id": message.id, "content": content},
     )
@@ -170,7 +178,7 @@ async def enqueue_chat_message(
     events = ExecutionEventWriter(db)
     message_event = await events.append(
         session_id=session.id, run_id=run.id, event_type="message.created",
-        event_dedupe_key=f"command:create_chat_run:{idempotency_record_id}:message",
+        event_dedupe_key=f"command:create_{resolved_mode}_run:{idempotency_record_id}:message",
         actor_type="user", actor_id=user_id, entity_type="message", entity_id=message.id,
         visibility="user", summary="User message created", payload={"message_id": message.id},
         correlation_id=run.id,
@@ -178,10 +186,11 @@ async def enqueue_chat_message(
     message.caused_by_event_id = message_event.id
     await events.append(
         session_id=session.id, run_id=run.id, event_type="run.created",
-        event_dedupe_key=f"command:create_chat_run:{idempotency_record_id}:run",
+        event_dedupe_key=f"command:create_{resolved_mode}_run:{idempotency_record_id}:run",
         actor_type="user", actor_id=user_id, entity_type="run", entity_id=run.id,
-        entity_version=run.version, visibility="user", summary="Chat run created",
-        payload={"mode": "chat", "execution_kind": execution_kind}, correlation_id=run.id,
+        entity_version=run.version, visibility="user",
+        summary=f"{resolved_mode.title()} run created",
+        payload={"mode": resolved_mode, "execution_kind": execution_kind}, correlation_id=run.id,
         caused_by_event_id=message_event.id,
     )
     runner_event = await events.append(

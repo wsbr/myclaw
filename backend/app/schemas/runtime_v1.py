@@ -29,6 +29,8 @@ class SessionResponse(BaseModel):
     origin_type: str
     permission_mode: str = "direct"
     permission_revision: int = 1
+    interaction_mode: str = "chat"
+    interaction_revision: int = 1
     version: int
     created_at: datetime
     updated_at: datetime
@@ -39,6 +41,36 @@ class SessionResponse(BaseModel):
 
 class MessageCreateRequest(BaseModel):
     content: str
+
+    model_config = {"extra": "forbid"}
+
+
+class EnterPlanRequest(BaseModel):
+    goal: str = Field(min_length=1, max_length=16000)
+
+    model_config = {"extra": "forbid"}
+
+
+class ContinuePlanningRequest(BaseModel):
+    instruction: str = Field(min_length=1, max_length=16000)
+    expected_revision: int = Field(ge=1)
+
+    model_config = {"extra": "forbid"}
+
+
+class PlanApprovalRequest(BaseModel):
+    expected_revision: int = Field(ge=1)
+    subject_hash: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+
+    model_config = {"extra": "forbid"}
+
+
+class AgentInvocationCreateRequest(BaseModel):
+    caller_work_item_id: str = Field(min_length=1, max_length=36)
+    target_agent_id: str = Field(min_length=1, max_length=36)
+    return_route: str = Field(pattern=r"^(caller|direct|group)$")
+    content: str = Field(min_length=1, max_length=16000)
+    operation_key: str = Field(min_length=1, max_length=191)
 
     model_config = {"extra": "forbid"}
 

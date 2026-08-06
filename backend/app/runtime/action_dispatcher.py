@@ -142,6 +142,31 @@ class ActionDispatcher:
                 ), schema_error=True,
             )
 
+        # CapabilitySnapshot is the first authorization layer.  Re-evaluate
+        # the actual semantic side-effect class at the Dispatcher boundary so
+        # a stale, forged, or incorrectly assembled snapshot still cannot turn
+        # plan_readonly into a successful mutation.
+        if (
+            runtime_context.permission_mode == "plan_readonly"
+            and definition.get("side_effect", "none") != "none"
+        ):
+            return DispatchResult(
+                call.call_id, call.name,
+                ToolResult(
+                    status="failed",
+                    summary="Plan read-only mode denied this side effect",
+                    error=ToolError(
+                        code="permission_mode_denied",
+                        message=(
+                            f"Tool '{call.name}' has side effects and cannot run "
+                            "before the current Plan revision is approved"
+                        ),
+                        category="authorization",
+                        details={"permission_mode": "plan_readonly"},
+                    ),
+                ),
+            )
+
         if definition.get("source") == "runtime":
             if db is None or not all((run_id, work_item_id, source_turn_id)):
                 return DispatchResult(
@@ -185,6 +210,7 @@ class ActionDispatcher:
                     "account_id": runtime_context.account_id,
                     "permission_revision": runtime_context.permission_revision,
                     "authentication_source": runtime_context.authentication_source,
+                    "permission_mode": runtime_context.permission_mode,
                 },
                 execution_mode=definition.get("execution_mode", "inline"), status="created",
                 arguments=call.arguments, arguments_hash=arguments_hash,
