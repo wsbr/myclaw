@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Alert, Button, Card, Input, Modal, Select, Space, Spin, Tag, message as toast } from 'antd'
 import { ArrowLeftOutlined, HistoryOutlined, SendOutlined, StopOutlined } from '@ant-design/icons'
 import { agentsApi } from '@/api/agents'
-import { GroupFormationRevision, Message, PlanNode, PlanDependency, sessionsApi, subscribeSessionEvents } from '@/api/sessions'
+import { ApprovalAction, GroupFormationRevision, Message, PlanNode, PlanDependency, ToolConfirmation, sessionsApi, subscribeSessionEvents } from '@/api/sessions'
 import { cn } from '@/lib/utils'
 import PlanPanel from './PlanPanel'
 import GroupPanel from './GroupPanel'
@@ -81,12 +81,20 @@ export default function SessionPage() {
     queryKey: ['run', latestRunId], queryFn: () => sessionsApi.getRun(latestRunId!), enabled: !!latestRunId,
     refetchInterval: query => ['running', 'waiting', 'settling'].includes(query.state.data?.lifecycle || '') ? 2000 : false,
   })
+  const { data: workingPlans = [] } = useQuery({
+    queryKey: ['working-plans', latestRunId],
+    queryFn: () => sessionsApi.getWorkingPlans(latestRunId!), enabled: !!latestRunId,
+  })
+  const activeWorkingPlan = workingPlans.find(plan => plan.status === 'active') || workingPlans[0]
   useEffect(() => { latestRunIdRef.current = latestRunId }, [latestRunId])
   const { data: requiredActions = [] } = useQuery({
     queryKey: ['required-actions'], queryFn: sessionsApi.getRequiredActions, refetchInterval: 5000,
   })
   const sessionActions = requiredActions.filter(action => action.session_id === sessionId)
-  const toolActions = sessionActions.filter(action => action.type === 'tool_confirmation')
+  const toolActions = sessionActions.filter(
+    (action): action is ApprovalAction | ToolConfirmation =>
+      ['tool', 'session_grant', 'tool_confirmation'].includes(action.type),
+  )
   const clarificationActions = sessionActions.filter(action => action.type === 'clarification')
 
   useEffect(() => {
@@ -114,6 +122,12 @@ export default function SessionPage() {
       if (event.event_type.startsWith('clarification.')) {
         queryClient.invalidateQueries({ queryKey: ['required-actions'] })
         queryClient.invalidateQueries({ queryKey: ['messages', sessionId] })
+      }
+      if (event.event_type.startsWith('approval.')) {
+        queryClient.invalidateQueries({ queryKey: ['required-actions'] })
+      }
+      if (event.event_type === 'working_plan.updated') {
+        queryClient.invalidateQueries({ queryKey: ['working-plans', event.run_id] })
       }
       if (event.event_type.startsWith('plan.')) {
         queryClient.invalidateQueries({ queryKey: ['plans', sessionId] })
@@ -285,9 +299,15 @@ export default function SessionPage() {
     },
     onError: (error: any) => toast.error(error?.response?.data?.error?.code || '取消失败'),
   })
-  const decide = useMutation({
+  const decide = useMutation<
+    ToolConfirmation | ApprovalAction,
+    unknown,
+    { action: ToolConfirmation | ApprovalAction; decision: 'approve' | 'reject' }
+  >({
     mutationFn: ({ action, decision }: { action: typeof toolActions[number]; decision: 'approve' | 'reject' }) =>
-      sessionsApi.decideToolConfirmation(action, decision),
+      action.type === 'tool_confirmation'
+        ? sessionsApi.decideToolConfirmation(action, decision)
+        : sessionsApi.decideApproval(action as ApprovalAction, decision),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['required-actions'] })
       if (latestRunId) queryClient.invalidateQueries({ queryKey: ['run', latestRunId] })
@@ -381,6 +401,18 @@ export default function SessionPage() {
                 </Button>
               </Card>
             ))}
+            {mode === 'chat' && activeWorkingPlan && (
+              <Card size="small" title={<Space><Tag color="purple">WorkingPlan</Tag><span>revision {activeWorkingPlan.revision}</span></Space>} className="mb-4 border-purple-200">
+                <p className="mb-2 text-sm text-muted-foreground">{activeWorkingPlan.summary}</p>
+                <div className="space-y-1">
+                  {activeWorkingPlan.items.map((item, index) => (
+                    <div key={`${index}-${item.text}`} className="flex gap-2 text-sm">
+                      <Tag>{item.status}</Tag><span>{item.text}</span>
+                    </div>
+                  ))}
+                </div>
+              </Card>
+            )}
             {mode === 'plan' && <PlanPanel plan={activePlan} workItems={planWorkItems} busy={planBusy}
               onSave={async value => { await savePlan.mutateAsync(value) }}
               onRevise={async value => { await revisePlan.mutateAsync(value) }}

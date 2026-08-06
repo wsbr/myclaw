@@ -30,6 +30,7 @@ export interface Run {
   mode: 'chat' | 'plan' | 'group'
   execution_kind: string
   lifecycle: 'running' | 'waiting' | 'settling' | 'completed' | 'cancelled'
+  status: 'active' | 'waiting_user' | 'waiting_approval' | 'waiting_tool' | 'waiting_agent' | 'completed' | 'cancelled' | 'failed'
   wait_reason: string | null
   outcome: 'succeeded' | 'partially_succeeded' | 'failed' | null
   version: number
@@ -101,6 +102,36 @@ export interface ToolConfirmation {
   version: number
   created_at: string
   decided_at: string | null
+}
+
+export interface ApprovalAction {
+  type: 'tool' | 'session_grant'
+  id: string
+  session_id: string
+  run_id: string
+  work_item_id: string
+  tool_invocation_id: string
+  tool_key: string
+  arguments: Record<string, unknown>
+  subject_hash: string
+  status: 'pending' | 'approved' | 'rejected' | 'cancelled'
+  presentation: { title: string; summary: string }
+  version: number
+  created_at: string
+  decided_at: string | null
+}
+
+export interface WorkingPlan {
+  id: string
+  session_id: string
+  run_id: string
+  owner_agent_id: string
+  summary: string
+  revision: number
+  status: 'active' | 'superseded' | 'closed'
+  version: number
+  items: Array<{ text: string; status: 'pending' | 'in_progress' | 'completed' }>
+  explanation: string | null
 }
 
 export interface PlanNode {
@@ -284,20 +315,20 @@ export interface Artifact {
   created_at: string
 }
 
-export type RequiredAction = ToolConfirmation | PlanConfirmationAction | ClarificationAction | GroupConfirmationAction
+export type RequiredAction = ApprovalAction | ToolConfirmation | PlanConfirmationAction | ClarificationAction | GroupConfirmationAction
 
 const idempotency = () => ({ headers: { 'Idempotency-Key': crypto.randomUUID() } })
 
 export const sessionsApi = {
   list: () => client.get<{ items: UserSession[] }>('/sessions').then(r => r.data.items),
   create: (entryAgentId: string) => client.post<UserSession>(
-    '/sessions', { entry_agent_id: entryAgentId, origin_type: 'web' }, idempotency(),
+    '/sessions', { entry_agent_id: entryAgentId }, idempotency(),
   ).then(r => r.data),
   get: (id: string) => client.get<UserSession>(`/sessions/${id}`).then(r => r.data),
   close: (id: string) => client.delete(`/sessions/${id}`, idempotency()),
   getMessages: (id: string) => client.get<{ items: Message[] }>(`/sessions/${id}/messages`).then(r => r.data.items),
   sendMessage: (id: string, content: string) => client.post<{ message: Message; run: Run; links: Record<string, string> }>(
-    `/sessions/${id}/messages`, { content, mode: 'chat' }, idempotency(),
+    `/sessions/${id}/messages`, { content }, idempotency(),
   ).then(r => r.data),
   listPlans: (id: string) => client.get<{ items: PlanExecution[] }>(`/sessions/${id}/plans`).then(r => r.data.items),
   createPlan: (id: string, goal: string, predecessorPlanId?: string) => client.post<{
@@ -379,6 +410,9 @@ export const sessionsApi = {
     },
   ).then(r => r.data),
   getRun: (id: string) => client.get<Run>(`/runs/${id}`).then(r => r.data),
+  getWorkingPlans: (id: string) => client.get<{ items: WorkingPlan[] }>(
+    `/runs/${id}/working-plans`,
+  ).then(r => r.data.items),
   getRunTimeline: (id: string, afterSequence = 0) => client.get<{
     items: ExecutionEvent[]; scanned_through_sequence: number; session_high_watermark: number; has_more: boolean
   }>(`/runs/${id}/timeline`, { params: { after_sequence: afterSequence } }).then(r => r.data),
@@ -392,6 +426,12 @@ export const sessionsApi = {
   getRequiredActions: () => client.get<{ items: RequiredAction[] }>('/required-actions').then(r => r.data.items),
   decideToolConfirmation: (action: ToolConfirmation, decision: 'approve' | 'reject', reason?: string) =>
     client.post<ToolConfirmation>(`/tool-confirmations/${action.id}/${decision}`, { arguments_hash: action.arguments_hash, reason }, {
+      headers: { 'Idempotency-Key': crypto.randomUUID(), 'If-Match': `"${action.version}"` },
+    }).then(r => r.data),
+  decideApproval: (action: ApprovalAction, decision: 'approve' | 'reject', reason?: string) =>
+    client.post<ApprovalAction>(`/approvals/${action.id}/${decision}`, {
+      subject_hash: action.subject_hash, reason,
+    }, {
       headers: { 'Idempotency-Key': crypto.randomUUID(), 'If-Match': `"${action.version}"` },
     }).then(r => r.data),
   answerClarification: (action: ClarificationAction, answer: string) => client.post<ClarificationAction>(
@@ -430,6 +470,7 @@ export function subscribeSessionEvents(
   const seenEventIds = new Set<string>()
   const seenEventOrder: string[] = []
   const retryDelays = [1000, 2000, 5000, 10000, 30000]
+  const cursorKey = `myclaw:session-event-cursor:${sessionId}`
 
   const remember = (event: ExecutionEvent) => {
     if (seenEventIds.has(event.event_id)) return false
@@ -451,7 +492,8 @@ export function subscribeSessionEvents(
   })
 
   ;(async () => {
-    let cursor = afterSequence
+    const saved = Number(localStorage.getItem(cursorKey) || '0')
+    let cursor = Math.max(afterSequence, Number.isFinite(saved) ? saved : 0)
     let retry = 0
     while (!controller.signal.aborted) {
       try {
@@ -466,11 +508,13 @@ export function subscribeSessionEvents(
               if (remember(event)) onEvent(event)
             }
             cursor = Math.max(cursor, page.scanned_through_sequence)
+            localStorage.setItem(cursorKey, String(cursor))
             onEvent({ event_type: 'cursor', sequence: cursor })
             hasMore = page.has_more
           } catch (error: any) {
             if (error?.response?.status !== 410) throw error
             cursor = 0
+            localStorage.removeItem(cursorKey)
             seenEventIds.clear()
             seenEventOrder.length = 0
             onCursorReset?.()
@@ -488,6 +532,7 @@ export function subscribeSessionEvents(
         })
         if (response.status === 410) {
           cursor = 0
+          localStorage.removeItem(cursorKey)
           seenEventIds.clear()
           seenEventOrder.length = 0
           onCursorReset?.()
@@ -515,7 +560,10 @@ export function subscribeSessionEvents(
               if (line.startsWith('id: ')) id = line.slice(4)
             }
             if (!eventType) continue
-            if (id) cursor = Math.max(cursor, Number(id))
+            if (id) {
+              cursor = Math.max(cursor, Number(id))
+              localStorage.setItem(cursorKey, String(cursor))
+            }
             if (eventType === 'cursor' && id) onEvent({ event_type: 'cursor', sequence: cursor })
             else if (data) {
               const event = JSON.parse(data) as ExecutionEvent | LiveDeltaEvent
