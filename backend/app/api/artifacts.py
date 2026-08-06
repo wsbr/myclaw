@@ -90,7 +90,7 @@ async def list_session_artifacts(
     db: AsyncSession = Depends(get_db), actor: SessionActor = Depends(get_session_actor),
 ):
     await _owned_session(db, session_id, actor)
-    if status not in (None, "published", "unavailable", "deleted"):
+    if status not in (None, "publishing", "published", "unavailable", "deleted"):
         raise HTTPException(status_code=422, detail={"code": "invalid_artifact_status"})
     statement = select(Artifact).where(Artifact.session_id == session_id)
     if status:

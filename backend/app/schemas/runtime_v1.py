@@ -4,9 +4,8 @@ from pydantic import BaseModel, Field
 
 class SessionCreateRequest(BaseModel):
     entry_agent_id: str
-    origin_type: str = "web"
-    title: str | None = None
-    user_id: str | None = Field(default=None, min_length=1, max_length=191)
+
+    model_config = {"extra": "forbid"}
 
 
 class SessionSandboxResponse(BaseModel):
@@ -28,7 +27,7 @@ class SessionResponse(BaseModel):
     status: str
     title: str | None
     origin_type: str
-    permission_mode: str = "standard"
+    permission_mode: str = "direct"
     permission_revision: int = 1
     version: int
     created_at: datetime
@@ -40,7 +39,8 @@ class SessionResponse(BaseModel):
 
 class MessageCreateRequest(BaseModel):
     content: str
-    mode: str = "chat"
+
+    model_config = {"extra": "forbid"}
 
 
 class MessageResponse(BaseModel):
@@ -68,7 +68,7 @@ class RunResponse(BaseModel):
     outcome: str | None
     entry_agent_id: str
     root_work_item_id: str | None = None
-    permission_mode: str = "standard"
+    permission_mode: str = "direct"
     result_summary: str | None
     error_code: str | None
     cancellation_requested_at: datetime | None
@@ -129,6 +129,11 @@ class RunnerResponse(BaseModel):
 class ToolConfirmationDecisionRequest(BaseModel):
     arguments_hash: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
     reason: str | None = Field(default=None, max_length=1000)
+
+
+class ApprovalDecisionRequest(BaseModel):
+    subject_hash: str = Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")
+    reason: str | None = Field(default=None, max_length=2000)
 
 
 class ToolConfirmationResponse(BaseModel):

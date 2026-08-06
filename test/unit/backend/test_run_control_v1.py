@@ -15,7 +15,8 @@ from app.models.foundation import (
 )
 from app.models.registry import PlatformTool
 from app.models.runtime_v1 import (
-    AgentInvocation, Clarification, DurableRunner, Message, Run, ToolAttempt, ToolConfirmation, ToolInvocation, WorkItem,
+    AgentInvocation, Approval, Clarification, DurableRunner, Message, Run,
+    ToolAttempt, ToolConfirmation, ToolInvocation, WorkItem, WorkingPlan,
 )
 from app.schemas.runtime_v1 import RunCancelRequest
 from app.services.chat_service import create_user_session, enqueue_chat_message
@@ -34,6 +35,7 @@ async def test_cancel_run_fences_runner_and_replays_response():
         ToolAttempt.__table__, ToolConfirmation.__table__, OutboxCommand.__table__,
         AgentInvocation.__table__,
         Clarification.__table__,
+        Approval.__table__, WorkingPlan.__table__,
         IdempotencyRecord.__table__,
     ]
     async with engine.begin() as connection:

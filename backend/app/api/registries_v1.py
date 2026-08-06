@@ -296,7 +296,9 @@ async def patch_platform_tool(
     if tool.config_version != revision(if_match):
         raise HTTPException(status_code=409, detail={"code": "version_conflict", "current_version": tool.config_version})
     changes = body.model_dump(exclude_unset=True)
-    if changes.get("confirmation_policy") not in (None, "never", "always"):
+    if changes.get("confirmation_policy") not in (
+        None, "never", "always", "per_call", "session_grant",
+    ):
         raise HTTPException(status_code=422, detail={"code": "invalid_confirmation_policy"})
     workspace_access = (changes.get("platform_config") or {}).get("workspace_access")
     if workspace_access not in (None, "none", "read", "write"):

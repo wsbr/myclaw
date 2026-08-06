@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.api.clarifications import answer_clarification
 from app.database import Base
-from app.deps import CurrentAccount
+from app.deps import SessionActor
 from app.models.agent_v1 import AgentAssemblyVersion, AgentBlueprint
 from app.models.common import utcnow, uuid7
 from app.models.foundation import (
@@ -51,7 +51,8 @@ async def test_answer_clarification_resumes_same_work_item_and_replays():
                 content_hash="a" * 64,
             ),
             UserSession(
-                id=session_id, user_id="u1", entry_agent_id=agent_id, status="active",
+                id=session_id, user_id="u1", account_id=account_id,
+                entry_agent_id=agent_id, status="active",
                 origin_type="web", next_event_sequence=1,
             ),
             Run(
@@ -83,11 +84,11 @@ async def test_answer_clarification_resumes_same_work_item_and_replays():
             ),
         ])
 
-    current = CurrentAccount(account=account, roles=frozenset({"user"}))
+    actor = SessionActor(account=account, roles=frozenset({"user"}))
     async with factory() as db:
         first = await answer_clarification(
             clarification_id, ClarificationAnswerRequest(answer="Taiwan"),
-            if_match='"1"', idempotency_key="answer-1", db=db, current=current,
+            if_match='"1"', idempotency_key="answer-1", db=db, actor=actor,
         )
     assert first.status == "answered"
     assert first.answer_text == "Taiwan"
@@ -95,7 +96,7 @@ async def test_answer_clarification_resumes_same_work_item_and_replays():
     async with factory() as db:
         replay = await answer_clarification(
             clarification_id, ClarificationAnswerRequest(answer="Taiwan"),
-            if_match='"1"', idempotency_key="answer-1", db=db, current=current,
+            if_match='"1"', idempotency_key="answer-1", db=db, actor=actor,
         )
         work = await db.get(WorkItem, work_id)
         run = await db.get(Run, run_id)
@@ -104,13 +105,13 @@ async def test_answer_clarification_resumes_same_work_item_and_replays():
     assert replay.version == first.version
     assert work.status == "queued" and work.execution_epoch == 2
     assert run.lifecycle == "running" and run.wait_reason is None
-    assert command.topic == "runtime.control" and command.action == "resume_work_item"
+    assert command.topic == "runtime.runner" and command.action == "execute"
 
     async with factory() as db:
         with pytest.raises(HTTPException) as error:
             await answer_clarification(
                 clarification_id, ClarificationAnswerRequest(answer="Japan"),
-                if_match='"2"', idempotency_key="answer-2", db=db, current=current,
+                if_match='"2"', idempotency_key="answer-2", db=db, actor=actor,
             )
     assert error.value.status_code == 409
     assert error.value.detail["code"] == "action_already_resolved"

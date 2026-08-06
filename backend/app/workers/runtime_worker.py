@@ -23,13 +23,16 @@ from app.database import AsyncSessionLocal
 from app.models.common import utcnow, uuid7
 from app.models.foundation import OutboxCommand, UserSession
 from app.models.runtime_v1 import (
+    Approval,
     CapabilitySnapshot,
+    Clarification,
     DurableRunner,
     Message,
     Run,
     RunnerCheckpoint,
     ToolInvocation,
     WorkItem,
+    WorkingPlan,
     Workspace,
 )
 from app.persistence.reliable_writes import ExecutionEventWriter, OutboxWriter
@@ -43,6 +46,7 @@ from app.runtime import (
     SnapshotResolver,
 )
 from app.services.provider_conformance import resolve_credential
+from app.services.working_plan_service import current_working_plan, working_plan_view
 
 
 @dataclass(frozen=True)
@@ -240,10 +244,20 @@ class RuntimeWorker:
                         Message.status == "committed",
                     ).order_by(Message.created_at, Message.id)
                 ))
+                working_plan, plan_update = await current_working_plan(
+                    db, run_id=run.id, owner_agent_id=runner.agent_id,
+                )
+                working_plan_snapshot = (
+                    working_plan_view(working_plan, plan_update)
+                    if working_plan is not None else None
+                )
                 context = ContextAssembler().assemble(
                     platform_rules=(
                         "Use only the provided native Tool definitions. Tool results are authoritative. "
-                        "A normal assistant message may finish the current turn."
+                        "A normal assistant message may finish the current turn. Use ask_user when "
+                        "missing information prevents safe progress. Use update_plan only when a "
+                        "multi-step task benefits from a visible working plan; simple tasks must not "
+                        "be planned merely for ceremony. WorkingPlan never creates or schedules work."
                     ),
                     agent_instructions=assembly.instructions,
                     current_input=work.goal,
@@ -261,6 +275,7 @@ class RuntimeWorker:
                         "checksum": item.checksum,
                         "content": json.dumps(item.manifest or {}, ensure_ascii=False),
                     } for item in resolved.skill_versions],
+                    working_plan=working_plan_snapshot,
                     pending_results=list((runner.input_snapshot or {}).get("pending_results") or []),
                     token_budget=max(
                         1024, int((model_version.capabilities or {}).get("context_window", 24_000)) - 2048,
@@ -269,6 +284,9 @@ class RuntimeWorker:
                 runner.prompt_manifest = {
                     "sections": list(context.manifest), "estimated_tokens": context.estimated_tokens,
                     "compaction": context.compaction,
+                    "working_plan_revision": (
+                        working_plan.revision if working_plan is not None else None
+                    ),
                 }
 
             provider = ModelHub.get(
@@ -279,7 +297,14 @@ class RuntimeWorker:
                 session_id=fence.session_id, runner_id=fence.runner_id,
                 task_id=fence.work_item_id,
                 user_id=str(runner.principal_snapshot.get("user_id") or "runtime"),
+                account_id=runner.principal_snapshot.get("account_id"),
                 agent_id=runner.agent_id, workspace_id=workspace_id,
+                permission_revision=int(
+                    runner.principal_snapshot.get("permission_revision") or 1
+                ),
+                authentication_source=str(
+                    runner.principal_snapshot.get("authentication_source") or "web_session"
+                ),
             )
             dispatcher = ActionDispatcher(tool_definitions)
             async with AsyncSessionLocal() as db:
@@ -305,11 +330,12 @@ class RuntimeWorker:
             if result.status == "completed":
                 await self._settle_completed(fence, result.final_message or "", context)
             else:
-                wait_reason = "approval" if any(
-                    dispatch.result.data and dispatch.result.data.get("status") == "waiting_confirmation"
-                    for dispatch in result.dispatches
-                ) else "tool"
-                await self._settle_waiting(fence, wait_reason, context)
+                reasons = {dispatch.wait_reason for dispatch in result.dispatches if dispatch.durable_wait}
+                wait_reason = (
+                    "clarification" if "clarification" in reasons
+                    else "approval" if "approval" in reasons else "tool"
+                )
+                await self._settle_waiting(fence, wait_reason, context, result)
         except Exception as error:
             await self._settle_failed(fence, error)
         finally:
@@ -338,6 +364,23 @@ class RuntimeWorker:
             run = await db.scalar(select(Run).where(Run.id == fence.run_id).with_for_update())
             if work is None or run is None:
                 raise RunnerFenced("WorkItem fencing rejected settlement")
+            pending_tool = await db.scalar(select(ToolInvocation.id).where(
+                ToolInvocation.work_item_id == work.id,
+                ToolInvocation.status.in_((
+                    "created", "waiting_confirmation", "waiting_resource",
+                    "queued", "running", "cancel_requested",
+                )),
+            ).limit(1))
+            pending_clarification = await db.scalar(select(Clarification.id).where(
+                Clarification.work_item_id == work.id,
+                Clarification.status == "open",
+            ).limit(1))
+            pending_approval = await db.scalar(select(Approval.id).where(
+                Approval.work_item_id == work.id,
+                Approval.status == "pending",
+            ).limit(1))
+            if pending_tool or pending_clarification or pending_approval:
+                raise RunnerFenced("Run cannot complete while durable actions are pending")
             message = Message(
                 id=uuid7(), session_id=fence.session_id, user_id=work.user_id,
                 scope_type="chat", sender_type="agent", sender_agent_id=runner.agent_id,
@@ -363,6 +406,12 @@ class RuntimeWorker:
             run.completed_at = runner.ended_at
             run.finished_at = runner.ended_at
             run.version += 1
+            plans = list(await db.scalars(select(WorkingPlan).where(
+                WorkingPlan.run_id == run.id, WorkingPlan.status == "active",
+            ).with_for_update()))
+            for plan in plans:
+                plan.status = "closed"
+                plan.version += 1
             previous_checkpoint = await db.scalar(select(
                 func.max(RunnerCheckpoint.sequence_no)
             ).where(RunnerCheckpoint.runner_id == runner.id)) or 0
@@ -395,11 +444,12 @@ class RuntimeWorker:
                 actor_type="service", actor_id=self.worker_id,
                 entity_type="run", entity_id=run.id, entity_version=run.version,
                 visibility="user", summary="Run completed",
-                payload={"root_work_item_id": work.id}, correlation_id=run.id,
+                payload={"root_work_item_id": work.id, "outcome": "succeeded"},
+                correlation_id=run.id,
                 caused_by_event_id=event.id,
             )
 
-    async def _settle_waiting(self, fence: RunnerFence, reason: str, context) -> None:
+    async def _settle_waiting(self, fence: RunnerFence, reason: str, context, result) -> None:
         async with AsyncSessionLocal.begin() as db:
             runner = await self._load_fenced_runner(db, fence)
             work = await db.scalar(select(WorkItem).where(
@@ -414,18 +464,35 @@ class RuntimeWorker:
             runner.ended_at = utcnow()
             runner.lease_expires_at = None
             runner.version += 1
-            work.status = "waiting_user" if reason == "approval" else "waiting_tool"
-            work.wait_reason = reason
+            work.status = {
+                "clarification": "waiting_user",
+                "approval": "waiting_approval",
+                "tool": "waiting_tool",
+            }[reason]
+            work.wait_reason = {
+                "clarification": "waiting_user",
+                "approval": "waiting_approval",
+                "tool": "waiting_tool",
+            }[reason]
             work.active_runner_id = None
             work.version += 1
-            run.status = "waiting_approval" if reason == "approval" else "waiting_tool"
+            run.status = {
+                "clarification": "waiting_user",
+                "approval": "waiting_approval",
+                "tool": "waiting_tool",
+            }[reason]
             run.lifecycle = "waiting"
-            run.wait_reason = "confirmation" if reason == "approval" else "tool"
+            run.wait_reason = run.status
             run.version += 1
             pending = list(await db.scalars(select(ToolInvocation.id).where(
                 ToolInvocation.work_item_id == work.id,
                 ToolInvocation.status.in_(("waiting_confirmation", "queued", "running")),
             )))
+            continuation = []
+            for message in reversed(result.messages):
+                if message.get("role") == "assistant" and message.get("tool_calls"):
+                    continuation = [dict(message)]
+                    break
             previous_checkpoint = await db.scalar(select(
                 func.max(RunnerCheckpoint.sequence_no)
             ).where(RunnerCheckpoint.runner_id == runner.id)) or 0
@@ -433,7 +500,9 @@ class RuntimeWorker:
                 id=uuid7(), runner_id=runner.id, work_item_id=work.id,
                 sequence_no=int(previous_checkpoint) + 1,
                 checkpoint_type="durable_wait",
-                state_snapshot={"wait_reason": reason},
+                state_snapshot={
+                    "wait_reason": reason, "pending_results": continuation,
+                },
                 execution_epoch=fence.execution_epoch,
                 capability_snapshot_id=runner.capability_snapshot_id,
                 context_manifest={"sections": list(context.manifest)},
@@ -441,6 +510,41 @@ class RuntimeWorker:
                 pending_refs={"tool_invocation_ids": pending},
                 last_completed_step="durable_wait_committed", safe_to_resume=True,
             ))
+            waiting_event = await ExecutionEventWriter(db).append(
+                session_id=run.session_id, run_id=run.id,
+                event_type="run.waiting",
+                event_dedupe_key=f"run:{run.id}:waiting:epoch:{fence.execution_epoch}",
+                actor_type="service", actor_id=self.worker_id,
+                entity_type="run", entity_id=run.id, entity_version=run.version,
+                visibility="user", summary=f"Run is {run.status}",
+                payload={
+                    "status": run.status, "wait_reason": run.wait_reason,
+                    "work_item_id": work.id, "tool_invocation_ids": pending,
+                }, correlation_id=run.id,
+            )
+            queued_invocations = list(await db.scalars(select(ToolInvocation).where(
+                ToolInvocation.work_item_id == work.id,
+                ToolInvocation.status == "queued",
+            ).with_for_update()))
+            for invocation in queued_invocations:
+                queued = await ExecutionEventWriter(db).append(
+                    session_id=run.session_id, run_id=run.id,
+                    event_type="tool_invocation.queued",
+                    event_dedupe_key=f"tool_invocation:{invocation.id}:queued",
+                    actor_type="service", actor_id=self.worker_id,
+                    entity_type="tool_invocation", entity_id=invocation.id,
+                    entity_version=invocation.version, visibility="user",
+                    summary=f"Tool queued: {invocation.tool_key}",
+                    payload={"tool_key": invocation.tool_key},
+                    correlation_id=run.id, caused_by_event_id=waiting_event.id,
+                )
+                await OutboxWriter(db).enqueue(
+                    topic="runtime.sandbox", action="execute_tool",
+                    aggregate_type="tool_invocation", aggregate_id=invocation.id,
+                    partition_key=run.session_id,
+                    dedupe_key=f"event:{queued.id}:execute_tool",
+                    payload_ref={"tool_invocation_id": invocation.id},
+                )
 
     async def _settle_failed(self, fence: RunnerFence, error: Exception) -> None:
         if isinstance(error, RunnerFenced):
@@ -515,6 +619,56 @@ class RuntimeWorker:
             if work is None or run is None or work.active_runner_id != runner.id:
                 return True
             work.active_runner_id = None
+            pending_clarification = await db.scalar(select(Clarification).where(
+                Clarification.work_item_id == work.id,
+                Clarification.status == "open",
+            ).limit(1))
+            pending_approval = await db.scalar(select(Approval).where(
+                Approval.work_item_id == work.id,
+                Approval.status == "pending",
+            ).limit(1))
+            pending_tools = list(await db.scalars(select(ToolInvocation).where(
+                ToolInvocation.work_item_id == work.id,
+                ToolInvocation.status.in_((
+                    "waiting_confirmation", "waiting_resource", "queued", "running",
+                )),
+            ).with_for_update()))
+            if pending_clarification or pending_approval or pending_tools:
+                if pending_clarification:
+                    status = "waiting_user"
+                elif pending_approval:
+                    status = "waiting_approval"
+                else:
+                    status = "waiting_tool"
+                work.status = status
+                work.wait_reason = status
+                work.version += 1
+                run.status = status
+                run.lifecycle = "waiting"
+                run.wait_reason = status
+                run.version += 1
+                waiting = await ExecutionEventWriter(db).append(
+                    session_id=run.session_id, run_id=run.id,
+                    event_type="run.waiting",
+                    event_dedupe_key=f"run:{run.id}:waiting:recovery:{runner.id}",
+                    actor_type="service", actor_id=self.worker_id,
+                    entity_type="run", entity_id=run.id,
+                    entity_version=run.version, visibility="user",
+                    summary=f"Recovered durable wait: {status}",
+                    payload={"work_item_id": work.id, "status": status},
+                    correlation_id=run.id,
+                )
+                for invocation in pending_tools:
+                    if invocation.status not in {"queued", "waiting_resource"}:
+                        continue
+                    await OutboxWriter(db).enqueue(
+                        topic="runtime.sandbox", action="execute_tool",
+                        aggregate_type="tool_invocation", aggregate_id=invocation.id,
+                        partition_key=run.session_id,
+                        dedupe_key=f"event:{waiting.id}:tool:{invocation.id}",
+                        payload_ref={"tool_invocation_id": invocation.id},
+                    )
+                return True
             if checkpoint is None or run.status in {"completed", "cancelled", "failed"}:
                 work.status = "failed"
                 work.error_code = "runner_lost_without_safe_checkpoint"

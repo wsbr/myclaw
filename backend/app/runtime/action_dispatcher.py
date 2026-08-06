@@ -8,12 +8,15 @@ import json
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.tool_registry.base import RuntimeContext, ToolError, ToolResult
 from app.core.tool_registry.registry import ToolRegistry
-from app.models.common import uuid7
-from app.models.runtime_v1 import CapabilitySnapshot, ToolConfirmation, ToolInvocation
+from app.models.common import utcnow, uuid7
+from app.models.runtime_v1 import Approval, CapabilitySnapshot, SessionGrant, ToolInvocation
+from app.persistence.reliable_writes import ExecutionEventWriter
+from app.runtime.coordination_tools import dispatch_coordination_tool
 from app.runtime.protocol import ToolCallItem
 
 
@@ -25,6 +28,7 @@ class DispatchResult:
     invocation_id: str | None = None
     durable_wait: bool = False
     schema_error: bool = False
+    wait_reason: str | None = None
 
     def provider_message(self) -> dict[str, Any]:
         return {
@@ -138,6 +142,27 @@ class ActionDispatcher:
                 ), schema_error=True,
             )
 
+        if definition.get("source") == "runtime":
+            if db is None or not all((run_id, work_item_id, source_turn_id)):
+                return DispatchResult(
+                    call.call_id, call.name,
+                    ToolResult(
+                        status="failed", summary="Durable Runtime context is required",
+                        error_code="runtime_context_required",
+                        error="Durable Runtime context is required",
+                        error_category="permanent",
+                    ),
+                )
+            result, durable_wait, wait_reason = await dispatch_coordination_tool(
+                call.name, call.arguments, context=runtime_context, db=db,
+                run_id=run_id, work_item_id=work_item_id,
+                source_turn_id=source_turn_id, provider_call_id=call.call_id,
+            )
+            return DispatchResult(
+                call.call_id, call.name, result,
+                durable_wait=durable_wait, wait_reason=wait_reason,
+            )
+
         invocation = None
         if db is not None and run_id and work_item_id and source_turn_id:
             encoded = json.dumps(call.arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -155,36 +180,115 @@ class ActionDispatcher:
                     else capability_snapshot.get("id")
                 ),
                 tool_registration_hash=definition.get("registration_hash"),
-                authorization_snapshot={"effective_tool_keys": list(effective)},
-                execution_mode=definition.get("execution_mode", "inline"), status="running",
+                authorization_snapshot={
+                    "effective_tool_keys": list(effective),
+                    "account_id": runtime_context.account_id,
+                    "permission_revision": runtime_context.permission_revision,
+                    "authentication_source": runtime_context.authentication_source,
+                },
+                execution_mode=definition.get("execution_mode", "inline"), status="created",
                 arguments=call.arguments, arguments_hash=arguments_hash,
                 business_idempotency_key=operation_key,
-                principal_hash=hashlib.sha256(
-                    json.dumps(runtime_context.model_dump(mode="json"), sort_keys=True).encode()
-                ).hexdigest(), attempt_count=1,
+                principal_hash=hashlib.sha256(json.dumps({
+                    "session_id": runtime_context.session_id,
+                    "account_id": runtime_context.account_id,
+                    "user_id": runtime_context.user_id,
+                    "agent_id": runtime_context.agent_id,
+                    "permission_revision": runtime_context.permission_revision,
+                }, sort_keys=True).encode()).hexdigest(), attempt_count=0,
             )
             db.add(invocation)
             await db.flush()
+            await ExecutionEventWriter(db).append(
+                session_id=runtime_context.session_id, run_id=run_id,
+                event_type="tool_invocation.created",
+                event_dedupe_key=f"tool_invocation:{invocation.id}:created",
+                actor_type="agent", actor_id=runtime_context.agent_id,
+                entity_type="tool_invocation", entity_id=invocation.id,
+                entity_version=invocation.version, visibility="user",
+                summary=f"Tool requested: {call.name}",
+                payload={"tool_key": call.name, "status": invocation.status},
+                correlation_id=run_id,
+            )
         confirmation_policy = definition.get("confirmation_policy", "never")
-        if confirmation_policy in {"always", "per_call", "session_grant"}:
+        if confirmation_policy == "always":
+            confirmation_policy = "per_call"
+        if confirmation_policy == "session_grant" and invocation is not None:
+            grants = list(await db.scalars(select(SessionGrant).where(
+                SessionGrant.session_id == runtime_context.session_id,
+                SessionGrant.target_account_id == runtime_context.account_id,
+                SessionGrant.agent_id == runtime_context.agent_id,
+                SessionGrant.tool_key == call.name,
+                SessionGrant.status == "active",
+                SessionGrant.expires_at > utcnow(),
+            ).order_by(SessionGrant.expires_at.desc())))
+            grant = next((item for item in grants if int(
+                (item.scope or {}).get("permission_revision", -1)
+            ) == runtime_context.permission_revision), None)
+            if grant is not None:
+                invocation.authorization_snapshot = {
+                    **dict(invocation.authorization_snapshot or {}),
+                    "session_grant_id": grant.id,
+                }
+                confirmation_policy = "never"
+        if confirmation_policy in {"per_call", "session_grant"}:
             if invocation is not None:
                 invocation.status = "waiting_confirmation"
-                db.add(ToolConfirmation(
-                    id=uuid7(), tool_invocation_id=invocation.id,
-                    user_id=runtime_context.user_id, tool_key=call.name,
-                    arguments_hash=invocation.arguments_hash,
-                    principal_hash=invocation.principal_hash, status="pending",
-                    policy_version=int(definition.get("confirmation_policy_version", 1)),
-                ))
+                subject = {
+                    "tool_invocation_id": invocation.id,
+                    "tool_key": call.name,
+                    "arguments_hash": invocation.arguments_hash,
+                    "principal_hash": invocation.principal_hash,
+                    "tool_registration_hash": invocation.tool_registration_hash,
+                    "permission_revision": runtime_context.permission_revision,
+                }
+                subject_hash = hashlib.sha256(json.dumps(
+                    subject, sort_keys=True, separators=(",", ":")
+                ).encode()).hexdigest()
+                approval = Approval(
+                    id=uuid7(), session_id=runtime_context.session_id,
+                    run_id=run_id, work_item_id=work_item_id,
+                    requested_by_agent_id=runtime_context.agent_id,
+                    kind="session_grant" if confirmation_policy == "session_grant" else "tool",
+                    subject_type="tool_invocation", subject_id=invocation.id,
+                    subject_version=invocation.version,
+                    target_account_id=runtime_context.account_id,
+                    subject_hash=subject_hash, request_hash=subject_hash,
+                    idempotency_key=operation_key,
+                    presentation={
+                        "title": f"Approve {call.name}",
+                        "summary": "Approve this exact Tool call"
+                        if confirmation_policy == "per_call"
+                        else "Approve this call and a limited Session grant",
+                        "tool_key": call.name, "arguments": call.arguments,
+                    },
+                    status="pending",
+                )
+                db.add(approval)
                 await db.flush()
+                await ExecutionEventWriter(db).append(
+                    session_id=runtime_context.session_id, run_id=run_id,
+                    event_type="approval.requested",
+                    event_dedupe_key=f"approval:{approval.id}:requested",
+                    actor_type="agent", actor_id=runtime_context.agent_id,
+                    entity_type="approval", entity_id=approval.id,
+                    entity_version=approval.version, visibility="user",
+                    summary=f"Approval required for {call.name}",
+                    payload={
+                        "approval_id": approval.id, "type": approval.kind,
+                        "work_item_id": work_item_id, "subject_hash": subject_hash,
+                    }, correlation_id=run_id,
+                )
             return DispatchResult(
                 call.call_id, call.name,
                 ToolResult(status="succeeded", summary="Tool is waiting for approval", data={
                     "invocation_id": invocation.id if invocation else None,
-                    "status": "waiting_confirmation",
+                    "approval_id": approval.id if invocation else None,
+                    "status": "waiting_approval",
                 }),
                 invocation_id=invocation.id if invocation else None,
                 durable_wait=True,
+                wait_reason="approval",
             )
         if definition.get("execution_mode") == "durable_async":
             if invocation is not None:
@@ -196,13 +300,17 @@ class ActionDispatcher:
                 }),
                 invocation_id=invocation.id if invocation else None,
                 durable_wait=True,
+                wait_reason="tool",
             )
+        if invocation is not None:
+            invocation.status = "running"
+            invocation.attempt_count = 1
         result = self.executor(call.name, call.arguments, runtime_context, db)
         if inspect.isawaitable(result):
             result = await result
         if invocation is not None:
             invocation.status = result.status
-            invocation.result_data = result.model_dump(mode="json") if result.success else None
+            invocation.result_data = result.model_dump(mode="json")
             if result.error:
                 invocation.error_code = result.error.code
                 invocation.error_detail = result.error.message

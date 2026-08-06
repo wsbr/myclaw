@@ -1,21 +1,34 @@
 from __future__ import annotations
 
+import hashlib
+import json
+
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.runs import _expected_version, _idempotency
 from app.database import get_db
-from app.deps import CurrentAccount, get_current_account
+from app.deps import CurrentAccount, SessionActor, get_current_account, get_session_actor
 from app.models.common import utcnow, uuid7
 from app.models.foundation import UserSession
-from app.models.runtime_v1 import Clarification, DurableRunner, Run, ToolConfirmation, ToolInvocation, WorkItem
+from app.models.runtime_v1 import (
+    Approval, Clarification, DurableRunner, Run, SessionGrant,
+    ToolConfirmation, ToolInvocation, WorkItem,
+)
 from app.models.plan_v1 import PlanExecution
 from app.models.group_v1 import GroupFormationProposal
 from app.persistence.reliable_writes import ExecutionEventWriter, OutboxWriter
 from app.persistence.runtime_graph import persist_replacement_runner
-from app.schemas.runtime_v1 import ToolConfirmationDecisionRequest, ToolConfirmationResponse
+from app.schemas.runtime_v1 import (
+    ApprovalDecisionRequest, ToolConfirmationDecisionRequest, ToolConfirmationResponse,
+)
 from app.services.cursor_service import decode_cursor, encode_cursor
+from app.api.sessions import _idempotency as _session_idempotency, _owned_session
+from app.services.runtime_resume_service import (
+    has_pending_actions, queue_work_item_resume, tool_continuation,
+)
+from datetime import timedelta
 
 router = APIRouter(tags=["required-actions"])
 
@@ -31,6 +44,26 @@ def view(confirmation: ToolConfirmation, invocation: ToolInvocation) -> ToolConf
     )
 
 
+def approval_view(approval: Approval, invocation: ToolInvocation | None) -> dict:
+    return {
+        "id": approval.id, "type": approval.kind, "status": approval.status,
+        "session_id": approval.session_id, "run_id": approval.run_id,
+        "work_item_id": approval.work_item_id, "version": approval.version,
+        "subject_hash": approval.subject_hash,
+        "presentation": approval.presentation,
+        "action": {
+            "method": "POST",
+            "href": f"/api/v1/approvals/{approval.id}/approve",
+            "reject_href": f"/api/v1/approvals/{approval.id}/reject",
+        },
+        "tool_invocation_id": invocation.id if invocation else None,
+        "tool_key": invocation.tool_key if invocation else None,
+        "arguments": invocation.arguments if invocation else None,
+        "created_at": approval.created_at.isoformat(),
+        "decided_at": approval.decided_at.isoformat() if approval.decided_at else None,
+    }
+
+
 @router.get("/required-actions", response_model=dict)
 @router.get("/sessions/{session_id}/required-actions", response_model=dict)
 async def list_required_actions(
@@ -38,13 +71,18 @@ async def list_required_actions(
     action_type: str | None = Query(default=None, alias="type"),
     limit: int = 50, cursor: str | None = None,
     db: AsyncSession = Depends(get_db),
-    current: CurrentAccount = Depends(get_current_account),
+    actor: SessionActor = Depends(get_session_actor),
 ):
+    if actor.account is None:
+        raise HTTPException(status_code=403, detail={"code": "identity_mapping_required"})
+    current = CurrentAccount(account=actor.account, roles=actor.roles)
     if session_id is not None:
-        session = await db.get(UserSession, session_id)
-        if session is None or session.user_id != current.account.user_id:
-            raise HTTPException(status_code=404, detail="Session not found")
-    allowed_types = {"clarification", "tool_confirmation", "plan_confirmation", "group_confirmation"}
+        await _owned_session(db, session_id, actor)
+    allowed_types = {
+        "clarification", "tool", "session_grant", "membership",
+        "plan_implementation", "reporter_selection",
+        "tool_confirmation", "plan_confirmation", "group_confirmation",
+    }
     if action_type is not None and action_type not in allowed_types:
         raise HTTPException(status_code=422, detail={"code": "invalid_required_action_type"})
     if not 1 <= limit <= 100:
@@ -73,6 +111,31 @@ async def list_required_actions(
         "question": item.question, "asked_by_agent_id": item.asked_by_agent_id,
         "group_session_id": item.group_session_id, "group_node_id": item.group_node_id,
     } for item in clarifications)
+    approvals = list(await db.scalars(select(Approval).where(
+        Approval.target_account_id == current.account.id,
+        Approval.status == status,
+    ).order_by(Approval.created_at, Approval.id)))
+    for approval in approvals:
+        invocation = (
+            await db.get(ToolInvocation, approval.subject_id)
+            if approval.subject_type == "tool_invocation" else None
+        )
+        items.append({
+            "id": approval.id, "type": approval.kind,
+            "status": approval.status, "session_id": approval.session_id,
+            "run_id": approval.run_id, "work_item_id": approval.work_item_id,
+            "version": approval.version, "subject_hash": approval.subject_hash,
+            "created_at": approval.created_at.isoformat(), "expires_at": None,
+            "presentation": approval.presentation,
+            "action": {
+                "method": "POST",
+                "href": f"/api/v1/approvals/{approval.id}/approve",
+                "reject_href": f"/api/v1/approvals/{approval.id}/reject",
+            },
+            "tool_invocation_id": invocation.id if invocation else None,
+            "tool_key": invocation.tool_key if invocation else None,
+            "arguments": invocation.arguments if invocation else None,
+        })
     for confirmation, invocation in rows:
         item = view(confirmation, invocation).model_dump(mode="json")
         item["type"] = "tool_confirmation"
@@ -110,6 +173,13 @@ async def list_required_actions(
         "action": {"method": "POST", "href": f"/api/v1/group-formations/{proposal.id}/confirm",
                    "required_fields": ["expected_revision_no"]},
     } for proposal in formations)
+    if actor.api_key is not None:
+        owned_session_ids = set(await db.scalars(select(UserSession.id).where(
+            UserSession.account_id == actor.account.id,
+            UserSession.origin_api_key_id == actor.api_key.id,
+            UserSession.entry_agent_id == actor.api_key.agent_id,
+        )))
+        items = [item for item in items if item.get("session_id") in owned_session_ids]
     if session_id is not None:
         items = [item for item in items if item.get("session_id") == session_id]
     if action_type is not None:
@@ -137,6 +207,167 @@ async def list_required_actions(
             values=[items[-1].get("created_at") or "", items[-1].get("id") or ""],
         )
     return {"items": items, "next_cursor": next_cursor}
+
+
+@router.post("/approvals/{approval_id}/{decision}")
+async def decide_approval(
+    approval_id: str, decision: str, body: ApprovalDecisionRequest,
+    if_match: str | None = Header(default=None, alias="If-Match"),
+    idempotency_key: str = Header(alias="Idempotency-Key"),
+    db: AsyncSession = Depends(get_db),
+    actor: SessionActor = Depends(get_session_actor),
+):
+    if decision not in {"approve", "reject"}:
+        raise HTTPException(status_code=404, detail="Decision not found")
+    if actor.account is None:
+        raise HTTPException(status_code=403, detail={"code": "identity_mapping_required"})
+    record, replay = await _session_idempotency(
+        db, actor=actor, operation=f"{decision}_approval", key=idempotency_key,
+        request={
+            "approval_id": approval_id, "subject_hash": body.subject_hash,
+            "reason": body.reason,
+        },
+    )
+    if replay and record.response_snapshot:
+        return record.response_snapshot
+    approval = await db.scalar(select(Approval).where(
+        Approval.id == approval_id,
+    ).with_for_update())
+    if approval is None or approval.target_account_id != actor.account.id:
+        raise HTTPException(status_code=404, detail="Approval not found")
+    await _owned_session(db, approval.session_id, actor)
+    if approval.version != _expected_version(if_match):
+        raise HTTPException(status_code=409, detail={
+            "code": "version_conflict", "current_version": approval.version,
+        })
+    if approval.status != "pending":
+        raise HTTPException(status_code=409, detail={
+            "code": "action_already_resolved", "status": approval.status,
+        })
+    if body.subject_hash != approval.subject_hash:
+        raise HTTPException(status_code=409, detail={"code": "approval_subject_changed"})
+    if approval.subject_type != "tool_invocation":
+        raise HTTPException(status_code=409, detail={"code": "unsupported_approval_subject"})
+    invocation = await db.scalar(select(ToolInvocation).where(
+        ToolInvocation.id == approval.subject_id,
+    ).with_for_update())
+    work = await db.scalar(select(WorkItem).where(
+        WorkItem.id == approval.work_item_id,
+    ).with_for_update())
+    run = await db.scalar(select(Run).where(
+        Run.id == approval.run_id,
+    ).with_for_update())
+    session = await db.scalar(select(UserSession).where(
+        UserSession.id == approval.session_id,
+    ).with_for_update())
+    if invocation is None or work is None or run is None or session is None:
+        raise HTTPException(status_code=409, detail={"code": "approval_subject_changed"})
+    if (
+        invocation.status != "waiting_confirmation"
+        or invocation.version != approval.subject_version
+        or invocation.authorization_snapshot.get("permission_revision") != session.permission_revision
+    ):
+        raise HTTPException(status_code=409, detail={"code": "approval_subject_changed"})
+    source_runner = await db.get(DurableRunner, invocation.runner_id)
+    if source_runner is None:
+        raise HTTPException(status_code=409, detail={"code": "approval_subject_changed"})
+
+    approval.status = "approved" if decision == "approve" else "rejected"
+    approval.decision_reason = body.reason
+    approval.decided_by_account_id = actor.account.id
+    approval.decided_at = utcnow()
+    approval.version += 1
+    if decision == "approve":
+        invocation.status = "queued"
+        if approval.kind == "session_grant":
+            scope = {
+                "session_id": session.id, "account_id": actor.account.id,
+                "agent_id": source_runner.agent_id, "tool_key": invocation.tool_key,
+                "permission_revision": session.permission_revision,
+            }
+            scope_hash = hashlib.sha256(json.dumps(
+                scope, sort_keys=True, separators=(",", ":")
+            ).encode()).hexdigest()
+            db.add(SessionGrant(
+                id=uuid7(), session_id=session.id,
+                target_account_id=actor.account.id, agent_id=source_runner.agent_id,
+                tool_key=invocation.tool_key, scope_hash=scope_hash, scope=scope,
+                source_approval_id=approval.id, status="active",
+                expires_at=utcnow() + timedelta(hours=8),
+            ))
+    else:
+        invocation.status = "rejected"
+        invocation.error_code = "tool_rejected_by_user"
+        invocation.error_detail = body.reason or "User rejected Tool execution"
+        invocation.result_data = {
+            "status": "failed", "data": None,
+            "summary": invocation.error_detail, "artifact_ids": [],
+            "provider_request_id": None, "retryable": False,
+            "error": {
+                "code": invocation.error_code, "message": invocation.error_detail,
+                "category": "permanent", "details": {},
+            },
+        }
+    invocation.version += 1
+    await db.flush()
+    decided = await ExecutionEventWriter(db).append(
+        session_id=session.id, run_id=run.id,
+        event_type=f"approval.{approval.status}",
+        event_dedupe_key=f"approval:{approval.id}:{approval.status}",
+        actor_type=actor.principal_type, actor_id=actor.principal_id,
+        entity_type="approval", entity_id=approval.id,
+        entity_version=approval.version, visibility="user",
+        summary=f"Approval {approval.status}: {invocation.tool_key}",
+        payload={
+            "approval_id": approval.id, "type": approval.kind,
+            "tool_invocation_id": invocation.id,
+        }, correlation_id=run.id,
+    )
+    if decision == "approve":
+        queued = await ExecutionEventWriter(db).append(
+            session_id=session.id, run_id=run.id,
+            event_type="tool_invocation.queued",
+            event_dedupe_key=f"tool_invocation:{invocation.id}:queued:approval",
+            actor_type="service", actor_id="approval-control",
+            entity_type="tool_invocation", entity_id=invocation.id,
+            entity_version=invocation.version, visibility="user",
+            summary=f"Approved Tool queued: {invocation.tool_key}",
+            payload={"tool_key": invocation.tool_key}, correlation_id=run.id,
+            caused_by_event_id=decided.id,
+        )
+        await OutboxWriter(db).enqueue(
+            topic="runtime.sandbox", action="execute_tool",
+            aggregate_type="tool_invocation", aggregate_id=invocation.id,
+            partition_key=session.id,
+            dedupe_key=f"event:{queued.id}:execute_tool",
+            payload_ref={"tool_invocation_id": invocation.id},
+        )
+        another_approval = await db.scalar(select(Approval.id).where(
+            Approval.work_item_id == work.id, Approval.status == "pending",
+        ).limit(1))
+        if another_approval is None:
+            work.status = "waiting_tool"
+            work.wait_reason = "waiting_tool"
+            work.version += 1
+            run.status = "waiting_tool"
+            run.wait_reason = "waiting_tool"
+            run.version += 1
+    elif not await has_pending_actions(db, work_item_id=work.id):
+        pending = await tool_continuation(
+            db, work_item_id=work.id, source_turn_id=invocation.source_turn_id,
+        )
+        await queue_work_item_resume(
+            db, work=work, run=run, source_runner=source_runner,
+            pending_results=pending, reason="approval_rejected",
+            caused_by_event_id=decided.id, actor_id="approval-control",
+        )
+    response = approval_view(approval, invocation)
+    record.resource_type = "approval"
+    record.resource_id = approval.id
+    record.http_status = 200
+    record.response_snapshot = response
+    await db.commit()
+    return response
 
 
 @router.post("/tool-confirmations/{confirmation_id}/{decision}", response_model=ToolConfirmationResponse)

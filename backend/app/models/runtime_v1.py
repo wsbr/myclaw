@@ -84,7 +84,7 @@ class Run(Base, TimestampMixin, VersionMixin):
     entry_agent_id: Mapped[str] = mapped_column(String(36), ForeignKey("agent.id"), nullable=False)
     root_work_item_id: Mapped[str | None] = mapped_column(String(36))
     permission_mode: Mapped[str] = mapped_column(
-        String(32), default="standard", nullable=False
+        String(32), default="direct", nullable=False
     )
     hard_budget_snapshot: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     source_run_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("run.id"))
@@ -101,7 +101,7 @@ class WorkItem(Base, TimestampMixin, VersionMixin):
     __table_args__ = (
         CheckConstraint("mode IN ('chat','plan','group')", name="ck_work_item_mode"),
         CheckConstraint(
-            "status IN ('queued','running','waiting_user','waiting_agent','waiting_tool','waiting_resource','succeeded','failed','timed_out','cancelled','abandoned','blocked')",
+            "status IN ('queued','running','waiting_user','waiting_approval','waiting_agent','waiting_tool','waiting_resource','succeeded','failed','timed_out','cancelled','abandoned','blocked')",
             name="ck_work_item_status",
         ),
         UniqueConstraint("id", "user_id", name="uq_work_item_id_user"),
@@ -332,6 +332,70 @@ class ProviderAttempt(Base):
     )
 
 
+class WorkingPlan(Base, TimestampMixin, VersionMixin):
+    """Current model-maintained plan for one Agent in one Run.
+
+    A WorkingPlan is context/UI state only.  It deliberately has no foreign
+    key to a plan node or any scheduling field that could create WorkItems.
+    """
+
+    __tablename__ = "working_plan"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('active','superseded','closed')",
+            name="ck_working_plan_status",
+        ),
+        Index(
+            "ix_working_plan_run_owner_status",
+            "run_id", "owner_agent_id", "status", "updated_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
+    session_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("user_session.id"), nullable=False
+    )
+    run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("run.id"), nullable=False
+    )
+    owner_agent_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("agent.id"), nullable=False
+    )
+    summary: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    revision: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="active", nullable=False)
+
+
+class PlanUpdate(Base):
+    """Append-only revision payload for a WorkingPlan."""
+
+    __tablename__ = "plan_update"
+    __table_args__ = (
+        UniqueConstraint(
+            "working_plan_id", "revision", name="uq_plan_update_revision"
+        ),
+        Index("ix_plan_update_plan_created", "working_plan_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
+    working_plan_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("working_plan.id"), nullable=False
+    )
+    revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    items: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    explanation: Mapped[str | None] = mapped_column(Text)
+    updated_by_runner_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("runner_v1.id"), nullable=False
+    )
+    source_turn_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("agent_turn.id")
+    )
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), default=utcnow, nullable=False
+    )
+
+
 class Clarification(Base, TimestampMixin, VersionMixin):
     __tablename__ = "clarification"
     __table_args__ = (
@@ -354,6 +418,100 @@ class Clarification(Base, TimestampMixin, VersionMixin):
     answer_text: Mapped[str | None] = mapped_column(Text)
     answered_by_user_id: Mapped[str | None] = mapped_column(String(191), ForeignKey("user_identity.user_id"))
     idempotency_key: Mapped[str] = mapped_column(String(191), nullable=False)
+    source_turn_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("agent_turn.id")
+    )
+    provider_tool_call_id: Mapped[str | None] = mapped_column(String(191))
+
+
+class Approval(Base, TimestampMixin, VersionMixin):
+    """Unified human approval for exact versioned subjects."""
+
+    __tablename__ = "approval"
+    __table_args__ = (
+        CheckConstraint(
+            "kind IN ('plan_implementation','tool','membership','session_grant','reporter_selection')",
+            name="ck_approval_kind",
+        ),
+        CheckConstraint(
+            "status IN ('pending','approved','rejected','cancelled')",
+            name="ck_approval_status",
+        ),
+        UniqueConstraint(
+            "kind", "subject_type", "subject_id", "subject_hash",
+            name="uq_approval_subject",
+        ),
+        UniqueConstraint(
+            "work_item_id", "idempotency_key", name="uq_approval_work_key"
+        ),
+        Index(
+            "ix_approval_target_status_created",
+            "target_account_id", "status", "created_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
+    session_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("user_session.id"), nullable=False
+    )
+    run_id: Mapped[str] = mapped_column(String(36), ForeignKey("run.id"), nullable=False)
+    work_item_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("work_item.id"), nullable=False
+    )
+    requested_by_agent_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("agent.id"), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    subject_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    subject_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    subject_version: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    target_account_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("platform_account.id"), nullable=False
+    )
+    subject_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(191), nullable=False)
+    presentation: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
+    decision_reason: Mapped[str | None] = mapped_column(Text)
+    decided_by_account_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("platform_account.id")
+    )
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+
+
+class SessionGrant(Base, TimestampMixin, VersionMixin):
+    """Revocable, time-bounded authorization scoped to one Session Tool."""
+
+    __tablename__ = "session_grant"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('active','revoked','expired')", name="ck_session_grant_status"
+        ),
+        Index(
+            "ix_session_grant_match",
+            "session_id", "target_account_id", "tool_key", "status", "expires_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
+    session_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("user_session.id"), nullable=False
+    )
+    target_account_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("platform_account.id"), nullable=False
+    )
+    agent_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("agent.id"), nullable=False
+    )
+    tool_key: Mapped[str] = mapped_column(String(191), nullable=False)
+    scope_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    scope: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    source_approval_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("approval.id"), unique=True, nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(20), default="active", nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
 
 
 class SessionSandbox(Base, TimestampMixin, VersionMixin):

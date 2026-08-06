@@ -27,8 +27,12 @@ from app.models.agent_v1 import (
 )
 from app.models.runtime_v1 import (
     AgentTurn,
+    Approval,
     CapabilitySnapshot,
+    PlanUpdate,
     ProviderAttempt,
+    SessionGrant,
+    WorkingPlan,
     Message, Run, WorkItem, DurableRunner, RunnerCheckpoint, Clarification, SessionSandbox, Workspace,
     WorkspaceLock, WorkspaceLockRequest, WorkspaceReadLease,
     ToolInvocation, ToolAttempt, ToolConfirmation, AgentInvocation,
@@ -60,7 +64,8 @@ __all__ = [
     "PolicyVersion", "SandboxProfile", "SandboxProfileVersion",
     "AgentBlueprint", "AgentAssemblyVersion", "AgentVersionTool",
     "AgentVersionSkill", "AgentVersionBinding", "AgentCard",
-    "AgentTurn", "CapabilitySnapshot", "ProviderAttempt",
+    "AgentTurn", "Approval", "CapabilitySnapshot", "PlanUpdate", "ProviderAttempt",
+    "SessionGrant", "WorkingPlan",
     "Message", "Run", "WorkItem", "DurableRunner", "RunnerCheckpoint", "Clarification",
     "SessionSandbox", "Workspace", "WorkspaceLock", "WorkspaceLockRequest", "WorkspaceReadLease",
     "ToolInvocation", "ToolAttempt", "ToolConfirmation", "AgentInvocation",

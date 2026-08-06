@@ -299,8 +299,8 @@ async def test_snapshot_resolver_persists_effective_tools_and_live_governance_de
             db, runner=runner, execution_principal={"account_id": account_id},
             permission_mode="standard", hard_budget={},
         )
-        assert resolved.capability.assembled_tool_keys == ["lookup"]
-        assert resolved.capability.effective_tool_keys == ["lookup"]
+        assert resolved.capability.assembled_tool_keys == ["lookup", "update_plan", "ask_user"]
+        assert resolved.capability.effective_tool_keys == ["lookup", "update_plan", "ask_user"]
         assert resolved.tool_definitions[0]["registration_hash"] == "7" * 64
         assert runner.capability_snapshot_id == resolved.capability.id
 
@@ -343,8 +343,8 @@ async def test_snapshot_resolver_persists_effective_tools_and_live_governance_de
             db, runner=runner2, execution_principal={"account_id": account_id},
             permission_mode="standard", hard_budget={},
         )
-        assert denied.capability.assembled_tool_keys == ["lookup"]
-        assert denied.capability.effective_tool_keys == []
+        assert denied.capability.assembled_tool_keys == ["lookup", "update_plan", "ask_user"]
+        assert denied.capability.effective_tool_keys == ["update_plan", "ask_user"]
         assert denied.capability.denied_capabilities == [{
             "capability": "lookup", "reason_code": "platform_tool_disabled",
         }]

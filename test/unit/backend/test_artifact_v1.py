@@ -63,7 +63,9 @@ async def test_publish_artifact_copies_to_immutable_namespace_and_replays(tmp_pa
     )}
     root = tmp_path / ids["session"]
     root.mkdir()
-    (root / "draft.txt").write_text("formal result")
+    private = root / "agents" / ids["agent"]
+    private.mkdir(parents=True)
+    (private / "draft.txt").write_text("formal result")
     async with factory.begin() as db:
         db.add_all([
             UserIdentity(user_id="u1", status="active"),
@@ -115,7 +117,7 @@ async def test_publish_artifact_copies_to_immutable_namespace_and_replays(tmp_pa
     assert first.success is True
     artifact_id = first.data["artifact"]["id"]
     assert (root / ".myclaw" / "artifacts" / artifact_id / "draft.txt").read_text() == "formal result"
-    (root / "draft.txt").write_text("later mutable edit")
+    (private / "draft.txt").write_text("later mutable edit")
     assert (root / ".myclaw" / "artifacts" / artifact_id / "draft.txt").read_text() == "formal result"
     async with factory() as db:
         copied = await ToolRegistry.execute("write_file", {
@@ -123,7 +125,7 @@ async def test_publish_artifact_copies_to_immutable_namespace_and_replays(tmp_pa
         }, context, db=db)
         assert copied.success is True
         assert copied.data["source_artifact_id"] == artifact_id
-    assert (root / "restored" / "from-artifact.txt").read_text() == "formal result"
+    assert (private / "restored" / "from-artifact.txt").read_text() == "formal result"
     async with factory() as db:
         replay = await ToolRegistry.execute("publish_artifact", {"path": "draft.txt"}, context, db=db)
         assert replay.data["artifact"]["id"] == artifact_id

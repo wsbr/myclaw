@@ -36,6 +36,7 @@ class CodeToolSpec:
     implementation_ref: str
     implementation_version: str = "1"
     execution_mode: str = "inline"
+    side_effect: str = "none"
     initial_confirmation_policy: str = field(default="never", compare=False)
     initial_platform_config: dict = field(default_factory=dict, compare=False)
 
@@ -50,6 +51,7 @@ class CodeToolSpec:
             "implementation_ref": self.implementation_ref,
             "implementation_version": self.implementation_version,
             "execution_mode": self.execution_mode,
+            "side_effect": self.side_effect,
         })
 
 
@@ -197,6 +199,7 @@ async def reconcile_platform_tools(
                 implementation_ref=spec.implementation_ref,
                 implementation_version=spec.implementation_version,
                 execution_mode=spec.execution_mode,
+                side_effect=spec.side_effect,
                 enabled=True,
                 confirmation_policy=spec.initial_confirmation_policy,
                 platform_config=spec.initial_platform_config,
@@ -213,6 +216,7 @@ async def reconcile_platform_tools(
                 "implementation_ref": spec.implementation_ref,
                 "implementation_version": spec.implementation_version,
                 "execution_mode": spec.execution_mode,
+                "side_effect": spec.side_effect,
                 "registration_hash": spec.registration_hash,
             }
             for field, value in code_fields.items():
@@ -264,11 +268,11 @@ def legacy_builtin_specs() -> list[CodeToolSpec]:
     from app.core.tool_registry.registry import BUILTIN_TOOLS
 
     governance = {
-        "read_file": ("never", {"workspace_access": "read"}, "inline"),
-        "write_file": ("always", {"workspace_access": "write"}, "inline"),
-        "execute": ("always", {"workspace_access": "write"}, "durable_async"),
-        "search_group_history": ("never", {}, "inline"),
-        "publish_artifact": ("always", {"workspace_access": "write"}, "inline"),
+        "read_file": ("never", {"workspace_access": "read"}, "durable_async", "none"),
+        "write_file": ("session_grant", {"workspace_access": "write"}, "durable_async", "idempotent"),
+        "execute": ("session_grant", {"workspace_access": "write"}, "durable_async", "non_idempotent"),
+        "search_group_history": ("never", {}, "inline", "none"),
+        "publish_artifact": ("never", {"workspace_access": "write"}, "durable_async", "idempotent"),
     }
     return [
         CodeToolSpec(
@@ -278,9 +282,11 @@ def legacy_builtin_specs() -> list[CodeToolSpec]:
             input_schema=tool.input_schema,
             output_schema=None,
             implementation_ref=f"{tool.__class__.__module__}:{tool.__class__.__name__}",
-            execution_mode=governance.get(tool.name, ("never", {}, "inline"))[2],
-            initial_confirmation_policy=governance.get(tool.name, ("never", {}, "inline"))[0],
-            initial_platform_config=governance.get(tool.name, ("never", {}, "inline"))[1],
+            execution_mode=governance[tool.name][2],
+            side_effect=governance[tool.name][3],
+            initial_confirmation_policy=governance[tool.name][0],
+            initial_platform_config=governance[tool.name][1],
         )
         for tool in BUILTIN_TOOLS.values()
+        if tool.name in governance
     ]

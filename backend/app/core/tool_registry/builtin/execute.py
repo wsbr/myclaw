@@ -6,7 +6,7 @@ import signal
 
 from app.core.tool_registry.base import BaseTool, RuntimeContext, ToolResult
 from app.services.workspace_file_service import (
-    resolve_workspace_path, sandbox_environment, workspace_root,
+    private_agent_root, resolve_workspace_path, sandbox_environment,
 )
 
 
@@ -48,10 +48,14 @@ class ExecuteTool(BaseTool):
         stdin = args.get("stdin", "")
         if not isinstance(stdin, str) or len(stdin.encode("utf-8")) > 1024 * 1024:
             return ToolResult(success=False, error="stdin exceeds the 1 MiB limit")
-        root = await workspace_root(db, workspace_id=context.workspace_id, session_id=context.session_id)
+        root = await private_agent_root(
+            db, workspace_id=context.workspace_id, session_id=context.session_id,
+            agent_id=context.agent_id,
+        )
         _, cwd, _ = await resolve_workspace_path(
             db, workspace_id=context.workspace_id, session_id=context.session_id,
-            relative_path=args.get("cwd", "."), allow_dot=True,
+            relative_path=args.get("cwd", "."), agent_id=context.agent_id,
+            allow_dot=True,
         )
         if not cwd.is_dir():
             return ToolResult(success=False, error="cwd does not exist or is not a directory")

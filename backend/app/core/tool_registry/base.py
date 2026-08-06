@@ -69,6 +69,9 @@ class RuntimeContext(BaseModel):
     task_id: str | None = None
     user_id: str
     agent_id: str
+    account_id: str | None = None
+    permission_revision: int = 1
+    authentication_source: str = "web_session"
     call_chain: list[str] = []
     max_depth: int = 5
     timeout: int = 300

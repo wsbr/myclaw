@@ -23,7 +23,10 @@ from app.models.runtime_v1 import (
     DurableRunner, Run, ToolAttempt, ToolInvocation, WorkItem, Workspace, WorkspaceLockRequest,
 )
 from app.persistence.reliable_writes import ExecutionEventWriter, OutboxWriter
-from app.persistence.runtime_graph import persist_replacement_runner
+from app.services.runtime_resume_service import (
+    has_pending_actions, queue_work_item_resume, tool_continuation,
+)
+from app.services.artifact_service import reconcile_one_publishing_artifact
 from app.services.workspace_lock_service import (
     WorkspaceLockConflict, WorkspaceLockGrant, acquire_workspace_lock,
     assert_workspace_lock, release_workspace_lock,
@@ -96,7 +99,9 @@ class SandboxWorker:
                 command.status = "dead"
                 command.last_error = "Durable Tool runtime graph is unavailable"
                 return None
-            if run.lifecycle in {"completed", "cancelled"} or work.status not in {"waiting_tool", "waiting_resource"}:
+            if run.lifecycle in {"completed", "cancelled"} or work.status not in {
+                "waiting_tool", "waiting_resource", "waiting_approval",
+            }:
                 invocation.status = "cancelled"
                 invocation.error_code = "run_terminal"
                 invocation.error_detail = "Run became terminal before durable Tool execution"
@@ -110,7 +115,11 @@ class SandboxWorker:
             lock_grant = None
             preflight_error = None
             workspace_access = str((tool.platform_config or {}).get("workspace_access") or "none") if tool else "none"
-            if tool is None or not tool.enabled or tool.execution_mode != "durable_async":
+            if (
+                tool is None or not tool.enabled
+                or invocation.execution_mode != "durable_async"
+                or tool.registration_hash != invocation.tool_registration_hash
+            ):
                 preflight_error = "Durable Tool is disabled or no longer registered"
             elif workspace_access in {"read", "write"}:
                 if workspace is None:
@@ -289,7 +298,11 @@ class SandboxWorker:
                     available_at=utcnow() + timedelta(seconds=2 ** invocation.attempt_count),
                 )
                 return
-            if run.lifecycle in {"completed", "cancelled"} or work.status not in {"waiting_tool", "waiting_resource"}:
+            if run.lifecycle in {"completed", "cancelled"} or work.status not in {
+                "waiting_tool", "waiting_resource", "waiting_approval",
+            }:
+                return
+            if await has_pending_actions(db, work_item_id=work.id):
                 return
             await self._resume_work(db, invocation, work, run, settled.id)
 
@@ -342,41 +355,21 @@ class SandboxWorker:
 
     async def _resume_work(self, db, invocation: ToolInvocation, work: WorkItem, run: Run, cause_id: str) -> None:
         source = await db.get(DurableRunner, invocation.runner_id)
-        work.execution_epoch += 1
-        work.attempt_no += 1
-        work.status = "queued"
-        work.version += 1
-        replacement = DurableRunner(
-            id=uuid7(), work_item_id=work.id, run_id=run.id, session_id=run.session_id,
-            agent_id=source.agent_id, agent_version_id=source.agent_version_id,
-            execution_epoch=work.execution_epoch, status="queued",
-            principal_snapshot=dict(source.principal_snapshot),
-            assembly_snapshot=dict(source.assembly_snapshot), prompt_manifest=dict(source.prompt_manifest),
-            input_snapshot={**dict(source.input_snapshot), "resumed_after_durable_tool": invocation.id},
+        pending = await tool_continuation(
+            db, work_item_id=work.id, source_turn_id=invocation.source_turn_id,
         )
-        run.lifecycle = "running"
-        run.wait_reason = None
-        run.version += 1
-        await persist_replacement_runner(db, work, replacement)
-        queued = await ExecutionEventWriter(db).append(
-            session_id=run.session_id, run_id=run.id, event_type="runner.queued",
-            event_dedupe_key=f"transition:runner:{replacement.id}:0:1:durable_tool_result",
-            actor_type="service", actor_id=self.worker_id, entity_type="runner",
-            entity_id=replacement.id, entity_version=replacement.version,
-            visibility="private", private_owner=("runner", replacement.id),
-            summary="Runner resumed after durable Tool result",
-            payload={"tool_invocation_id": invocation.id}, correlation_id=run.id, caused_by_event_id=cause_id,
-        )
-        await OutboxWriter(db).enqueue(
-            topic="runtime.runner", action="execute", aggregate_type="runner",
-            aggregate_id=replacement.id, partition_key=run.session_id,
-            dedupe_key=f"event:{queued.id}:execute",
-            payload_ref={"runner_id": replacement.id, "tool_invocation_id": invocation.id},
+        await queue_work_item_resume(
+            db, work=work, run=run, source_runner=source,
+            pending_results=pending, reason="tool_result",
+            caused_by_event_id=cause_id, actor_id=self.worker_id,
         )
 
     async def run_forever(self, poll_seconds: float | None = None) -> None:
         poll_seconds = settings.sandbox_worker_poll_seconds if poll_seconds is None else poll_seconds
         while True:
+            async with AsyncSessionLocal.begin() as db:
+                if await reconcile_one_publishing_artifact(db):
+                    continue
             if await self.recover_one(stale_seconds=settings.sandbox_attempt_stale_seconds):
                 continue
             claim = await self.claim_one()

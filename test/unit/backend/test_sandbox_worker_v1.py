@@ -57,6 +57,7 @@ async def test_sandbox_worker_executes_attempt_and_resumes_work(tmp_path, monkey
             session_id=session_id, platform_tool_id=tool_id, tool_key="execute",
             execution_mode="durable_async", status="queued",
             arguments={"argv": ["/bin/echo", "sandbox-ok"]}, arguments_hash="b" * 64,
+            tool_registration_hash="a" * 64,
             business_idempotency_key="call-1", principal_hash="c" * 64, attempt_count=0,
         ))
         db.add(Workspace(

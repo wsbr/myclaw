@@ -34,7 +34,7 @@ class WriteFileTool(BaseTool):
             return ToolResult(success=False, error="mode must be create or replace")
         _, path, relative = await resolve_workspace_path(
             db, workspace_id=context.workspace_id, session_id=context.session_id,
-            relative_path=args["path"],
+            relative_path=args["path"], agent_id=context.agent_id,
         )
         exists = path.exists()
         if exists and not path.is_file():

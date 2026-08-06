@@ -21,6 +21,5 @@ class PublishArtifactTool(BaseTool):
     async def execute(self, args: dict, context: RuntimeContext, db=None) -> ToolResult:
         if db is None:
             return ToolResult(success=False, error="database connection is required")
-        async with db.begin():
-            artifact = await publish_artifact(db, context=context, args=args)
+        artifact = await publish_artifact(db, context=context, args=args)
         return ToolResult(success=True, data={"artifact": artifact_view(artifact)})

@@ -38,6 +38,8 @@ async def test_read_write_and_execute_are_confined_to_workspace(tmp_path, monkey
     monkeypatch.setattr(settings, "sandbox_root", str(tmp_path))
     root = tmp_path / "session-1"
     root.mkdir()
+    private = root / "agents" / "agent-1"
+    private.mkdir(parents=True)
     context, db = workspace_context(), WorkspaceDb()
 
     traversal = await ToolRegistry.execute("write_file",
@@ -60,7 +62,7 @@ async def test_read_write_and_execute_are_confined_to_workspace(tmp_path, monkey
 
     outside = tmp_path / "outside.txt"
     outside.write_text("secret")
-    (root / "escape").symlink_to(outside)
+    (private / "escape").symlink_to(outside)
     symlink = await ToolRegistry.execute("read_file", {"path": "escape"}, context, db=db)
     assert symlink.success is False and "escapes" in symlink.error
 

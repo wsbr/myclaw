@@ -9,11 +9,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
-from app.deps import CurrentAccount, get_current_account
+from app.deps import CurrentAccount, SessionActor, get_session_actor
 from app.models.common import utcnow, uuid7
 from app.models.foundation import IdempotencyRecord, UserSession
 from app.models.observability_v1 import ObservabilitySpan, ObservabilitySpanLink, RunnerTrace
-from app.models.runtime_v1 import AgentInvocation, Clarification, DurableRunner, Run, ToolConfirmation, ToolInvocation, WorkItem
+from app.models.runtime_v1 import (
+    AgentInvocation, Approval, Clarification, DurableRunner, Run,
+    ToolConfirmation, ToolInvocation, WorkItem, WorkingPlan,
+)
 from app.persistence.reliable_writes import ExecutionEventWriter, OutboxWriter
 from app.persistence.runtime_graph import persist_replacement_runner
 from app.services.notification_delivery_service import create_notification_delivery_if_channel
@@ -22,7 +25,16 @@ from app.services.visible_events import VisibleEventProjection, event_public_dic
 from app.services.cursor_service import SortKey, paginate_scalars
 
 router = APIRouter(tags=["runs"])
-NON_TERMINAL_WORK = {"queued", "running", "waiting_user", "waiting_agent", "waiting_tool", "waiting_resource"}
+NON_TERMINAL_WORK = {
+    "queued", "running", "waiting_user", "waiting_approval",
+    "waiting_agent", "waiting_tool", "waiting_resource",
+}
+
+
+def _principal_parts(current: CurrentAccount | SessionActor) -> tuple[str, str]:
+    if isinstance(current, SessionActor):
+        return current.principal_type, current.principal_id
+    return "account", current.account.id
 
 
 def _expected_version(value: str | None) -> int:
@@ -33,12 +45,14 @@ def _expected_version(value: str | None) -> int:
 
 
 async def _idempotency(
-    db: AsyncSession, current: CurrentAccount, operation: str, key: str, request: dict,
+    db: AsyncSession, current: CurrentAccount | SessionActor,
+    operation: str, key: str, request: dict,
 ) -> tuple[IdempotencyRecord, bool]:
     digest = hashlib.sha256(json.dumps(request, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    principal_type, principal_id = _principal_parts(current)
     record = await db.scalar(select(IdempotencyRecord).where(
-        IdempotencyRecord.principal_type == "account",
-        IdempotencyRecord.principal_id == current.account.id,
+        IdempotencyRecord.principal_type == principal_type,
+        IdempotencyRecord.principal_id == principal_id,
         IdempotencyRecord.operation == operation,
         IdempotencyRecord.idempotency_key == key,
     ))
@@ -47,7 +61,7 @@ async def _idempotency(
             raise HTTPException(status_code=409, detail={"code": "idempotency_mismatch"})
         return record, True
     record = IdempotencyRecord(
-        id=uuid7(), principal_type="account", principal_id=current.account.id,
+        id=uuid7(), principal_type=principal_type, principal_id=principal_id,
         operation=operation, idempotency_key=key, request_hash=digest,
         expires_at=utcnow() + timedelta(days=7),
     )
@@ -56,12 +70,23 @@ async def _idempotency(
     return record, False
 
 
-async def _owned_run(db: AsyncSession, run_id: str, current: CurrentAccount, *, lock: bool = False) -> Run:
+async def _owned_run(
+    db: AsyncSession, run_id: str, current: CurrentAccount | SessionActor,
+    *, lock: bool = False,
+) -> Run:
     query = select(Run).where(Run.id == run_id)
     if lock:
         query = query.with_for_update()
     run = await db.scalar(query)
-    if run is None or run.user_id != current.account.user_id:
+    allowed = run is not None and current.account is not None and run.user_id == current.account.user_id
+    if allowed and isinstance(current, SessionActor) and current.api_key is not None:
+        session = await db.get(UserSession, run.session_id)
+        allowed = bool(
+            session and session.account_id == current.account.id
+            and session.origin_api_key_id == current.api_key.id
+            and session.entry_agent_id == current.api_key.agent_id
+        )
+    if not allowed:
         raise HTTPException(status_code=404, detail="Run not found")
     return run
 
@@ -69,7 +94,7 @@ async def _owned_run(db: AsyncSession, run_id: str, current: CurrentAccount, *, 
 @router.get("/runs/{run_id}", response_model=RunResponse)
 async def get_run(
     run_id: str, db: AsyncSession = Depends(get_db),
-    current: CurrentAccount = Depends(get_current_account),
+    current: SessionActor = Depends(get_session_actor),
 ):
     return RunResponse.model_validate(await _owned_run(db, run_id, current))
 
@@ -79,7 +104,7 @@ async def get_run(
 async def get_run_timeline(
     run_id: str, after_sequence: int = 0, limit: int = 100,
     db: AsyncSession = Depends(get_db),
-    current: CurrentAccount = Depends(get_current_account),
+    current: SessionActor = Depends(get_session_actor),
 ):
     """Return the user-visible event projection for one Run.
 
@@ -123,7 +148,7 @@ async def get_run_timeline(
 async def list_run_work_items(
     run_id: str, limit: int = 100, cursor: str | None = None,
     db: AsyncSession = Depends(get_db),
-    current: CurrentAccount = Depends(get_current_account),
+    current: SessionActor = Depends(get_session_actor),
 ):
     await _owned_run(db, run_id, current)
     rows, next_cursor = await paginate_scalars(
@@ -140,7 +165,7 @@ async def list_run_work_items(
 async def list_run_runners(
     run_id: str, limit: int = 100, cursor: str | None = None,
     db: AsyncSession = Depends(get_db),
-    current: CurrentAccount = Depends(get_current_account),
+    current: SessionActor = Depends(get_session_actor),
 ):
     """List Runner identities and lifecycle metadata for an owned Run.
 
@@ -164,18 +189,19 @@ async def list_run_runners(
 @router.get("/work-items/{work_item_id}", response_model=WorkItemResponse)
 async def get_work_item(
     work_item_id: str, db: AsyncSession = Depends(get_db),
-    current: CurrentAccount = Depends(get_current_account),
+    current: SessionActor = Depends(get_session_actor),
 ):
     item = await db.get(WorkItem, work_item_id)
-    if item is None or item.user_id != current.account.user_id:
+    if item is None:
         raise HTTPException(status_code=404, detail="Work item not found")
+    await _owned_run(db, item.run_id, current)
     return WorkItemResponse.model_validate(item)
 
 
 @router.get("/runners/{runner_id}", response_model=RunnerResponse)
 async def get_runner(
     runner_id: str, db: AsyncSession = Depends(get_db),
-    current: CurrentAccount = Depends(get_current_account),
+    current: SessionActor = Depends(get_session_actor),
 ):
     runner = await db.get(DurableRunner, runner_id)
     if runner is None:
@@ -188,7 +214,7 @@ async def get_runner(
 @router.get("/runners/{runner_id}/trace")
 async def get_runner_trace(
     runner_id: str, db: AsyncSession = Depends(get_db),
-    current: CurrentAccount = Depends(get_current_account),
+    current: SessionActor = Depends(get_session_actor),
 ):
     """Return safe, non-authoritative diagnostics for an owned Runner."""
     runner = await db.get(DurableRunner, runner_id)
@@ -285,7 +311,7 @@ async def cancel_run(
     run_id: str, body: RunCancelRequest,
     if_match: str | None = Header(default=None, alias="If-Match"),
     idempotency_key: str = Header(alias="Idempotency-Key"),
-    db: AsyncSession = Depends(get_db), current: CurrentAccount = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db), current: SessionActor = Depends(get_session_actor),
 ):
     record, replay = await _idempotency(
         db, current, "cancel_run", idempotency_key, {"run_id": run_id, **body.model_dump(mode="json")},
@@ -337,6 +363,15 @@ async def cancel_run(
                 confirmation.status = "cancelled"
                 confirmation.decided_at = now
                 confirmation.version += 1
+            approval = await db.scalar(select(Approval).where(
+                Approval.subject_type == "tool_invocation",
+                Approval.subject_id == invocation.id,
+                Approval.status == "pending",
+            ).with_for_update())
+            if approval:
+                approval.status = "cancelled"
+                approval.decided_at = now
+                approval.version += 1
         agent_invocations = list(await db.scalars(select(AgentInvocation).where(
             (AgentInvocation.caller_work_item_id == work.id) | (AgentInvocation.target_work_item_id == work.id),
             AgentInvocation.status.in_(("created", "queued", "running")),
@@ -358,12 +393,21 @@ async def cancel_run(
         work.version += 1
     old_version = run.version
     run.lifecycle = "cancelled"
+    run.status = "cancelled"
     run.wait_reason = None
     run.outcome = None
     run.error_code = "cancelled_by_user"
     run.result_summary = body.reason
     run.finished_at = now
+    run.completed_at = now
     run.version += 1
+    plans = list(await db.scalars(select(WorkingPlan).where(
+        WorkingPlan.run_id == run.id,
+        WorkingPlan.status == "active",
+    ).with_for_update()))
+    for plan in plans:
+        plan.status = "closed"
+        plan.version += 1
     cancelled_event = await ExecutionEventWriter(db).append(
         session_id=run.session_id, run_id=run.id, event_type="run.cancelled",
         event_dedupe_key=f"command:cancel_run:{record.id}",
@@ -385,7 +429,7 @@ async def cancel_run(
 @router.post("/runs/{run_id}/retry-work-items/{work_item_id}", response_model=RunnerResponse, status_code=202)
 async def retry_work_item(
     run_id: str, work_item_id: str, idempotency_key: str = Header(alias="Idempotency-Key"),
-    db: AsyncSession = Depends(get_db), current: CurrentAccount = Depends(get_current_account),
+    db: AsyncSession = Depends(get_db), current: SessionActor = Depends(get_session_actor),
 ):
     record, replay = await _idempotency(db, current, "retry_work_item", idempotency_key, {"run_id": run_id, "work_item_id": work_item_id})
     if replay and record.response_snapshot:

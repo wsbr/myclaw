@@ -156,7 +156,7 @@ class UserSession(Base, TimestampMixin, VersionMixin):
     origin_external_conversation_id: Mapped[str | None] = mapped_column(String(500))
     next_event_sequence: Mapped[int] = mapped_column(BigInteger, default=1, nullable=False)
     permission_mode: Mapped[str] = mapped_column(
-        String(32), default="standard", nullable=False
+        String(32), default="direct", nullable=False
     )
     permission_revision: Mapped[int] = mapped_column(BigInteger, default=1, nullable=False)
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))

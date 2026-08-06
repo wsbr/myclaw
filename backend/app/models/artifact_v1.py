@@ -10,7 +10,7 @@ from app.models.common import TimestampMixin, VersionMixin, uuid7
 class Artifact(Base, TimestampMixin, VersionMixin):
     __tablename__ = "artifact"
     __table_args__ = (
-        CheckConstraint("status IN ('published','unavailable','deleted')", name="ck_artifact_status"),
+        CheckConstraint("status IN ('publishing','published','unavailable','deleted')", name="ck_artifact_status"),
         UniqueConstraint("session_id", "relative_path", "version_no", name="uq_artifact_path_version"),
         UniqueConstraint("parent_artifact_id", "version_no", name="uq_artifact_parent_version"),
         UniqueConstraint("tool_invocation_id", name="uq_artifact_tool_invocation"),
@@ -21,6 +21,7 @@ class Artifact(Base, TimestampMixin, VersionMixin):
     session_id: Mapped[str] = mapped_column(String(36), ForeignKey("user_session.id"), nullable=False)
     workspace_id: Mapped[str] = mapped_column(String(36), ForeignKey("workspace.id"), nullable=False)
     relative_path: Mapped[str] = mapped_column(String(500), nullable=False)
+    source_relative_path: Mapped[str | None] = mapped_column(String(500))
     name: Mapped[str] = mapped_column(String(500), nullable=False)
     mime_type: Mapped[str] = mapped_column(String(255), nullable=False)
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)

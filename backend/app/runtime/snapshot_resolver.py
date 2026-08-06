@@ -15,6 +15,7 @@ from app.models.agent_v1 import AgentAssemblyVersion, AgentVersionSkill, AgentVe
 from app.models.common import uuid7
 from app.models.registry import ModelVersion, PlatformTool, SkillVersion
 from app.models.runtime_v1 import CapabilitySnapshot, DurableRunner
+from app.runtime.coordination_tools import RUNTIME_COORDINATION_DEFINITIONS
 
 
 class SnapshotResolutionError(RuntimeError):
@@ -100,7 +101,18 @@ class SnapshotResolver:
                 "execution_mode": tool.execution_mode,
                 "side_effect": tool.side_effect,
                 "confirmation_policy": tool.confirmation_policy,
+                "confirmation_policy_version": tool.config_version,
+                "platform_config": dict(tool.platform_config or {}),
+                "source": "platform",
             })
+
+        # Coordination Tools are Runtime-owned. They are injected consistently
+        # and cannot be selected, replaced, or disabled through Agent assembly.
+        for definition in RUNTIME_COORDINATION_DEFINITIONS:
+            name = definition["name"]
+            assembled_keys.append(name)
+            effective_keys.append(name)
+            definitions.append(dict(definition))
 
         frozen_skills = list(await db.scalars(
             select(AgentVersionSkill)

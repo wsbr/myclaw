@@ -1,8 +1,9 @@
 """Authentication and execution-principal dependencies."""
 
 from dataclasses import dataclass
+import re
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,6 +32,7 @@ class SessionActor:
     account: PlatformAccount | None = None
     roles: frozenset[str] = frozenset()
     api_key: AgentApiKey | None = None
+    asserted_user_id: str | None = None
 
     @property
     def principal_type(self) -> str:
@@ -38,7 +40,13 @@ class SessionActor:
 
     @property
     def principal_id(self) -> str:
-        return self.api_key.id if self.api_key else self.account.id
+        if self.api_key:
+            represented = self.account.id if self.account else self.asserted_user_id
+            return f"{self.api_key.id}:{represented}"
+        return self.account.id
+
+
+RAW_USER_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@-]{0,190}$")
 
 
 async def _resolve_account(token: str, db: AsyncSession) -> CurrentAccount:
@@ -82,6 +90,7 @@ async def get_current_admin(
 
 async def get_session_actor(
     credentials: HTTPAuthorizationCredentials | None = Depends(optional_bearer_scheme),
+    raw_user_id: str | None = Header(default=None, alias="X-MyClaw-User-Id"),
     db: AsyncSession = Depends(get_db),
 ) -> SessionActor:
     if credentials is None:
@@ -91,12 +100,29 @@ async def get_session_actor(
         key = await authenticate_api_key(db, token)
         if key is None:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid Agent API key")
-        return SessionActor(api_key=key)
+        asserted = (raw_user_id or "").strip()
+        if not asserted:
+            raise HTTPException(status_code=400, detail={"code": "user_id_required"})
+        if not RAW_USER_ID.fullmatch(asserted):
+            raise HTTPException(status_code=400, detail={"code": "invalid_user_id"})
+        account = await db.scalar(select(PlatformAccount).where(
+            PlatformAccount.user_id == asserted,
+            PlatformAccount.status == "active",
+        ))
+        return SessionActor(
+            account=account, api_key=key, asserted_user_id=asserted,
+        )
+    if raw_user_id is not None:
+        raise HTTPException(status_code=400, detail={"code": "invalid_identity_profile"})
     current = await _resolve_account(token, db)
     return SessionActor(account=current.account, roles=current.roles)
 
 
-async def get_agent_api_key(actor: SessionActor = Depends(get_session_actor)) -> AgentApiKey:
-    if actor.api_key is None:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Agent API key required")
-    return actor.api_key
+async def get_agent_api_key(
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+    db: AsyncSession = Depends(get_db),
+) -> AgentApiKey:
+    key = await authenticate_api_key(db, credentials.credentials)
+    if key is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid Agent API key")
+    return key

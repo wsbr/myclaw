@@ -45,7 +45,7 @@ async def create_user_session(
         entry_agent_id=entry_agent_id,
         status="active", title=title, origin_type=origin_type,
         origin_api_key_id=origin_api_key_id, next_event_sequence=1,
-        permission_mode="standard", permission_revision=1,
+        permission_mode="direct", permission_revision=1,
     )
     db.add(session)
     await db.flush()
@@ -66,6 +66,8 @@ async def create_user_session(
         root_uri = f"workspace://{session.id}/"
         workspace_path = Path(settings.sandbox_root).resolve() / session.id
         workspace_path.mkdir(parents=True, exist_ok=False)
+        (workspace_path / "agents" / agent.id).mkdir(parents=True, exist_ok=False)
+        (workspace_path / ".myclaw" / "artifacts").mkdir(parents=True, exist_ok=False)
         sandbox = SessionSandbox(
             id=uuid7(), session_id=session.id, sandbox_profile_id=profile.id,
             profile_config_version=profile.config_version, status="ready", root_uri=root_uri,
@@ -143,6 +145,9 @@ async def enqueue_chat_message(
             "account_id": session.account_id, "user_id": user_id,
             "session_id": session.id,
             "permission_revision": session.permission_revision,
+            "authentication_source": (
+                "agent_api_key" if session.origin_type == "api" else "web_session"
+            ),
             "entry_agent_id": agent.id, "current_agent_id": agent.id,
             "mode": "chat", "delegation_chain": [],
         }, assembly_snapshot={"agent_version_id": agent_version_id},

@@ -2,8 +2,7 @@ import hashlib
 import json
 from datetime import timedelta
 
-from fastapi import APIRouter, Depends, Header, HTTPException
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, Header, HTTPException, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,23 +10,26 @@ from app.database import get_db
 from app.deps import get_agent_api_key
 from app.models.common import utcnow, uuid7
 from app.models.foundation import (
-    AgentApiKey, IdempotencyRecord, PlatformAccount, PlatformAccountRole, UserIdentity,
+    AgentApiKey, IdempotencyRecord,
 )
 from app.persistence.reliable_writes import PlatformAuditWriter
+from app.services.raw_identity_service import ensure_raw_user_account
 
 router = APIRouter(prefix="/identity", tags=["identity"])
 
 
-class PreprovisionRequest(BaseModel):
-    user_id: str = Field(min_length=1, max_length=191, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:@-]*$")
-
-
 @router.post("/preprovision")
 async def preprovision_identity(
-    body: PreprovisionRequest, idempotency_key: str = Header(alias="Idempotency-Key"),
+    http_response: Response,
+    idempotency_key: str = Header(alias="Idempotency-Key"),
+    user_id: str = Header(alias="X-MyClaw-User-Id"),
     db: AsyncSession = Depends(get_db), key: AgentApiKey = Depends(get_agent_api_key),
 ):
-    request_hash = hashlib.sha256(json.dumps(body.model_dump(), sort_keys=True).encode()).hexdigest()
+    user_id = user_id.strip()
+    from app.deps import RAW_USER_ID
+    if not RAW_USER_ID.fullmatch(user_id):
+        raise HTTPException(status_code=400, detail={"code": "invalid_user_id"})
+    request_hash = hashlib.sha256(json.dumps({"user_id": user_id}, sort_keys=True).encode()).hexdigest()
     record = await db.scalar(select(IdempotencyRecord).where(
         IdempotencyRecord.principal_type == "agent_api_key",
         IdempotencyRecord.principal_id == key.id,
@@ -38,6 +40,7 @@ async def preprovision_identity(
         if record.request_hash != request_hash:
             raise HTTPException(status_code=409, detail={"code": "idempotency_mismatch"})
         if record.response_snapshot:
+            http_response.status_code = record.http_status or 200
             return record.response_snapshot
     else:
         record = IdempotencyRecord(
@@ -47,40 +50,24 @@ async def preprovision_identity(
         )
         db.add(record)
         await db.flush()
-    identity = await db.scalar(select(UserIdentity).where(
-        UserIdentity.user_id == body.user_id
-    ).with_for_update())
-    created = False
-    if identity is None:
-        identity = UserIdentity(user_id=body.user_id, status="active")
-        db.add(identity)
-        await db.flush()
-    elif identity.status != "active":
+    try:
+        account, created = await ensure_raw_user_account(db, user_id)
+    except ValueError:
         raise HTTPException(status_code=409, detail={"code": "identity_unavailable"})
-    account = await db.scalar(select(PlatformAccount).where(
-        PlatformAccount.user_id == body.user_id
-    ).with_for_update())
-    if account is None:
-        created = True
-        account = PlatformAccount(
-            id=uuid7(), user_id=body.user_id, display_name=body.user_id,
-            password_hash=None, status="active", auth_revision=1,
-        )
-        db.add(account)
-        await db.flush()
-        db.add(PlatformAccountRole(
-            account_id=account.id, role_key="user", granted_by_account_id=None,
-            granted_at=utcnow(),
-        ))
+    if created:
         await PlatformAuditWriter(db).append(
             category="identity", action="identity.preprovisioned", actor_type="agent_api_key",
             actor_id=key.id, actor_user_id=None, resource_type="platform_account",
             resource_id=account.id, resource_version=account.version, outcome="succeeded",
-            summary="Preprovisioned API user identity", changes={"user_id": body.user_id},
+            summary="Preprovisioned API user identity", changes={"user_id": user_id},
             dedupe_key=f"audit:identity_preprovision:{record.id}",
         )
-    response = {"account_id": account.id, "user_id": body.user_id, "created": created}
-    record.resource_type, record.resource_id, record.http_status = "platform_account", account.id, 200
-    record.response_snapshot = response
+    body = {"account_id": account.id, "user_id": user_id, "created": created}
+    status_code = 201 if created else 200
+    record.resource_type, record.resource_id, record.http_status = (
+        "platform_account", account.id, status_code,
+    )
+    record.response_snapshot = body
     await db.commit()
-    return response
+    http_response.status_code = status_code
+    return body

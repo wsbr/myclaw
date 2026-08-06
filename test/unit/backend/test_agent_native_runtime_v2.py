@@ -11,7 +11,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.core.model_hub.base import BaseLLM, LLMChunk, LLMResponse, TokenUsage, ToolCall
 from app.core.tool_registry.base import RuntimeContext, ToolResult
 from app.database import Base
-from app.models.runtime_v1 import AgentTurn, ProviderAttempt, ToolConfirmation, ToolInvocation
+from app.models.foundation import UserSession
+from app.models.runtime_v1 import AgentTurn, Approval, ProviderAttempt, ToolInvocation
 from app.models.registry import ModelVersion
 from app.runtime.action_dispatcher import ActionDispatcher
 from app.runtime.agent_loop_coordinator import AgentLoopCoordinator, AgentLoopError, LoopIdentity
@@ -78,7 +79,7 @@ def _context():
 def _runtime_context():
     return RuntimeContext(
         session_id="session-1", runner_id="runner-1", task_id="work-1",
-        user_id="user-1", agent_id="agent-1",
+        user_id="user-1", agent_id="agent-1", account_id="account-1",
     )
 
 
@@ -283,15 +284,18 @@ async def test_transport_error_after_payload_is_not_retried():
 
 
 @pytest.mark.asyncio
-async def test_confirmation_policy_creates_durable_invocation_and_confirmation():
+async def test_confirmation_policy_creates_durable_invocation_and_approval():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
-        await connection.run_sync(lambda sync: Base.metadata.create_all(
-            sync, tables=[ToolInvocation.__table__, ToolConfirmation.__table__]
-        ))
+        await connection.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     definition = {**TOOL_DEFINITION, "confirmation_policy": "per_call"}
     async with factory.begin() as db:
+        db.add(UserSession(
+            id="session-1", user_id="user-1", entry_agent_id="agent-1",
+            status="active", origin_type="web", next_event_sequence=1,
+        ))
+        await db.flush()
         result = await ActionDispatcher([definition]).dispatch(
             ToolCallItem(index=0, call_id="approval-call", name="lookup", arguments={"key": "alpha"}),
             capability_snapshot={"id": "cap-1", "effective_tool_keys": ["lookup"]},
@@ -300,12 +304,13 @@ async def test_confirmation_policy_creates_durable_invocation_and_confirmation()
         )
         assert result.durable_wait is True
         invocation = await db.get(ToolInvocation, result.invocation_id)
-        confirmation = await db.scalar(select(ToolConfirmation).where(
-            ToolConfirmation.tool_invocation_id == result.invocation_id,
+        approval = await db.scalar(select(Approval).where(
+            Approval.subject_id == result.invocation_id,
         ))
         assert invocation.status == "waiting_confirmation"
-        assert confirmation.status == "pending"
-        assert confirmation.user_id == "user-1"
+        assert approval.status == "pending"
+        assert approval.target_account_id == "account-1"
+        assert approval.subject_hash == approval.request_hash
     await engine.dispose()
 
 
@@ -345,6 +350,31 @@ def test_context_compaction_never_drops_multiple_pending_results():
         item.get("role") == "user" and item.get("content") == "continue"
         for item in package.messages
     )
+
+
+def test_context_manifest_and_compaction_preserve_clarification_continuation():
+    clarification = [{
+        "role": "assistant", "content": "", "tool_calls": [{
+            "id": "clarification-call", "type": "tool_use", "name": "ask_user",
+            "input": {"question": "Which reporting period?"},
+        }],
+    }, {
+        "role": "tool", "tool_use_id": "clarification-call",
+        "content": '{"status":"succeeded","data":{"answer":"2026 Q2"}}',
+    }]
+    package = ContextAssembler().assemble(
+        platform_rules="rules", agent_instructions="instructions",
+        current_input="finish the report",
+        history=[{"role": "user", "content": "old " * 5000}],
+        pending_results=clarification,
+        working_plan={"revision": 3, "items": [{"text": "publish", "status": "in_progress"}]},
+        token_budget=600,
+    )
+    assert package.compaction is not None
+    assert package.compaction["working_plan_revision"] == 3
+    assert any(item.get("source") == "working_plan" for item in package.manifest)
+    assert sum(item.get("source") == "pending_result" for item in package.manifest) == 2
+    assert package.messages[-2:] == tuple(clarification)
 
 
 @pytest.mark.asyncio

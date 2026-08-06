@@ -14,7 +14,7 @@ from app.database import get_db
 from app.deps import SessionActor, get_session_actor
 from app.models.agent_v1 import AgentBlueprint
 from app.models.common import utcnow, uuid7
-from app.models.foundation import IdempotencyRecord, UserIdentity, UserSession
+from app.models.foundation import IdempotencyRecord, UserSession
 from app.models.runtime_v1 import Message, Run, SessionSandbox
 from app.schemas.runtime_v1 import (
     ChatCommandResponse,
@@ -30,6 +30,7 @@ from app.services.visible_events import VisibleEventProjection, event_public_dic
 from app.services.cursor_service import SortKey, paginate_scalars
 from app.database import AsyncSessionLocal
 from app.config import settings
+from app.services.raw_identity_service import ensure_raw_user_account
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
@@ -66,8 +67,10 @@ async def _idempotency(
 async def _owned_session(db: AsyncSession, session_id: str, actor: SessionActor) -> UserSession:
     session = await db.get(UserSession, session_id)
     allowed = session is not None and (
-        (actor.account is not None and session.user_id == actor.account.user_id)
+        (actor.api_key is None and actor.account is not None
+         and session.user_id == actor.account.user_id)
         or (actor.api_key is not None and session.origin_api_key_id == actor.api_key.id
+            and actor.account is not None and session.account_id == actor.account.id
             and session.entry_agent_id == actor.api_key.agent_id)
     )
     if not allowed:
@@ -85,13 +88,13 @@ async def _session_response(db: AsyncSession, session: UserSession) -> SessionRe
 
 @router.get("", response_model=dict)
 async def list_sessions(
-    user_id: str | None = None, limit: int = 50, cursor: str | None = None,
+    limit: int = 50, cursor: str | None = None,
     db: AsyncSession = Depends(get_db),
     actor: SessionActor = Depends(get_session_actor),
 ):
-    if actor.api_key and not user_id:
-        raise HTTPException(status_code=422, detail={"code": "user_id_required"})
-    target_user_id = user_id if actor.api_key else actor.account.user_id
+    if actor.account is None:
+        raise HTTPException(status_code=403, detail={"code": "identity_mapping_required"})
+    target_user_id = actor.account.user_id
     query = select(UserSession).where(UserSession.user_id == target_user_id)
     if actor.api_key:
         query = query.where(UserSession.origin_api_key_id == actor.api_key.id,
@@ -112,24 +115,26 @@ async def create_session(
     db: AsyncSession = Depends(get_db), actor: SessionActor = Depends(get_session_actor),
 ):
     expected_origin = "api" if actor.api_key else "web"
-    if body.origin_type != expected_origin:
-        raise HTTPException(status_code=403, detail={"code": "invalid_session_origin", "expected": expected_origin})
     if actor.api_key and body.entry_agent_id != actor.api_key.agent_id:
         raise HTTPException(status_code=403, detail={"code": "api_key_agent_mismatch"})
-    target_user_id = body.user_id if actor.api_key else actor.account.user_id
-    if actor.api_key and not target_user_id:
-        raise HTTPException(status_code=422, detail={"code": "user_id_required"})
-    if not actor.api_key and body.user_id and body.user_id != actor.account.user_id:
-        raise HTTPException(status_code=403, detail={"code": "user_id_not_allowed"})
-    identity = await db.get(UserIdentity, target_user_id)
-    if identity is None or identity.status != "active":
-        raise HTTPException(status_code=409, detail={"code": "identity_not_preprovisioned"})
+    if actor.api_key and actor.account is None:
+        try:
+            account, _ = await ensure_raw_user_account(db, actor.asserted_user_id)
+        except ValueError:
+            raise HTTPException(status_code=409, detail={"code": "identity_mapping_required"})
+        actor = SessionActor(
+            account=account, api_key=actor.api_key,
+            asserted_user_id=actor.asserted_user_id,
+        )
+    if actor.account is None:
+        raise HTTPException(status_code=403, detail={"code": "identity_mapping_required"})
+    target_user_id = actor.account.user_id
     agent = await db.get(AgentBlueprint, body.entry_agent_id)
     if agent is None or (not actor.api_key and agent.visibility == "private" and agent.owner_account_id != actor.account.id and "admin" not in actor.roles):
         raise HTTPException(status_code=404, detail="Agent not found")
     record, replay = await _idempotency(
         db, actor=actor, operation="create_session", key=idempotency_key,
-        request=body.model_dump(mode="json"),
+        request={"entry_agent_id": body.entry_agent_id},
     )
     if replay and record.response_snapshot:
         return SessionResponse.model_validate(record.response_snapshot)
@@ -137,7 +142,6 @@ async def create_session(
         session = await create_user_session(
             db, user_id=target_user_id, entry_agent_id=body.entry_agent_id,
             origin_type=expected_origin, origin_api_key_id=actor.api_key.id if actor.api_key else None,
-            title=body.title,
         )
     except AgentUnavailable as error:
         await db.rollback()
@@ -206,12 +210,10 @@ async def create_message(
     idempotency_key: str = Header(alias="Idempotency-Key"),
     db: AsyncSession = Depends(get_db), actor: SessionActor = Depends(get_session_actor),
 ):
-    if body.mode != "chat":
-        raise HTTPException(status_code=422, detail={"code": "unsupported_mode"})
     session = await _owned_session(db, session_id, actor)
     record, replay = await _idempotency(
         db, actor=actor, operation="create_chat_run", key=idempotency_key,
-        request={"session_id": session_id, **body.model_dump()},
+        request={"session_id": session_id, "content": body.content},
     )
     if replay and record.response_snapshot:
         return ChatCommandResponse.model_validate(record.response_snapshot)
@@ -289,12 +291,14 @@ async def stream_events(
                         user_id=user_id, session_id=session_id, after_sequence=cursor,
                         scan_limit=500, limit=100,
                     )
+                    emitted_sequence = cursor
                     if page.items:
                         for event in page.items:
                             data = json.dumps(event_public_dict(event), ensure_ascii=False, separators=(",", ":"))
                             yield f"id: {event.sequence}\nevent: {event.event_type}\ndata: {data}\n\n"
+                            emitted_sequence = event.sequence
                     if page.scanned_through_sequence > cursor:
-                        if not page.items:
+                        if page.scanned_through_sequence > emitted_sequence:
                             yield (
                                 f"id: {page.scanned_through_sequence}\nevent: cursor\n"
                                 f"data: {{\"scanned_through_sequence\":{page.scanned_through_sequence}}}\n\n"

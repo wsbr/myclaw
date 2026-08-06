@@ -55,11 +55,30 @@ async def workspace_root(db, *, workspace_id: str | None, session_id: str) -> Pa
     return root
 
 
+async def private_agent_root(
+    db, *, workspace_id: str | None, session_id: str, agent_id: str,
+) -> Path:
+    root = await workspace_root(
+        db, workspace_id=workspace_id, session_id=session_id,
+    )
+    if not isinstance(agent_id, str) or not agent_id or "/" in agent_id or "\\" in agent_id:
+        raise WorkspaceFileError("a valid Agent identity is required for Workspace access")
+    private = _inside(root, root / "agents" / agent_id)
+    private.mkdir(parents=True, exist_ok=True)
+    return private
+
+
 async def resolve_workspace_path(
     db, *, workspace_id: str | None, session_id: str, relative_path: str,
-    allow_dot: bool = False,
+    agent_id: str | None = None, allow_dot: bool = False,
 ) -> tuple[Path, Path, str]:
-    root = await workspace_root(db, workspace_id=workspace_id, session_id=session_id)
+    root = (
+        await private_agent_root(
+            db, workspace_id=workspace_id, session_id=session_id, agent_id=agent_id,
+        )
+        if agent_id else
+        await workspace_root(db, workspace_id=workspace_id, session_id=session_id)
+    )
     relative = _relative_path(relative_path, allow_dot=allow_dot)
     if relative.parts and relative.parts[0] == ".myclaw":
         raise WorkspaceFileError("the .myclaw Workspace namespace is reserved by the platform")
@@ -88,7 +107,7 @@ async def resolve_read_path(db, *, context, value: str) -> tuple[Path, str]:
         return candidate, value
     _, candidate, relative = await resolve_workspace_path(
         db, workspace_id=context.workspace_id, session_id=context.session_id,
-        relative_path=value,
+        relative_path=value, agent_id=context.agent_id,
     )
     return candidate, relative
 
