@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
+import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Alert, Button, Card, Input, Modal, Select, Space, Spin, Tag, message as toast } from 'antd'
 import { ArrowLeftOutlined, HistoryOutlined, SendOutlined, StopOutlined } from '@ant-design/icons'
 import { agentsApi } from '@/api/agents'
-import { ApprovalAction, GroupFormationRevision, Message, ToolConfirmation, sessionsApi, subscribeSessionEvents } from '@/api/sessions'
+import { ApprovalAction, Message, ToolConfirmation, sessionsApi, subscribeSessionEvents } from '@/api/sessions'
 import { cn } from '@/lib/utils'
 import PlanPanel from './PlanPanel'
 import GroupPanel from './GroupPanel'
@@ -13,6 +13,7 @@ import SessionInspector from './SessionInspector'
 export default function SessionPage() {
   const { agentId, sessionId: routeSessionId } = useParams<{ agentId: string; sessionId?: string }>()
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
   const queryClient = useQueryClient()
   const [sessionId, setSessionId] = useState<string | null>(routeSessionId ?? null)
   const [input, setInput] = useState('')
@@ -44,37 +45,56 @@ export default function SessionPage() {
     refetchInterval: query => query.state.data?.some(run => !['completed', 'cancelled', 'failed'].includes(run.status)) ? 2500 : false,
   })
   const activePlanRun = planRuns.find(run => !['completed', 'cancelled', 'failed'].includes(run.status)) || planRuns[0]
-  const { data: formations = [] } = useQuery({
-    queryKey: ['group-formations', sessionId], queryFn: () => sessionsApi.listGroupFormations(sessionId!),
-    enabled: !!sessionId,
-    refetchInterval: query => query.state.data?.some(item => item.status === 'generating') ? 2500 : false,
+  const { data: groups = [] } = useQuery({
+    queryKey: ['groups', sessionId], queryFn: () => sessionsApi.listGroups(sessionId!), enabled: !!sessionId,
   })
-  const activeFormation = formations[0]
-  const groupId = activeFormation?.status === 'confirmed' ? activeFormation.group_session_id : null
-  const { data: groupNodes = [] } = useQuery({
-    queryKey: ['group-nodes', groupId], queryFn: () => sessionsApi.getGroupNodes(groupId!), enabled: !!groupId,
-  })
-  const { data: groupSuggestedEdges = [] } = useQuery({
-    queryKey: ['group-suggested-edges', groupId],
-    queryFn: () => sessionsApi.getGroupSuggestedEdges(groupId!), enabled: !!groupId,
-  })
-  const { data: groupCollaborationEdges = [] } = useQuery({
-    queryKey: ['group-collaboration-edges', groupId],
-    queryFn: () => sessionsApi.getGroupCollaborationEdges(groupId!), enabled: !!groupId,
+  const requestedGroupId = searchParams.get('group')
+  const activeGroup = groups.find(item => item.id === requestedGroupId) || groups[0]
+  const groupId = activeGroup?.id || null
+  const { data: groupMembers = [] } = useQuery({
+    queryKey: ['group-memberships', groupId], queryFn: () => sessionsApi.getGroupMemberships(groupId!), enabled: !!groupId,
   })
   const { data: groupRuns = [] } = useQuery({
     queryKey: ['group-runs', groupId], queryFn: () => sessionsApi.getGroupRuns(groupId!), enabled: !!groupId,
     refetchInterval: query => query.state.data?.some(item => ['running', 'waiting', 'settling'].includes(item.run.lifecycle)) ? 2500 : false,
   })
-  const activeGroupRun = groupRuns[0]
-  const groupIsOpen = activeFormation?.group_session.status === 'open'
+  const activeGroupRun = groupRuns.find(item => !['completed', 'cancelled', 'failed'].includes(item.run.status)) || groupRuns[0]
+  const groupIsOpen = activeGroup?.status === 'open'
   const groupRunSettling = activeGroupRun?.run.lifecycle === 'settling'
   const { data: groupMessages = [] } = useQuery({
-    queryKey: ['group-messages', activeGroupRun?.id],
-    queryFn: () => sessionsApi.getGroupRunMessages(activeGroupRun!.id), enabled: !!activeGroupRun,
+    queryKey: ['group-messages', groupId],
+    queryFn: () => sessionsApi.getGroupMessages(groupId!), enabled: !!groupId,
+  })
+  const groupGraphQueries = useQueries({
+    queries: groupRuns.map(groupRun => ({
+      queryKey: ['group-interaction-graph', groupRun.id],
+      queryFn: () => sessionsApi.getInteractionGraph(groupRun.id),
+      enabled: !!groupId,
+    })),
+  })
+  const interactionGraph = useMemo(() => {
+    const nodes = new Map<string, NonNullable<(typeof groupGraphQueries)[number]['data']>['nodes'][number]>()
+    const edges = new Map<string, NonNullable<(typeof groupGraphQueries)[number]['data']>['edges'][number]>()
+    groupGraphQueries.forEach(query => {
+      query.data?.nodes.forEach(node => nodes.set(node.agent_id, node))
+      query.data?.edges.forEach(edge => edges.set(`${edge.cause_type}:${edge.cause_id}`, edge))
+    })
+    return { nodes: [...nodes.values()], edges: [...edges.values()] }
+  }, [groupGraphQueries])
+  const { data: sharedTasks = [] } = useQuery({
+    queryKey: ['group-shared-tasks', groupId],
+    queryFn: () => sessionsApi.getSharedTasks(groupId!), enabled: !!groupId,
+  })
+  const { data: groupPlans = [] } = useQuery({
+    queryKey: ['group-working-plans', activeGroupRun?.run.id],
+    queryFn: () => sessionsApi.getWorkingPlans(activeGroupRun!.run.id), enabled: !!activeGroupRun,
+  })
+  const { data: networkCards } = useQuery({
+    queryKey: ['agent-network', 'group-ui'],
+    queryFn: () => agentsApi.searchNetwork({ group_enabled: true, limit: 100 }),
   })
   const latestRunId = activeRunId || (mode === 'plan' ? activePlanRun?.id : null)
-    || (mode === 'group' ? activeGroupRun?.run.id || activeFormation?.generation_run.id : null)
+    || (mode === 'group' ? activeGroupRun?.run.id : null)
     || [...messages].reverse().find(item => item.run_id)?.run_id || null
   const { data: activeRun } = useQuery({
     queryKey: ['run', latestRunId], queryFn: () => sessionsApi.getRun(latestRunId!), enabled: !!latestRunId,
@@ -109,8 +129,8 @@ export default function SessionPage() {
   useEffect(() => {
     setSessionId(routeSessionId ?? null)
     setActiveRunId(null)
-    setMode('chat')
-  }, [routeSessionId])
+    setMode(searchParams.get('mode') === 'group' ? 'group' : 'chat')
+  }, [routeSessionId, searchParams])
 
   useEffect(() => {
     if (sessionRecord?.interaction_mode === 'plan') setMode('plan')
@@ -150,15 +170,16 @@ export default function SessionPage() {
         queryClient.invalidateQueries({ queryKey: ['required-actions'] })
       }
       if (event.event_type.startsWith('group')) {
-        queryClient.invalidateQueries({ queryKey: ['group-formations', sessionId] })
-        queryClient.invalidateQueries({ queryKey: ['group-nodes'] })
+        queryClient.invalidateQueries({ queryKey: ['groups', sessionId] })
+        queryClient.invalidateQueries({ queryKey: ['group-memberships'] })
         queryClient.invalidateQueries({ queryKey: ['group-runs'] })
         queryClient.invalidateQueries({ queryKey: ['group-messages'] })
-        queryClient.invalidateQueries({ queryKey: ['group-collaboration-edges'] })
+        queryClient.invalidateQueries({ queryKey: ['group-interaction-graph'] })
+        queryClient.invalidateQueries({ queryKey: ['group-shared-tasks'] })
         queryClient.invalidateQueries({ queryKey: ['required-actions'] })
       }
       if (event.event_type.startsWith('agent_invocation.')) {
-        queryClient.invalidateQueries({ queryKey: ['group-collaboration-edges'] })
+        queryClient.invalidateQueries({ queryKey: ['group-interaction-graph'] })
         if ('run_id' in event) {
           queryClient.invalidateQueries({ queryKey: ['agent-invocations', event.run_id] })
         }
@@ -181,7 +202,7 @@ export default function SessionPage() {
       queryClient.invalidateQueries({ queryKey: ['messages', sessionId] })
       queryClient.invalidateQueries({ queryKey: ['session', sessionId] })
       queryClient.invalidateQueries({ queryKey: ['session-runs', sessionId] })
-      queryClient.invalidateQueries({ queryKey: ['group-formations', sessionId] })
+      queryClient.invalidateQueries({ queryKey: ['groups', sessionId] })
       queryClient.invalidateQueries({ queryKey: ['required-actions'] })
       queryClient.invalidateQueries({ queryKey: ['session-inspector-events', sessionId] })
     })
@@ -229,23 +250,18 @@ export default function SessionPage() {
   })
   const sendGroup = useMutation({
     mutationFn: async (content: string) => {
-      const id = await ensureSession()
-      if (!activeFormation || ['rejected', 'cancelled', 'failed'].includes(activeFormation.status)) {
-        return { kind: 'formation' as const, value: await sessionsApi.createGroupFormation(id, content) }
-      }
-      if (activeFormation.status !== 'confirmed') throw new Error('Group Formation 尚未确认')
+      await ensureSession()
+      if (!activeGroup) throw new Error('请先从 Agent Network 选择三名成员直接建组')
       if (!groupIsOpen) throw new Error('Group 已关闭，只能读取历史记录')
       if (groupRunSettling) throw new Error('当前 GroupRun 正在结算，请稍后再提交')
       if (activeGroupRun && ['running', 'waiting'].includes(activeGroupRun.run.lifecycle)) {
         return { kind: 'message' as const, value: await sessionsApi.sendGroupRunMessage(activeGroupRun.id, content, groupRecipient) }
       }
-      return { kind: 'run' as const, value: await sessionsApi.createGroupRun(activeFormation.group_session_id, content, groupRecipient) }
+      return { kind: 'run' as const, value: await sessionsApi.createGroupRun(activeGroup.id, content, groupRecipient) }
     },
     onSuccess: result => {
-      if (result.kind === 'formation') setActiveRunId(result.value.generation_run.id)
       if (result.kind === 'run') setActiveRunId(result.value.run.id)
       setInput(''); setLiveText('')
-      queryClient.invalidateQueries({ queryKey: ['group-formations', sessionId] })
       queryClient.invalidateQueries({ queryKey: ['group-runs'] })
       queryClient.invalidateQueries({ queryKey: ['group-messages'] })
     },
@@ -282,34 +298,22 @@ export default function SessionPage() {
     },
     onError: (error: any) => toast.error(error?.response?.data?.detail?.code || '退出 Plan 失败'),
   })
-  const saveFormation = useMutation({
-    mutationFn: (revision: GroupFormationRevision) => sessionsApi.updateGroupFormation(activeFormation!, revision),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['group-formations', sessionId] }),
-    onError: (error: any) => toast.error(error?.response?.data?.error?.code || 'Group Formation 保存失败'),
-  })
-  const confirmFormation = useMutation({
-    mutationFn: () => sessionsApi.confirmGroupFormation(activeFormation!),
+  const replaceReporter = useMutation({
+    mutationFn: (agentId: string) => sessionsApi.replaceGroupReporter(activeGroupRun!, agentId),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['group-formations', sessionId] })
-      queryClient.invalidateQueries({ queryKey: ['group-nodes'] })
-      queryClient.invalidateQueries({ queryKey: ['group-runs'] })
-      toast.success('Group 图已冻结并开始首个 GroupRun')
+      queryClient.invalidateQueries({ queryKey: ['group-runs', groupId] })
+      toast.success('Reporter 已替换，将重新评估自然收口')
     },
-    onError: (error: any) => toast.error(error?.response?.data?.error?.code || 'Group Formation 确认失败'),
-  })
-  const rejectFormation = useMutation({
-    mutationFn: () => sessionsApi.rejectGroupFormation(activeFormation!),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['group-formations', sessionId] }),
-    onError: (error: any) => toast.error(error?.response?.data?.error?.code || 'Group Formation 拒绝失败'),
+    onError: (error: any) => toast.error(error?.response?.data?.detail?.code || 'Reporter 替换失败'),
   })
   const closeGroup = useMutation({
     mutationFn: () => sessionsApi.closeGroup(
-      activeFormation!.group_session_id,
-      activeFormation!.group_session.version,
+      activeGroup!.id,
+      activeGroup!.version,
       '用户从 Web 工作区关闭群组',
     ),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['group-formations', sessionId] })
+      queryClient.invalidateQueries({ queryKey: ['groups', sessionId] })
       queryClient.invalidateQueries({ queryKey: ['group-runs'] })
       toast.info('Group 已关闭并转为只读')
     },
@@ -362,15 +366,12 @@ export default function SessionPage() {
   const isRunning = Boolean(activeRun && ['running', 'waiting', 'settling'].includes(activeRun.lifecycle))
   const planBusy = sendPlan.isPending || revisePlan.isPending || confirmPlan.isPending
     || rejectPlan.isPending || exitPlan.isPending
-  const groupBusy = saveFormation.isPending || confirmFormation.isPending || rejectFormation.isPending
+  const groupBusy = replaceReporter.isPending || closeGroup.isPending
   const planAlreadyEntered = sessionRecord?.interaction_mode === 'plan'
   const inputDisabled = send.isPending || sendPlan.isPending || sendGroup.isPending
     || (isRunning && mode !== 'group')
     || (mode === 'plan' && Boolean(planAlreadyEntered))
-    || (mode === 'group' && Boolean(groupRunSettling || (activeFormation && (
-      !['confirmed', 'rejected', 'cancelled', 'failed'].includes(activeFormation.status)
-      || (activeFormation.status === 'confirmed' && !groupIsOpen)
-    ))))
+    || (mode === 'group' && Boolean(!activeGroup || groupRunSettling || !groupIsOpen))
 
   return (
     <div className="bg-background flex h-full min-h-[calc(100vh-0px)]">
@@ -466,12 +467,13 @@ export default function SessionPage() {
               onReject={async reason => { await rejectPlan.mutateAsync(reason) }}
               onExit={async () => { await exitPlan.mutateAsync() }}
               onDownload={sessionsApi.downloadArtifact} />}
-            {mode === 'group' && <GroupPanel proposal={activeFormation} nodes={groupNodes} runs={groupRuns}
-              messages={groupMessages} suggestedEdges={groupSuggestedEdges}
-              collaborationEdges={groupCollaborationEdges} busy={groupBusy}
-              onSave={async value => { await saveFormation.mutateAsync(value) }}
-              onConfirm={async () => { await confirmFormation.mutateAsync() }}
-              onReject={async () => { await rejectFormation.mutateAsync() }} />}
+            {mode === 'group' && <GroupPanel group={activeGroup} members={groupMembers} runs={groupRuns}
+              messages={groupMessages} graph={interactionGraph} cards={networkCards?.items || []}
+              plans={groupPlans} artifacts={artifacts} requiredActions={sessionActions}
+              sharedTasks={sharedTasks} busy={groupBusy}
+              onOpenNetwork={() => navigate('/network')}
+              onReplaceReporter={async value => { await replaceReporter.mutateAsync(value) }}
+              onDownload={sessionsApi.downloadArtifact} />}
             {mode === 'chat' && <>
             {historyLoading && <div className="py-20 text-center"><Spin /><p className="mt-3 text-sm text-muted-foreground">恢复持久消息…</p></div>}
             {!historyLoading && messages.length === 0 && (
@@ -496,28 +498,27 @@ export default function SessionPage() {
 
         <footer className="border-t px-5 py-4">
           <div className="mx-auto flex max-w-3xl gap-2">
-            {mode === 'group' && activeFormation?.status === 'confirmed' && <Select
+            {mode === 'group' && activeGroup && <Select
               className="w-56 shrink-0"
               value={groupRecipient ?? ''}
               onChange={value => setGroupRecipient(value || undefined)}
               disabled={!groupIsOpen}
               options={[
-                { value: '', label: '入口 Agent（默认）' },
-                ...groupNodes.map(node => ({
-                  value: node.id,
-                  label: `${node.agent_id.slice(0, 10)}${node.is_entry ? ' · entry' : ''}${node.availability === 'unavailable' ? ' · unavailable' : ''}`,
-                  disabled: node.availability === 'unavailable',
+                { value: '', label: 'Reporter（默认）' },
+                ...groupMembers.filter(member => member.status === 'joined').map(member => ({
+                  value: member.agent_id,
+                  label: networkCards?.items.find(card => card.agent_id === member.agent_id)?.name || member.agent_id.slice(0, 10),
                 })),
               ]}
               aria-label="Group 接收 Agent"
             />}
             <Input.TextArea value={input} onChange={event => setInput(event.target.value)} autoSize={{ minRows: 1, maxRows: 6 }}
-              placeholder={mode === 'plan' ? (planAlreadyEntered ? '请在 Plan 面板中继续讨论、修改方向或批准' : '描述需要只读调查与规划的长任务目标') : mode === 'group' ? '输入 Group Formation 目标、后续 GroupRun 或定向补充' : '输入消息；Enter 发送，Shift+Enter 换行'}
+              placeholder={mode === 'plan' ? (planAlreadyEntered ? '请在 Plan 面板中继续讨论、修改方向或批准' : '描述需要只读调查与规划的长任务目标') : mode === 'group' ? (activeGroup ? '直接 @所选成员，或开始后续 GroupRun' : '请先从 Agent Network 选择三名成员') : '输入消息；Enter 发送，Shift+Enter 换行'}
               disabled={inputDisabled}
               onPressEnter={event => { if (!event.shiftKey) { event.preventDefault(); if (input.trim()) (mode === 'plan' ? sendPlan : mode === 'group' ? sendGroup : send).mutate(input.trim()) } }} />
             <Button type="primary" icon={<SendOutlined />} loading={send.isPending || sendPlan.isPending || sendGroup.isPending}
               disabled={!input.trim() || inputDisabled}
-              onClick={() => (mode === 'plan' ? sendPlan : mode === 'group' ? sendGroup : send).mutate(input.trim())}>{mode === 'plan' ? '进入只读 Plan' : mode === 'group' ? (activeFormation?.status === 'confirmed' ? '提交 Group 工作' : '生成 Group Formation') : '发送'}</Button>
+              onClick={() => (mode === 'plan' ? sendPlan : mode === 'group' ? sendGroup : send).mutate(input.trim())}>{mode === 'plan' ? '进入只读 Plan' : mode === 'group' ? '提交 Group 工作' : '发送'}</Button>
           </div>
         </footer>
       </main>

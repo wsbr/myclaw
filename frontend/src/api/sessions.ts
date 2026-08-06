@@ -193,6 +193,21 @@ export interface GroupConfirmationAction {
   revision_no: number
 }
 
+export interface ReporterSelectionAction {
+  id: string
+  type: 'reporter_selection'
+  status: 'pending'
+  session_id: string
+  run_id: string
+  version: number
+  presentation: {
+    title: string
+    summary: string
+    group_run_id: string
+    reporter_agent_id: string | null
+  }
+}
+
 export interface GroupParticipant {
   id: string
   participant_key: string
@@ -256,21 +271,93 @@ export interface GroupCollaborationEdge {
 export interface GroupRun {
   id: string
   group_session_id: string
-  owner_node_id: string
+  owner_node_id?: string | null
+  reporter_agent_id: string | null
+  summary_epoch: number
+  delivered_summary_epoch: number
   goal: string
-  display_phase: string
+  display_phase?: string
   run: Run
-  agent_versions: Array<{ group_node_id: string; participation_status: 'available' | 'unavailable'; agent_version_id: string | null; unavailable_reason: string | null }>
+  members: GroupRunMember[]
+  agent_versions?: Array<{ group_node_id: string; participation_status: 'available' | 'unavailable'; agent_version_id: string | null; unavailable_reason: string | null }>
+  shared_context: Record<string, unknown>
+  budget_snapshot: Record<string, unknown>
+  policy_snapshot: Record<string, unknown>
+  version: number
 }
 
 export interface GroupMessage {
   id: string
   sender_type: 'user' | 'agent' | 'system'
   sender_agent_id: string | null
+  recipient_agent_id: string | null
   recipient_group_node_id: string | null
+  visibility: 'direct' | 'group' | 'user'
   role: string
   content: string
+  group_run_id?: string | null
+  sequence_no?: number | null
   created_at: string
+}
+
+export interface GroupSession {
+  id: string
+  session_id: string
+  status: 'open' | 'closed' | 'archived'
+  initiator_agent_id: string
+  membership_policy: 'fixed_for_run'
+  version: number
+}
+
+export interface GroupMembership {
+  id: string
+  group_session_id: string
+  agent_id: string
+  status: 'invited' | 'joined' | 'declined' | 'cancelled' | 'left' | 'removed'
+  invited_by_kind: 'user' | 'agent' | 'system'
+  reason: string
+  context_scope: Record<string, unknown>
+  authorization_source: string
+  joined_at: string | null
+  ended_at: string | null
+  version: number
+}
+
+export interface GroupRunMember {
+  agent_id: string
+  membership_id: string
+  agent_version_id: string | null
+  participation_status: 'available' | 'unavailable'
+  unavailable_reason: string | null
+  membership_policy: 'fixed_for_run'
+  context_scope: Record<string, unknown>
+  capability_boundary: Record<string, unknown>
+  budget_snapshot: Record<string, unknown>
+}
+
+export interface InteractionGraph {
+  nodes: GroupRunMember[]
+  edges: Array<{
+    source_agent_id: string
+    target_agent_id: string
+    cause_type: 'message' | 'agent_invocation'
+    cause_id: string
+    status: string
+    created_at: string
+  }>
+}
+
+export interface SharedTask {
+  id: string
+  group_session_id: string
+  group_run_id: string | null
+  title: string
+  description: string
+  status: 'pending' | 'in_progress' | 'completed' | 'blocked' | 'cancelled'
+  assignee_agent_id: string | null
+  depends_on_task_ids: string[]
+  result_refs: Array<Record<string, unknown>>
+  version: number
 }
 
 export interface Artifact {
@@ -289,7 +376,7 @@ export interface Artifact {
   created_at: string
 }
 
-export type RequiredAction = ApprovalAction | ToolConfirmation | ClarificationAction | GroupConfirmationAction
+export type RequiredAction = ApprovalAction | ToolConfirmation | ClarificationAction | GroupConfirmationAction | ReporterSelectionAction
 
 const idempotency = () => ({ headers: { 'Idempotency-Key': crypto.randomUUID() } })
 
@@ -331,6 +418,18 @@ export const sessionsApi = {
       headers: { 'Idempotency-Key': crypto.randomUUID(), 'If-Match': `"${plan.version}"` },
     },
   ).then(r => r.data),
+  listGroups: (sessionId: string) => client.get<{ items: GroupSession[] }>(
+    `/sessions/${sessionId}/groups`,
+  ).then(r => r.data.items),
+  createGroup: (
+    sessionId: string,
+    values: {
+      member_agent_ids: string[]
+      goal: string
+      reporter_agent_id?: string
+      shared_context_refs?: string[]
+    },
+  ) => client.post<GroupSession>(`/sessions/${sessionId}/groups`, values, idempotency()).then(r => r.data),
   listGroupFormations: (sessionId: string) => client.get<{ items: GroupFormationProposal[] }>(
     `/sessions/${sessionId}/group-formations`,
   ).then(r => r.data.items),
@@ -356,7 +455,10 @@ export const sessionsApi = {
     `/group-formations/${proposal.id}/reject`, {},
     { headers: { 'Idempotency-Key': crypto.randomUUID(), 'If-Match': `"${proposal.version}"` } },
   ).then(r => r.data),
-  getGroup: (groupId: string) => client.get(`/groups/${groupId}`).then(r => r.data),
+  getGroup: (groupId: string) => client.get<GroupSession>(`/groups/${groupId}`).then(r => r.data),
+  getGroupMemberships: (groupId: string) => client.get<{ items: GroupMembership[] }>(
+    `/groups/${groupId}/memberships`,
+  ).then(r => r.data.items),
   getGroupNodes: (groupId: string) => client.get<{ items: GroupNode[] }>(`/groups/${groupId}/nodes`).then(r => r.data.items),
   getGroupSuggestedEdges: (groupId: string) => client.get<{ items: GroupSuggestedEdge[] }>(
     `/groups/${groupId}/suggested-edges`,
@@ -365,14 +467,28 @@ export const sessionsApi = {
     `/groups/${groupId}/collaboration-edges`,
   ).then(r => r.data.items),
   getGroupRuns: (groupId: string) => client.get<{ items: GroupRun[] }>(`/groups/${groupId}/runs`).then(r => r.data.items),
-  createGroupRun: (groupId: string, content: string, recipientNodeId?: string) => client.post<GroupRun>(
-    `/groups/${groupId}/runs`, { content, recipient_node_id: recipientNodeId, reference_run_ids: [] }, idempotency(),
+  createGroupRun: (groupId: string, content: string, recipientAgentId?: string) => client.post<GroupRun>(
+    `/groups/${groupId}/runs`, { content, recipient_agent_id: recipientAgentId, reference_run_ids: [] }, idempotency(),
   ).then(r => r.data),
+  getGroupMessages: (groupId: string) => client.get<{ items: GroupMessage[] }>(
+    `/groups/${groupId}/messages`,
+  ).then(r => r.data.items),
   getGroupRunMessages: (groupRunId: string) => client.get<{ items: GroupMessage[] }>(
     `/group-runs/${groupRunId}/messages`,
   ).then(r => r.data.items),
-  sendGroupRunMessage: (groupRunId: string, content: string, recipientNodeId?: string) => client.post(
-    `/group-runs/${groupRunId}/messages`, { content, recipient_node_id: recipientNodeId }, idempotency(),
+  sendGroupRunMessage: (groupRunId: string, content: string, recipientAgentId?: string) => client.post(
+    `/group-runs/${groupRunId}/messages`, { content, recipient_agent_id: recipientAgentId }, idempotency(),
+  ).then(r => r.data),
+  getInteractionGraph: (groupRunId: string) => client.get<InteractionGraph>(
+    `/group-runs/${groupRunId}/interaction-graph`,
+  ).then(r => r.data),
+  getSharedTasks: (groupId: string) => client.get<{ items: SharedTask[] }>(
+    `/groups/${groupId}/shared-tasks`,
+  ).then(r => r.data.items),
+  replaceGroupReporter: (groupRun: GroupRun, reporterAgentId: string) => client.post<GroupRun>(
+    `/group-runs/${groupRun.id}/reporter`, { reporter_agent_id: reporterAgentId }, {
+      headers: { 'Idempotency-Key': crypto.randomUUID(), 'If-Match': `"${groupRun.version}"` },
+    },
   ).then(r => r.data),
   cancelGroupRun: (groupRun: GroupRun, reason: string) => client.post<GroupRun>(
     `/group-runs/${groupRun.id}/cancel`, { reason }, {

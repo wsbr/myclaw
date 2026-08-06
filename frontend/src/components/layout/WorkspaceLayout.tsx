@@ -7,6 +7,7 @@ import {
   Cpu,
   LayoutDashboard,
   LogOut,
+  Network,
   PanelLeftClose,
   PanelLeftOpen,
   ScrollText,
@@ -32,11 +33,13 @@ import GovernancePage from '@/pages/Admin/GovernancePage'
 import AuditPage from '@/pages/Admin/AuditPage'
 import MemoriesPage from '@/pages/Memories'
 import AccountPage from '@/pages/Account'
+import AgentNetworkPage from '@/pages/AgentNetwork'
 
 const SIDEBAR_KEY = 'myclaw_sidebar_collapsed'
 
 const navItems: { key: string; label: string; icon: typeof Bot; roles?: string[] }[] = [
   { key: '/agents', label: 'Agents', icon: Bot },
+  { key: '/network', label: 'Agent Network', icon: Network },
   { key: '/memories', label: 'Memory', icon: Brain },
   { key: '/account', label: '我的账号', icon: UserRound },
   { key: '/users', label: '用户管理', icon: Users, roles: ['admin'] },
@@ -49,6 +52,7 @@ const navItems: { key: string; label: string; icon: typeof Bot; roles?: string[]
 
 const breadcrumbMap: Record<string, string> = {
   '/agents': 'Agents',
+  '/network': 'Agent Network',
   '/memories': 'Memory',
   '/account': '我的账号',
   '/users': '用户管理',
@@ -197,6 +201,7 @@ export default function WorkspaceLayout() {
           <Routes>
             <Route path="/" element={<AgentListPage />} />
             <Route path="/agents" element={<AgentListPage />} />
+            <Route path="/network" element={<AgentNetworkPage />} />
             <Route path="/agents/new/config" element={<AgentConfigPage />} />
             <Route path="/agents/:id/config" element={<AgentConfigPage />} />
             {/* 用可选段而非两条独立 Route：否则带/不带 session_id 之间跳转会

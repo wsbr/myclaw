@@ -72,7 +72,39 @@ export interface AgentApiKey {
   secret?: string | null
 }
 
+export interface AgentCard {
+  agent_id: string
+  agent_version_id: string
+  card_content_hash: string
+  name: string
+  description: string
+  identity_kind: string
+  domain_tags: string[]
+  supported_outcomes: string[]
+  accepted_request_summary: string
+  capabilities_summary: Record<string, unknown>
+  collaboration_summary: Record<string, unknown>
+  declaration: Record<string, unknown>
+  attestation: Record<string, unknown>
+  availability: 'available' | 'unavailable'
+  group_enabled: boolean
+  published_at: string
+}
+
 export const agentsApi = {
+  searchNetwork: (params?: {
+    query?: string
+    domain_tag?: string[]
+    capability?: string[]
+    governance_label?: string[]
+    group_enabled?: boolean
+    limit?: number
+  }) => client.get<{ items: AgentCard[]; next_cursor: string | null }>(
+    '/agent-network/cards', { params },
+  ).then(r => r.data),
+  resolveNetworkAgent: (agentId: string) => client.get<AgentCard>(
+    `/agent-network/agents/${agentId}`,
+  ).then(r => r.data),
   list: () => client.get<{ items: AgentSummary[] }>('/agents').then(r => r.data.items),
   getSummary: (id: string) => client.get<AgentSummary>(`/agents/${id}/summary`).then(r => r.data),
   get: (id: string) => client.get<AgentDetail>(`/agents/${id}`).then(r => r.data),

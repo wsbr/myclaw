@@ -1,121 +1,191 @@
-import { useEffect, useState } from 'react'
-import { Alert, Button, Card, Descriptions, Empty, Input, Modal, Space, Table, Tag, Typography } from 'antd'
-import ReactFlow, { Background, Controls, type Edge, type Node } from 'reactflow'
+import { Button, Card, Descriptions, Empty, Select, Space, Table, Tag, Typography } from 'antd'
+import ReactFlow, { Background, Controls, MarkerType, type Edge, type Node } from 'reactflow'
 import 'reactflow/dist/style.css'
-import type { GroupCollaborationEdge, GroupFormationProposal, GroupFormationRevision, GroupMessage, GroupNode, GroupRun, GroupSuggestedEdge } from '@/api/sessions'
+
+import type { AgentCard } from '@/api/agents'
+import type {
+  Artifact,
+  GroupMembership,
+  GroupMessage,
+  GroupRun,
+  GroupSession,
+  InteractionGraph,
+  RequiredAction,
+  SharedTask,
+  WorkingPlan,
+} from '@/api/sessions'
 
 interface Props {
-  proposal?: GroupFormationProposal
-  nodes: GroupNode[]
+  group?: GroupSession
+  cards: AgentCard[]
+  members: GroupMembership[]
   runs: GroupRun[]
   messages: GroupMessage[]
-  suggestedEdges: GroupSuggestedEdge[]
-  collaborationEdges: GroupCollaborationEdge[]
+  graph?: InteractionGraph
+  plans: WorkingPlan[]
+  artifacts: Artifact[]
+  requiredActions: RequiredAction[]
+  sharedTasks: SharedTask[]
   busy: boolean
-  onSave: (revision: GroupFormationRevision) => Promise<void>
-  onConfirm: () => Promise<void>
-  onReject: () => Promise<void>
+  onOpenNetwork: () => void
+  onReplaceReporter: (agentId: string) => Promise<void>
+  onDownload: (artifact: Artifact) => void
 }
 
-export default function GroupPanel({ proposal, nodes, runs, messages, suggestedEdges, collaborationEdges, busy, onSave, onConfirm, onReject }: Props) {
-  const [editing, setEditing] = useState(false)
-  const [goal, setGoal] = useState('')
-  const [bootstrap, setBootstrap] = useState('')
-  const [participants, setParticipants] = useState('[]')
-  const [workItems, setWorkItems] = useState('[]')
-  const [edges, setEdges] = useState('[]')
-  const graphNodes = nodes.map<Node>((node, index) => ({
-    id: node.id,
-    position: { x: (index % 3) * 260, y: Math.floor(index / 3) * 150 },
-    data: { label: <div className="min-w-40"><b>{node.agent_id.slice(0, 12)}</b><div className="mt-1 text-xs">{node.is_entry ? 'entry · ' : ''}{node.availability}</div></div> },
-    style: { borderColor: node.availability === 'available' ? '#22c55e' : '#ef4444', borderRadius: 10 },
-  }))
-  const graphEdges: Edge[] = [
-    ...suggestedEdges.map((edge, index) => ({
-      id: `suggested-${index}-${edge.source_node_id}-${edge.target_node_id}`,
-      source: edge.source_node_id, target: edge.target_node_id, label: edge.label,
-      style: { strokeDasharray: '6 4', stroke: '#94a3b8' },
-    })),
-    ...collaborationEdges.map(edge => ({
-      id: edge.id, source: edge.source_node_id, target: edge.target_node_id,
-      label: 'invoke_agent', animated: true, style: { stroke: '#2563eb', strokeWidth: 2 },
-    })),
-  ]
+const short = (value?: string | null) => value ? value.slice(0, 10) : '—'
 
-  useEffect(() => {
-    const revision = proposal?.current_revision
-    if (!revision) return
-    setGoal(revision.goal); setBootstrap(revision.bootstrap_context)
-    setParticipants(JSON.stringify(revision.participants.map(({ participant_key, agent_id, is_entry, initial_responsibility }) =>
-      ({ participant_key, agent_id, is_entry, initial_responsibility })), null, 2))
-    setWorkItems(JSON.stringify(revision.initial_work_items.map(({ work_item_key, participant_key, title, goal, acceptance_criteria }) =>
-      ({ work_item_key, participant_key, title, goal, acceptance_criteria })), null, 2))
-    setEdges(JSON.stringify(revision.suggested_edges.map(({ source_participant_key, target_participant_key, label, rationale }) =>
-      ({ source_participant_key, target_participant_key, label, rationale })), null, 2))
-  }, [proposal?.id, proposal?.version])
+export default function GroupPanel({
+  group, cards, members, runs, messages, graph, plans, artifacts,
+  requiredActions, sharedTasks, busy, onOpenNetwork, onReplaceReporter, onDownload,
+}: Props) {
+  const activeRun = runs.find(item => !['completed', 'cancelled', 'failed'].includes(item.run.status)) || runs[0]
+  const cardByAgent = new Map(cards.map(card => [card.agent_id, card]))
+  const name = (agentId?: string | null) => agentId ? cardByAgent.get(agentId)?.name || short(agentId) : 'Group'
+  const availableMembers = activeRun?.members.filter(item => item.participation_status === 'available') || []
 
-  if (!proposal) return <div className="py-20 text-center"><div className="mb-3 text-3xl">◎</div><p className="text-lg font-semibold">组建一个固定 Agent Group</p><p className="mt-2 text-sm text-muted-foreground">先描述目标；入口 Agent 会生成参与者、初始 Work Item 与建议协作边，确认前不会开始执行。</p></div>
-
-  const revision = proposal.current_revision
-  const awaiting = proposal.status === 'awaiting_confirmation' && !!revision
-  const save = async () => {
-    try {
-      await onSave({ ...revision!, goal, bootstrap_context: bootstrap,
-        participants: JSON.parse(participants), initial_work_items: JSON.parse(workItems),
-        suggested_edges: JSON.parse(edges) })
-      setEditing(false)
-    } catch (error: any) {
-      Modal.error({ title: 'Group Formation 格式无效', content: error?.response?.data?.error?.details?.issues?.join('\n') || error.message })
-    }
+  if (!group) {
+    return (
+      <Card className="mb-5 text-center">
+        <Empty description="当前 Session 尚未建立 Agent-native Group">
+          <Button type="primary" onClick={onOpenNetwork}>从 Agent Network 选择三名成员</Button>
+        </Empty>
+      </Card>
+    )
   }
 
-  return <div className="space-y-4">
-    <Card title={<Space><span>Group Formation</span><Tag>{proposal.status}</Tag>{revision && <Tag>revision {revision.revision_no}</Tag>}</Space>}
-      extra={awaiting && <Space><Button onClick={() => setEditing(true)}>编辑组图</Button><Button danger onClick={onReject}>拒绝</Button><Button type="primary" loading={busy} onClick={onConfirm}>确认并冻结</Button></Space>}>
-      {proposal.status === 'generating' && <Alert type="info" showIcon message="入口 Agent 正在生成关系化 Group Formation；页面可以安全关闭。" />}
-      {awaiting && <Alert type="warning" showIcon message="确认后参与节点与初始定义永久冻结；每个 GroupRun 会单独固定所有节点的 AgentVersion/不可用状态。" />}
-      {proposal.status === 'confirmed' && <Alert type="success" showIcon message="Group 已开放；后续追问会创建新的 GroupRun，不会复活已完成的 Run。" />}
-      {revision && <Descriptions className="mt-4" column={1} size="small">
-        <Descriptions.Item label="目标">{revision.goal}</Descriptions.Item>
-        <Descriptions.Item label="共享 Bootstrap">{revision.bootstrap_context}</Descriptions.Item>
-        <Descriptions.Item label="内容哈希"><Typography.Text code copyable>{revision.content_hash}</Typography.Text></Descriptions.Item>
-      </Descriptions>}
-    </Card>
-
-    {revision && <Card title="参与节点与初始职责"><Table rowKey="participant_key" pagination={false} size="small"
-      dataSource={revision.participants} columns={[
-        { title: '节点', render: (_, row) => <Space><b>{row.participant_key}</b>{row.is_entry && <Tag color="blue">entry</Tag>}</Space> },
-        { title: 'Agent', dataIndex: 'agent_id', render: value => <Typography.Text code>{String(value).slice(0, 14)}</Typography.Text> },
-        { title: '初始职责', dataIndex: 'initial_responsibility' },
-      ]} /></Card>}
-
-    {proposal.status === 'confirmed' && <>
-      <Card title="Group Agent Graph" extra={<Space><Tag>虚线：建议边</Tag><Tag color="blue">实线：实际调用</Tag></Space>}>
-        <div className="h-80 overflow-hidden rounded-lg border bg-muted/20">
-          <ReactFlow nodes={graphNodes} edges={graphEdges} fitView nodesDraggable={false}
-            nodesConnectable={false} elementsSelectable={false} proOptions={{ hideAttribution: true }}>
-            <Background /><Controls showInteractive={false} />
-          </ReactFlow>
+  const graphNodes: Node[] = (graph?.nodes || activeRun?.members || []).map((member, index) => ({
+    id: member.agent_id,
+    position: { x: (index % 3) * 260, y: Math.floor(index / 3) * 150 },
+    data: {
+      label: (
+        <div className="min-w-40">
+          <b>{name(member.agent_id)}</b>
+          <div className="mt-1 text-xs">{member.participation_status} · v{short(member.agent_version_id)}</div>
+          {activeRun?.reporter_agent_id === member.agent_id && <Tag className="mt-1" color="purple">Reporter</Tag>}
         </div>
-      </Card>
-      <Card title="固定 Group 节点"><Table rowKey="id" pagination={false} size="small" dataSource={nodes} columns={[
-        { title: 'Agent', render: (_, row) => <Space><Typography.Text code>{row.agent_id.slice(0, 14)}</Typography.Text>{row.is_entry && <Tag color="blue">entry</Tag>}</Space> },
-        { title: '职责', dataIndex: 'initial_responsibility' },
-        { title: '当前可用性', render: (_, row) => <Tag color={row.availability === 'available' ? 'success' : 'error'}>{row.availability}{row.unavailable_reason ? ` · ${row.unavailable_reason}` : ''}</Tag> },
-      ]} /></Card>
-      <Card title="GroupRun 历史">{runs.length === 0 ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="尚无 GroupRun" /> : runs.map(run =>
-        <div key={run.id} className="mb-3 rounded-lg border p-3"><Space><Tag color={run.run.lifecycle === 'completed' ? 'success' : 'processing'}>{run.display_phase}</Tag>{run.run.outcome && <Tag>{run.run.outcome}</Tag>}</Space><div className="mt-2 text-sm">{run.goal}</div>{run.run.result_summary && <div className="mt-2 whitespace-pre-wrap text-sm text-muted-foreground">{run.run.result_summary}</div>}</div>)}</Card>
-      {messages.length > 0 && <Card title="当前 GroupRun 共享记录"><div className="space-y-3">{messages.map(item =>
-        <div key={item.id} className={`flex ${item.sender_type === 'user' ? 'justify-end' : 'justify-start'}`}><div className={`max-w-[82%] whitespace-pre-wrap rounded-2xl px-4 py-2.5 text-sm ${item.sender_type === 'user' ? 'bg-primary text-primary-foreground' : 'bg-muted'}`}>{item.content}</div></div>)}</div></Card>}
-    </>}
+      ),
+    },
+    style: {
+      borderColor: member.participation_status === 'available' ? '#22c55e' : '#ef4444',
+      borderRadius: 10,
+    },
+  }))
+  const graphEdges: Edge[] = (graph?.edges || []).map(edge => ({
+    id: `${edge.cause_type}-${edge.cause_id}`,
+    source: edge.source_agent_id,
+    target: edge.target_agent_id,
+    label: edge.cause_type === 'message' ? 'message' : 'invoke_agent',
+    animated: edge.status === 'queued' || edge.status === 'running',
+    markerEnd: { type: MarkerType.ArrowClosed },
+    style: {
+      stroke: edge.cause_type === 'message' ? '#0f766e' : '#2563eb',
+      strokeWidth: 2,
+    },
+  }))
 
-    <Modal title="编辑 Group Formation revision" open={editing} onCancel={() => setEditing(false)} onOk={save} confirmLoading={busy} width={900} okText="保存新 revision">
-      <Alert className="mb-4" type="info" message="保存会重新校验 Agent 访问、group_enabled、唯一 entry、Work Item 引用和建议边；原 revision 保持不可变。" />
-      <label className="mb-1 block text-sm font-medium">目标</label><Input.TextArea className="mb-3" value={goal} onChange={event => setGoal(event.target.value)} autoSize />
-      <label className="mb-1 block text-sm font-medium">共享 Bootstrap</label><Input.TextArea className="mb-3" value={bootstrap} onChange={event => setBootstrap(event.target.value)} autoSize={{ minRows: 3 }} />
-      <label className="mb-1 block text-sm font-medium">Participants JSON</label><Input.TextArea className="mb-3 font-mono" value={participants} onChange={event => setParticipants(event.target.value)} autoSize={{ minRows: 8, maxRows: 16 }} />
-      <label className="mb-1 block text-sm font-medium">Initial Work Items JSON</label><Input.TextArea className="mb-3 font-mono" value={workItems} onChange={event => setWorkItems(event.target.value)} autoSize={{ minRows: 8, maxRows: 16 }} />
-      <label className="mb-1 block text-sm font-medium">Suggested Edges JSON</label><Input.TextArea className="font-mono" value={edges} onChange={event => setEdges(event.target.value)} autoSize={{ minRows: 5, maxRows: 12 }} />
-    </Modal>
-  </div>
+  return (
+    <div className="space-y-4">
+      <Card size="small" title="Group 状态" extra={<Tag color={group.status === 'open' ? 'green' : 'default'}>{group.status}</Tag>}>
+        <Descriptions size="small" column={2}>
+          <Descriptions.Item label="Group">{short(group.id)}</Descriptions.Item>
+          <Descriptions.Item label="成员策略">{group.membership_policy}</Descriptions.Item>
+          <Descriptions.Item label="Initiator">{name(group.initiator_agent_id)}</Descriptions.Item>
+          <Descriptions.Item label="成员">{members.filter(item => item.status === 'joined').length}</Descriptions.Item>
+          <Descriptions.Item label="目标" span={2}>{activeRun?.goal || '—'}</Descriptions.Item>
+        </Descriptions>
+      </Card>
+
+      <Card size="small" title="固定的 GroupRun 成员快照">
+        <Table size="small" pagination={false} rowKey="membership_id" dataSource={activeRun?.members || []}
+          columns={[
+            { title: 'Agent', dataIndex: 'agent_id', render: (value: string) => name(value) },
+            { title: 'AgentVersion', dataIndex: 'agent_version_id', render: short },
+            { title: '参与', dataIndex: 'participation_status', render: (value: string) => <Tag>{value}</Tag> },
+            { title: '权限 / 能力边界', dataIndex: 'capability_boundary', render: (value: object) => <Typography.Text code>{JSON.stringify(value)}</Typography.Text> },
+            { title: '预算', dataIndex: 'budget_snapshot', render: (value: object) => <Typography.Text code>{JSON.stringify(value)}</Typography.Text> },
+          ]} />
+      </Card>
+
+      {activeRun?.run.status === 'waiting_user' && (
+        <Card size="small" className="border-amber-300" title={<Space><Tag color="warning">Required Action</Tag>Reporter 不可用</Space>}>
+          <Space wrap>
+            <Typography.Text>选择另一名当前快照内可用成员继续本次 summary epoch：</Typography.Text>
+            <Select className="w-56" defaultValue={activeRun.reporter_agent_id || undefined}
+              options={availableMembers.map(item => ({ value: item.agent_id, label: name(item.agent_id) }))}
+              onChange={value => onReplaceReporter(value)} disabled={busy} />
+          </Space>
+        </Card>
+      )}
+
+      <Card size="small" title="真实 Interaction Graph" extra={<Tag>{graphEdges.length} facts</Tag>}>
+        {graphNodes.length ? (
+          <div className="h-80 rounded border">
+            <ReactFlow nodes={graphNodes} edges={graphEdges} fitView nodesDraggable={false}>
+              <Background /><Controls showInteractive={false} />
+            </ReactFlow>
+          </div>
+        ) : <Empty description="还没有真实 Message 或 AgentInvocation 互动" />}
+        <Typography.Paragraph type="secondary" className="!mb-0 !mt-2 text-xs">
+          图只由已持久化的定向 Message 与 AgentInvocation 生成；没有建议边、角色槽或预设 DAG。
+        </Typography.Paragraph>
+      </Card>
+
+      <Card size="small" title="Group 消息">
+        {messages.length === 0 ? <Empty description="暂无消息" /> : (
+          <div className="max-h-96 space-y-2 overflow-y-auto">
+            {messages.map(item => (
+              <div key={item.id} className="rounded-lg border p-3">
+                <Space wrap>
+                  <Tag color={item.sender_type === 'user' ? 'gold' : 'blue'}>{item.sender_type === 'user' ? '用户' : name(item.sender_agent_id)}</Tag>
+                  <span>→</span>
+                  <Tag>{item.visibility === 'direct' ? name(item.recipient_agent_id) : item.visibility}</Tag>
+                  {item.sequence_no && <Typography.Text type="secondary">#{item.sequence_no}</Typography.Text>}
+                </Space>
+                <div className="mt-2 whitespace-pre-wrap text-sm">{item.content}</div>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        <Card size="small" title="Runs / Summary epochs">
+          <Table size="small" pagination={false} rowKey="id" dataSource={runs}
+            columns={[
+              { title: 'Run', dataIndex: 'id', render: short },
+              { title: '状态', render: (_: unknown, item: GroupRun) => <Tag>{item.run.status}</Tag> },
+              { title: 'Reporter', dataIndex: 'reporter_agent_id', render: name },
+              { title: 'Epoch', render: (_: unknown, item: GroupRun) => `${item.delivered_summary_epoch}/${item.summary_epoch}` },
+            ]} />
+        </Card>
+        <Card size="small" title="SharedTask（可选白板，不调度执行）">
+          {sharedTasks.length ? sharedTasks.map(task => (
+            <div key={task.id} className="mb-2 rounded border p-2 text-sm">
+              <Space><Tag>{task.status}</Tag><b>{task.title}</b></Space>
+              <div className="mt-1 text-muted-foreground">{task.description}</div>
+            </div>
+          )) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="模型尚未按需创建 SharedTask" />}
+        </Card>
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-3">
+        <Card size="small" title="Working Plan">
+          {plans.length ? plans.map(plan => <div key={plan.id} className="mb-2"><Tag>{plan.status}</Tag>{plan.summary}</div>)
+            : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无计划" />}
+        </Card>
+        <Card size="small" title="Artifacts">
+          {artifacts.length ? artifacts.map(artifact => (
+            <Button key={artifact.id} type="link" block className="!text-left" onClick={() => onDownload(artifact)}>
+              {artifact.name} · {artifact.size_bytes} B
+            </Button>
+          )) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无 Artifact" />}
+        </Card>
+        <Card size="small" title="Required Actions">
+          {requiredActions.length ? requiredActions.map(action => (
+            <div key={action.id} className="mb-2 rounded border p-2 text-sm"><Tag color="warning">{action.type}</Tag>{action.status}</div>
+          )) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="无需用户处理" />}
+        </Card>
+      </div>
+    </div>
+  )
 }
