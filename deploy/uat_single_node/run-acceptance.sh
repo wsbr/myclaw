@@ -18,6 +18,9 @@ set -a
 # shellcheck disable=SC1090
 source "${env_file}"
 set +a
+# Shell sourcing removes the JSON string's inner quotes.  The Compose parser
+# does not, so restore the exact JSON value for local pytest imports.
+export CORS_ORIGINS='["http://localhost:8281","http://127.0.0.1:8281"]'
 actual_sha="$(git -C "${root}" rev-parse HEAD)"
 [[ "${MYCLAW_ACCEPTANCE_COMMIT_SHA}" == "${actual_sha}" ]] || {
   echo "UAT SHA does not match the clean workspace" >&2
