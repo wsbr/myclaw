@@ -108,5 +108,5 @@ def test_browser_chat_reconnect_clarification_approval_artifact_and_working_plan
         "GET", f"/api/v1/runs/{complex_message['run_id']}/working-plans",
     ).json()["items"]
     assert len(plans) == 1 and len(plans[0]["items"]) >= 2
-    expect(page.get_by_text(plans[0]["items"][0]["title"], exact=True)).to_be_visible()
+    expect(page.get_by_text(plans[0]["items"][0]["text"], exact=True)).to_be_visible()
     assert not browser_errors
