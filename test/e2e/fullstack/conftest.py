@@ -256,20 +256,29 @@ def assembled_world(phase_api: PhaseOneAPI):
     project_manager = create_agent(
         "项目经理",
         "管理范围、里程碑、依赖、风险、回滚和交付节奏。",
+        "以下控制标记规则优先于所有一般规则。若目标包含 UI-PLAN-UAT-V2，首次只读阶段只调用 "
+        "update_plan 一次，三项均直接标为 completed；在用户另行提交修改方向前严禁第二次调用 "
+        "update_plan。收到一条新的修改方向后只修订一次并立即给出自然语言提案。该目标需要专业"
+        "复核时，discover_agents 只调用一次，参数只传 limit=100，不传 query 或 domain_tags；从"
+        "返回结果选择名称以‘产品经理’开头的候选并 invoke_agent 一次。若目标包含 "
+        "plan-agent-network ask clarification，回答澄清后同样以无过滤的 limit=100 只调用一次 "
+        "discover_agents，从真实结果选择名称以‘产品经理’开头的候选并 invoke_agent 恰好一次。"
+        "plan-agent-network-product/development/test 也必须使用无过滤的 limit=100 目录结果，再按"
+        "名称前缀产品经理/开发工程师/测试工程师各选择对应目标。"
         "你负责项目交付复核，只依据当前委派内容给出范围、依赖、风险、恢复与里程碑建议，"
         "不得声称完成未真实执行的动作。在只读 Plan 中，只要目标已给出范围就先用 "
         "update_plan 形成至少三个清晰步骤，不得把未来要创建的文件当作当前缺失输入。只有目标"
         "明确要求‘澄清统计周期’或包含 ask clarification 时才先 ask_user；回答后继续同一计划。"
         "plan-agent-network-product/development/test 分别表示只委派产品经理/开发工程师/测试工程师"
-        "做一次只读复核：先 discover_agents，再从真实结果中选择对应角色并 invoke_agent 一次。"
+        "做一次只读复核：先按上述无过滤规则 discover_agents，再从真实结果中选择对应角色并 "
+        "invoke_agent 一次。"
         "计划批准进入 direct 后，必须继续完成目标要求的真实 Tool、Artifact 和验证再结束。"
         "非 Group 模式不得调用 search_group_history。若目标包含 PLAN-APPROVAL-ARTIFACT-V2，"
         "只读阶段创建一次 WorkingPlan；用户修改方向时只修订一次；批准进入 direct 后不得再"
         "调用 update_plan，write_file 与 publish_artifact 各成功一次即结束。若目标包含 "
-        "UI-PLAN-UAT-V2，同样在首次只读提案和每次用户修改中各只调用 update_plan 一次，调用"
-        "后立即提交自然语言提案；批准后只创建并发布目标文件，不再修改 WorkingPlan。若目标包含 "
-        "plan-agent-network ask clarification，回答澄清后必须先 discover_agents，再从真实结果"
-        "选择产品经理并 invoke_agent 恰好一次，然后提交可审批计划。"
+        "UI-PLAN-UAT-V2，遵守开头更严格的单 revision 规则；批准后只创建并发布目标文件，不再修改 "
+        "WorkingPlan。若目标包含 plan-agent-network ask clarification，遵守开头的无过滤目录规则，"
+        "完成一次产品经理 invoke_agent 后提交可审批计划。"
         "若目标要求《验收报告 2026.txt》正文 artifact-e2e，先 write_file 写入精确字节后再 "
         "publish_artifact。若目标包含 CAPACITY-RISK-PLAN-V2，严格按目标顺序完成四个文件、"
         "T01-T09 九次 execute 和四次发布；每次只调用一个 Tool，全部完成前不得结束。",
@@ -279,6 +288,11 @@ def assembled_world(phase_api: PhaseOneAPI):
     product_manager = create_agent(
         "产品经理",
         "澄清产品目标、用户价值、范围边界和验收优先级。",
+        "若当前目标包含 CAPACITY-RISK-NETWORK-V2，此规则优先：不得调用 search_group_history。"
+        "初始 WorkItem 依次完成一次 send_group_message 给开发工程师、一次受控 invite_agent 和一次"
+        "包含 CAPACITY-INVOKED-REVIEW 的测试工程师 invoke_agent；这些调用结果返回后立即用普通"
+        "消息结束当前 WorkItem，不轮询或等待 DELIVERY-READY。以后收到 DELIVERY-READY 的新 "
+        "WorkItem 时直接给出产品验收结论并结束。"
         "你负责产品目标和验收。在普通委派中只依据当前内容指出范围、用户价值和验收缺口。"
         "在 CAPACITY-RISK-NETWORK-V2 Group 中你是 Reporter：立即把完整容量计算器契约用 "
         "send_group_message 直接交给开发工程师实施；随后对目标给出的 EXTERNAL-AGENT 发起一次 "
@@ -293,6 +307,11 @@ def assembled_world(phase_api: PhaseOneAPI):
     developer = create_agent(
         "开发工程师",
         "评估实现方案、技术边界、迁移风险和可恢复性。",
+        "若当前目标包含 CAPACITY-RISK-NETWORK-V2，此规则优先：绝不调用 search_group_history。"
+        "严格按目标的九条完整 argv 原样执行，--capacity 后的值绝不能与 --committed 后的值互换。"
+        "完成四个发布后向测试工程师发送 TEST-REQUEST；该发送成功后立即用普通消息结束当前 "
+        "WorkItem，不轮询 TEST-VERIFIED。以后收到 TEST-VERIFIED 的新 WorkItem 时只向产品经理"
+        "发送 DELIVERY-READY，然后立即结束。"
         "你负责开发方案复核，返回实现风险、迁移边界和可验证的技术建议。收到 "
         "CAPACITY-RISK-NETWORK-V2 CAPACITY-IMPLEMENT 时必须持续完成整个契约：依次创建 "
         "requirements.md、capacity_risk.py，严格按目标给出的 T01-T09 argv 各调用 execute 一次，"
@@ -310,16 +329,21 @@ def assembled_world(phase_api: PhaseOneAPI):
     test_engineer = create_agent(
         "测试工程师",
         "设计验收、失败注入、并发与恢复测试。",
+        "若当前目标包含 CAPACITY-INVOKED-REVIEW，此规则优先于所有其他规则：直接用普通消息返回"
+        "边界复核结论，禁止调用 read_file、execute、search_group_history 或任何其他 Tool。"
         "你负责测试方案复核，返回验收样本、失败路径和恢复检查建议。收到 "
         "CAPACITY-RISK-NETWORK-V2 TEST-REQUEST 时，用 read_file 读取 test_report.md；确认其中 9/9 "
-        "后，用 send_group_message 向开发工程师发送包含 TEST-VERIFIED 的独立复核结果。收到 "
-        "CAPACITY-INVOKED-REVIEW 委派时直接返回边界复核结论。",
+        "后，用 send_group_message 向开发工程师发送包含 TEST-VERIFIED 的独立复核结果，发送成功后"
+        "立即用普通消息结束且不得检索历史。",
         [],
         {"read_file", "execute", "search_group_history"},
     )
     personal = create_agent(
         "个人助理",
         "统筹个人任务、专业协作和可下载交付证据。",
+        "若目标包含 CHAT-EXACT-PLAN-V2，此规则优先于所有一般规则：只调用 update_plan 一次，"
+        "恰好三个 item 且 status 全部为 completed；结果返回后立即用普通消息交付结论，严禁第二次"
+        "调用 update_plan 或调用其他 Tool。"
         "你是用户的个人助理。根据业务目标自主选择已装配能力：需要隔离验证脚本时真实执行；"
         "需要可下载交付物时先创建文件再发布；需要专业复核时委派给目录中合适的专员；"
         "在 Group 内只有任务明确要求复用历史结论时才检索组内历史，并且每个任务最多检索一次；"

@@ -102,6 +102,8 @@ export default function SessionPage() {
   const { data: workingPlans = [] } = useQuery({
     queryKey: ['working-plans', latestRunId],
     queryFn: () => sessionsApi.getWorkingPlans(latestRunId!), enabled: !!latestRunId,
+    refetchInterval: activeRun && !['completed', 'cancelled', 'failed'].includes(activeRun.status)
+      ? 2000 : false,
   })
   const activeWorkingPlan = workingPlans.find(plan => plan.status === 'active') || workingPlans[0]
   const { data: agentInvocations = [] } = useQuery({
@@ -196,7 +198,6 @@ export default function SessionPage() {
       }
       if (['run.completed', 'run.cancelled', 'run.failed'].includes(event.event_type) && 'run_id' in event) {
         queryClient.invalidateQueries({ queryKey: ['run', event.run_id] })
-        setActiveRunId(null)
         if (event.event_type === 'run.failed') toast.error(`Agent 执行失败：${String(event.payload.error_code || 'unknown')}`)
       }
     }, value => { setConnected(value); if (!value) setLiveText('') }, () => {
