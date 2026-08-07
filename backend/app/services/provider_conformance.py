@@ -236,7 +236,14 @@ class ProviderConformanceSuite:
         call = requested.tool_calls[0]
         continued = await self.adapter.invoke(ProviderRequest(
             messages=(
-                {"role": "user", "content": "Call the echo Tool and then report its result."},
+                {
+                    "role": "user",
+                    "content": (
+                        "Call the echo Tool exactly once and then report its result. "
+                        "After the Tool result below, do not call any Tool again; return only "
+                        "an ordinary Assistant Message describing that completed result."
+                    ),
+                },
                 {
                     "role": "assistant", "content": "",
                     "tool_calls": [{
