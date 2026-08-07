@@ -164,7 +164,8 @@ def test_plan_revision_cas_restart_approval_and_same_session_implementation(
     session = _session(api, assembled_world["project_manager"]["id"])
     entered = _enter(
         api, session,
-        "复杂任务：已确认第二季度支付侧退款 100 笔、订单侧 97 笔，范围是核对这 3 笔差异；"
+        "PLAN-APPROVAL-ARTIFACT-V2：复杂任务，已确认第二季度支付侧退款 100 笔、订单侧 97 笔，"
+        "范围是核对这 3 笔差异；"
         "请先只读调查方法并分步骤规划，不需要补充数据。批准后把结论写入可下载的"
         "《验收报告 2026.txt》，正文只写 artifact-e2e，完成文件创建和正式发布后再回复。",
     )
@@ -412,12 +413,18 @@ def test_plan_proposals_are_readable_30_of_30_and_adapt_5_of_5(
             "capacity<=0、committed<0 或缺失 committed 均退出 2。JSON 必须 sort_keys 且紧凑。"
             "整数输入及 over_capacity_hours 输出 JSON 整数，utilization_percent 输出保留最多"
             "两位的 JSON 浮点数；错误形状为 {\"error\":{\"code\":CODE,\"message\":MESSAGE}}。"
+            "成功 JSON 的键必须恰好是 committed_hours、over_capacity_hours、risk、"
+            "total_capacity_hours、utilization_percent。"
             "精确 argv：(120,138),(100,74),(100,75),(100,90),(100,91),(100,0),"
             "(0,10),(100,-1),(100,缺失)，均用 python3 capacity_risk.py --capacity N"
             " [--committed N]；错误 code 依次 invalid_capacity/invalid_committed/"
             "missing_committed，message 依次为 total_capacity_hours must be greater than 0、"
             "committed_hours must be greater than or equal to 0、--committed is required。"
-            "requirements.md 必须包含公式、阈值、校验规则和 T01-T09；test_report.md 必须包含"
+            "requirements.md 必须逐字包含 utilization_percent = committed_hours / "
+            "total_capacity_hours * 100、low: utilization < 75、medium: 75 <= utilization <= 90、"
+            "high: utilization > 90、over_capacity_hours = max(committed_hours - "
+            "total_capacity_hours, 0)、total_capacity_hours > 0、committed_hours >= 0 以及 "
+            "T01-T09；test_report.md 必须包含"
             "9/9、argv、stdout、stderr、exit code 和 T01-T09；acceptance_report.md 必须包含"
             "capacity_risk.v1、accepted、9/9 及四个 Artifact 文件名。",
         )

@@ -14,7 +14,9 @@ from app.models.foundation import (
     ExecutionEvent, ExecutionEventRecipient, IdempotencyRecord, OutboxCommand,
     PlatformAccount, UserIdentity, UserSession,
 )
-from app.models.runtime_v1 import Clarification, DurableRunner, Message, Run, WorkItem
+from app.models.runtime_v1 import (
+    Clarification, DurableRunner, Message, Run, RunnerCheckpoint, WorkItem,
+)
 from app.schemas.runtime_v1 import ClarificationAnswerRequest
 
 pytestmark = pytest.mark.unit
@@ -27,7 +29,8 @@ async def test_answer_clarification_resumes_same_work_item_and_replays():
         UserIdentity.__table__, PlatformAccount.__table__, AgentBlueprint.__table__,
         AgentAssemblyVersion.__table__, UserSession.__table__, ExecutionEvent.__table__,
         ExecutionEventRecipient.__table__, Message.__table__, Run.__table__, WorkItem.__table__,
-        DurableRunner.__table__, Clarification.__table__, OutboxCommand.__table__,
+        DurableRunner.__table__, RunnerCheckpoint.__table__, Clarification.__table__,
+        OutboxCommand.__table__,
         IdempotencyRecord.__table__,
     ]
     async with engine.begin() as connection:

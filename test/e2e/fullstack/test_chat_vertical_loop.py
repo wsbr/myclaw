@@ -168,8 +168,9 @@ def test_chat_clarification_working_plan_artifact_restart_and_ten_of_ten(
     # A complex Chat may use update_plan, but it still owns exactly one WorkItem.
     complex_run = _chat(
         api, simple_session["id"],
-        "这是复杂任务。已确认事实：第二季度支付侧退款 100 笔、订单侧 97 笔，差异 3 笔；"
-        "请基于这些现有事实分步骤完成分析，并在完成后给出简短结论，不需要额外数据。",
+        "CHAT-EXACT-PLAN-V2：这是复杂任务。已确认事实：第二季度支付侧退款 100 笔、订单侧 "
+        "97 笔，差异 3 笔；请基于这些现有事实完成分析，只调用 update_plan 一次并提交恰好"
+        "三个已完成步骤，然后给出简短结论，不需要额外数据。",
     )["run"]
     assert api.wait_run(complex_run["id"])["status"] == "completed"
     plans = api.request("GET", f"/api/v1/runs/{complex_run['id']}/working-plans").json()["items"]
@@ -181,7 +182,7 @@ def test_chat_clarification_working_plan_artifact_restart_and_ten_of_ten(
     # Clarification answers resume the same WorkItem through a new Runner epoch.
     clarification_run = _chat(
         api, simple_session["id"],
-        "请先确认统计口径：本轮应该采用哪个周期，然后再给出结论。",
+        "CHAT-CLARIFY-ONLY-V2：请先确认统计口径，本轮应该采用哪个周期，然后再给出结论。",
     )["run"]
     clarification = api.wait_action(simple_session["id"], "clarification")
     work_item_id = clarification["work_item_id"]
@@ -247,7 +248,7 @@ def test_chat_clarification_working_plan_artifact_restart_and_ten_of_ten(
         clarification_run = _chat(
             api, repeated_session["id"],
             f"第 {index} 次行动清单：缺失测试负责人、验收时间和优先级；"
-            "请先确认统计口径：本轮应该采用哪个周期，然后再给出结论。",
+            "CHAT-CLARIFY-ONLY-V2：请先确认统计口径，本轮应该采用哪个周期，然后再给出结论。",
         )["run"]
         clarification = api.wait_action(repeated_session["id"], "clarification")
         api.request(

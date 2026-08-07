@@ -87,7 +87,8 @@ def test_browser_chat_plan_and_admin_surfaces(
 
     page.get_by_role("button", name="Plan", exact=True).click()
     page.get_by_placeholder("描述需要只读调查与规划的长任务目标", exact=True).fill(
-        "复杂任务 plan-agent-network：已确认第二季度支付侧退款 100 笔、订单侧 97 笔，"
+        "UI-PLAN-UAT-V2：复杂任务 plan-agent-network，已确认第二季度支付侧退款 100 笔、"
+        "订单侧 97 笔，"
         "只读规划核对 3 笔差异，现有输入足够；按需调用专业候选复核，"
         "再把结论写入可下载的《验收报告 2026.txt》，正文只写 artifact-e2e 并正式发布。"
     )

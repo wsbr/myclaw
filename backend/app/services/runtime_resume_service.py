@@ -9,8 +9,8 @@ from sqlalchemy import select
 from app.core.tool_registry.base import ToolResult
 from app.models.common import uuid7
 from app.models.runtime_v1 import (
-    AgentInvocation, Approval, Clarification, DurableRunner, ToolInvocation,
-    WorkItem, Run,
+    AgentInvocation, Approval, Clarification, DurableRunner, RunnerCheckpoint,
+    ToolInvocation, WorkItem, Run,
 )
 from app.persistence.reliable_writes import ExecutionEventWriter, OutboxWriter
 from app.persistence.runtime_graph import persist_replacement_runner
@@ -107,6 +107,26 @@ async def queue_work_item_resume(
 ) -> DurableRunner:
     if work.active_runner_id is not None:
         raise RuntimeError("WorkItem already has an active Runner")
+    # A durable Tool/Agent wait replaces the Runner, but it must not replace
+    # the conversation state accumulated by earlier waits on the same
+    # WorkItem. AgentTurn rows are immutable execution evidence rather than
+    # chat history, so the replacement Runner is the only continuation carrier
+    # for those authoritative assistant/tool pairs. Keeping only the newest
+    # batch makes a model see the original goal plus one result and can cause it
+    # to repeat already-committed side effects.
+    prior_results = list(
+        (source_runner.input_snapshot or {}).get("pending_results") or []
+    )
+    latest_checkpoint = await db.scalar(select(RunnerCheckpoint).where(
+        RunnerCheckpoint.runner_id == source_runner.id,
+        RunnerCheckpoint.safe_to_resume.is_(True),
+    ).order_by(RunnerCheckpoint.sequence_no.desc()).limit(1))
+    current_runner_results = list(
+        (latest_checkpoint.state_snapshot or {}).get("pending_results") or []
+    ) if latest_checkpoint is not None else []
+    cumulative_results = [
+        *prior_results, *current_runner_results, *pending_results,
+    ]
     work.execution_epoch += 1
     work.attempt_no += 1
     work.status = "queued"
@@ -128,7 +148,7 @@ async def queue_work_item_resume(
         assembly_snapshot=dict(source_runner.assembly_snapshot or {}), prompt_manifest={},
         input_snapshot={
             **dict(source_runner.input_snapshot or {}),
-            "resume_reason": reason, "pending_results": pending_results,
+            "resume_reason": reason, "pending_results": cumulative_results,
         },
     )
     run.status = "active"

@@ -18,6 +18,7 @@ from app.models.runtime_v1 import (
     WorkItem, WorkingPlan,
 )
 from app.services.plan_mode_service import PlanSubjectChanged, assert_current_plan_subject
+from app.services.runtime_resume_service import queue_work_item_resume
 from app.services.working_plan_service import update_working_plan
 from app.workers.runtime_worker import RunnerFenced, RuntimeWorker
 from unit.backend.runtime_worker_testkit import create_runtime_world
@@ -232,6 +233,58 @@ async def test_recovery_carries_latest_persisted_tool_continuation(monkeypatch):
             DurableRunner.work_item_id == world.work_id,
         ).order_by(DurableRunner.execution_epoch)))
         assert runners[-1].input_snapshot["pending_results"] == continuation
+    await world.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_durable_resume_accumulates_prior_authoritative_results():
+    world = await create_runtime_world()
+    first = [
+        {"role": "assistant", "content": "", "tool_calls": [{
+            "id": "call-1", "type": "tool_use", "name": "write_file",
+            "input": {"path": "requirements.md"},
+        }]},
+        {"role": "tool", "tool_use_id": "call-1", "content": '{"status":"succeeded"}'},
+    ]
+    second = [
+        {"role": "assistant", "content": "", "tool_calls": [{
+            "id": "call-2", "type": "tool_use", "name": "execute",
+            "input": {"argv": ["python3", "capacity_risk.py"]},
+        }]},
+        {"role": "tool", "tool_use_id": "call-2", "content": '{"status":"succeeded"}'},
+    ]
+    async with world.factory.begin() as db:
+        work = await db.get(WorkItem, world.work_id)
+        run = await db.get(Run, world.run_id)
+        source = await db.get(DurableRunner, world.runner_id)
+        source.status = "succeeded"
+        source.input_snapshot = {"message_id": "message-1", "pending_results": first}
+        db.add(RunnerCheckpoint(
+            runner_id=source.id, work_item_id=work.id, sequence_no=2,
+            checkpoint_type="tool_results_persisted",
+            state_snapshot={"pending_results": [{
+                "role": "tool", "tool_use_id": "inline-call",
+                "content": '{"status":"succeeded","summary":"message sent"}',
+            }]},
+            execution_epoch=source.execution_epoch, context_manifest={},
+            result_cursor={}, pending_refs={}, budget_snapshot={},
+            last_completed_step="tool_results_persisted", safe_to_resume=True,
+        ))
+        work.active_runner_id = None
+        replacement = await queue_work_item_resume(
+            db, work=work, run=run, source_runner=source,
+            pending_results=second, reason="tool_result",
+            caused_by_event_id="event-2", actor_id="test",
+        )
+        assert replacement.input_snapshot["message_id"] == "message-1"
+        assert replacement.input_snapshot["pending_results"] == [
+            *first,
+            {
+                "role": "tool", "tool_use_id": "inline-call",
+                "content": '{"status":"succeeded","summary":"message sent"}',
+            },
+            *second,
+        ]
     await world.engine.dispose()
 
 

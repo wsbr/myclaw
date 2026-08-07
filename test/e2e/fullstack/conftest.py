@@ -263,6 +263,13 @@ def assembled_world(phase_api: PhaseOneAPI):
         "plan-agent-network-product/development/test 分别表示只委派产品经理/开发工程师/测试工程师"
         "做一次只读复核：先 discover_agents，再从真实结果中选择对应角色并 invoke_agent 一次。"
         "计划批准进入 direct 后，必须继续完成目标要求的真实 Tool、Artifact 和验证再结束。"
+        "非 Group 模式不得调用 search_group_history。若目标包含 PLAN-APPROVAL-ARTIFACT-V2，"
+        "只读阶段创建一次 WorkingPlan；用户修改方向时只修订一次；批准进入 direct 后不得再"
+        "调用 update_plan，write_file 与 publish_artifact 各成功一次即结束。若目标包含 "
+        "UI-PLAN-UAT-V2，同样在首次只读提案和每次用户修改中各只调用 update_plan 一次，调用"
+        "后立即提交自然语言提案；批准后只创建并发布目标文件，不再修改 WorkingPlan。若目标包含 "
+        "plan-agent-network ask clarification，回答澄清后必须先 discover_agents，再从真实结果"
+        "选择产品经理并 invoke_agent 恰好一次，然后提交可审批计划。"
         "若目标要求《验收报告 2026.txt》正文 artifact-e2e，先 write_file 写入精确字节后再 "
         "publish_artifact。若目标包含 CAPACITY-RISK-PLAN-V2，严格按目标顺序完成四个文件、"
         "T01-T09 九次 execute 和四次发布；每次只调用一个 Tool，全部完成前不得结束。",
@@ -276,7 +283,9 @@ def assembled_world(phase_api: PhaseOneAPI):
         "在 CAPACITY-RISK-NETWORK-V2 Group 中你是 Reporter：立即把完整容量计算器契约用 "
         "send_group_message 直接交给开发工程师实施；随后对目标给出的 EXTERNAL-AGENT 发起一次 "
         "invite_agent（固定成员策略拒绝也是必须保留的审计事实），并 invoke_agent 一次测试工程师"
-        "做边界复核。收到开发的 DELIVERY-READY 后，明确完成产品验收并结束。不得用缺口清单"
+        "做边界复核；该委派文字必须包含 CAPACITY-INVOKED-REVIEW，并明确只需直接返回审查"
+        "意见、不得调用 execute 或重跑九例。收到开发的 DELIVERY-READY 后，明确完成产品验收"
+        "并结束。不得用缺口清单"
         "代替真实协作。",
         [],
         {"search_group_history"},
@@ -287,6 +296,10 @@ def assembled_world(phase_api: PhaseOneAPI):
         "你负责开发方案复核，返回实现风险、迁移边界和可验证的技术建议。收到 "
         "CAPACITY-RISK-NETWORK-V2 CAPACITY-IMPLEMENT 时必须持续完成整个契约：依次创建 "
         "requirements.md、capacity_risk.py，严格按目标给出的 T01-T09 argv 各调用 execute 一次，"
+        "capacity_risk.py 的成功 JSON 键必须恰好为 committed_hours、over_capacity_hours、risk、"
+        "total_capacity_hours、utilization_percent，所有 JSON 都用 sort_keys=True 和 "
+        "separators=(\",\", \":\") 输出并保留换行；requirements.md 必须逐字保留目标列出的"
+        "七条 contract line。"
         "再创建 test_report.md（明确写 9/9）和 acceptance_report.md（明确写 capacity_risk.v1），"
         "随后把四个文件逐一 publish_artifact 到 Group。全部 Tool 结果成功后，向测试工程师发送 "
         "TEST-REQUEST；收到 TEST-VERIFIED 后向产品经理发送 DELIVERY-READY。每次只调用一个 Tool，"
@@ -309,13 +322,19 @@ def assembled_world(phase_api: PhaseOneAPI):
         "统筹个人任务、专业协作和可下载交付证据。",
         "你是用户的个人助理。根据业务目标自主选择已装配能力：需要隔离验证脚本时真实执行；"
         "需要可下载交付物时先创建文件再发布；需要专业复核时委派给目录中合适的专员；"
-        "在 Group 内只有任务明确要求复用历史结论时才检索组内历史，并且每个任务最多检索一次。"
+        "在 Group 内只有任务明确要求复用历史结论时才检索组内历史，并且每个任务最多检索一次；"
+        "非 Group 模式不得调用 search_group_history。"
         "不得用文字伪造工具、协作或文件发布结果。"
         "Plan 和 Group 提案必须严格满足平台提供的结构化契约。用户明确说‘先确认统计口径’时"
         "必须 ask_user 一次；收到回答后直接完成，不得再次追问。用户要求《验收报告 2026.txt》"
         "且正文 artifact-e2e 时，必须先 write_file 写入精确字节 artifact-e2e，再 "
         "publish_artifact，二者成功前不得文字声称完成。复杂分析若已有事实或只要求方法结论，"
-        "先用 update_plan 建立恰好三个步骤并完成，不能因可选数据而 ask_user。只需一句确认的"
+        "若目标包含 CHAT-CLARIFY-ONLY-V2，只调用 ask_user 恰好一次；收到答案后直接用普通"
+        "消息给出结论，禁止 update_plan、read_file、write_file、execute、publish_artifact、"
+        "search_group_history 或 invoke_agent；该规则优先于后面的复杂任务规则。"
+        "先用 update_plan 建立恰好三个步骤并完成，不能因可选数据而 ask_user。若目标包含 "
+        "CHAT-EXACT-PLAN-V2，则在完成分析后只调用 update_plan 一次，提交恰好三个 status 均为 "
+        "completed 的步骤，不得再修订该 WorkingPlan。只需一句确认的"
         "简单请求直接回答且不得创建 WorkingPlan。只读 Plan 的目标已足以规划时不得追问；批准"
         "进入 direct 后继续完成目标中的真实文件和发布。",
         [project_manager["id"], product_manager["id"], developer["id"], test_engineer["id"]],

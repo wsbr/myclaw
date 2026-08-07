@@ -50,7 +50,9 @@ def test_browser_chat_reconnect_clarification_approval_artifact_and_working_plan
     composer = page.get_by_placeholder("输入消息；Enter 发送，Shift+Enter 换行", exact=True)
     expect(composer).to_be_visible(timeout=15_000)
 
-    composer.fill("请先确认统计口径：本轮应该采用哪个周期，然后再给出结论。")
+    composer.fill(
+        "CHAT-CLARIFY-ONLY-V2：请先确认统计口径，本轮应该采用哪个周期，然后再给出结论。"
+    )
     page.get_by_role("button", name=re.compile("发送$")).click()
     expect(page.get_by_text("需要补充信息", exact=True)).to_be_visible(timeout=15_000)
     session_id = page.url.rstrip("/").split("/")[-1]
@@ -95,8 +97,9 @@ def test_browser_chat_reconnect_clarification_approval_artifact_and_working_plan
     expect(page.get_by_text("published", exact=True)).to_be_visible()
 
     complex_goal = (
-        "这是复杂任务。已确认第二季度支付侧退款 100 笔、订单侧 97 笔；"
-        "请基于现有事实分步骤完成退款分析并交付结论，不需要额外数据。"
+        "CHAT-EXACT-PLAN-V2：这是复杂任务。已确认第二季度支付侧退款 100 笔、订单侧 "
+        "97 笔；请基于现有事实完成退款分析，只调用 update_plan 一次并提交恰好三个"
+        "已完成步骤，然后交付结论，不需要额外数据。"
     )
     composer.fill(complex_goal)
     page.get_by_role("button", name=re.compile("发送$")).click()
