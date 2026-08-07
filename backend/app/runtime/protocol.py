@@ -125,7 +125,7 @@ class StreamEvent:
 
 @dataclass(frozen=True)
 class ProviderAttemptEvent:
-    phase: Literal["started", "succeeded", "failed"]
+    phase: Literal["started", "payload", "succeeded", "failed"]
     attempt_no: int
     received_payload: bool
     request_hash: str

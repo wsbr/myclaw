@@ -268,10 +268,7 @@ class RuntimeWorker:
                     else:
                         run.status = "failed"
                         run.wait_reason = None
-                        run.error_code = runner.failure_code
                         run.terminal_reason = runner.failure_code
-                        run.result_summary = runner.error_detail
-                        run.finished_at = now
                         run.completed_at = now
                         run.version += 1
                         await ExecutionEventWriter(db).append(
@@ -774,9 +771,7 @@ class RuntimeWorker:
             work.version += 1
             run.status = "completed"
             run.terminal_reason = "completed"
-            run.result_summary = content[:4000]
             run.completed_at = runner.ended_at
-            run.finished_at = runner.ended_at
             run.version += 1
             plans = list(await db.scalars(select(WorkingPlan).where(
                 WorkingPlan.run_id == run.id, WorkingPlan.status == "active",
@@ -980,9 +975,7 @@ class RuntimeWorker:
         group_run.version += 1
         run.status = "completed"
         run.terminal_reason = "completed"
-        run.result_summary = content[:4000]
         run.completed_at = now
-        run.finished_at = now
         run.wait_reason = None
         run.version += 1
         delivered = await ExecutionEventWriter(db).append(
@@ -1045,7 +1038,6 @@ class RuntimeWorker:
         work.version += 1
         run.status = "waiting_approval"
         run.wait_reason = "waiting_approval"
-        run.result_summary = content[:4000]
         run.version += 1
         created = await ExecutionEventWriter(db).append(
             session_id=run.session_id, run_id=run.id,
@@ -1494,10 +1486,8 @@ class RuntimeWorker:
                 return
             if run is not None:
                 run.status = "failed"
-                run.error_code = code
                 run.terminal_reason = code
                 run.completed_at = runner.ended_at
-                run.finished_at = runner.ended_at
                 run.version += 1
                 await ExecutionEventWriter(db).append(
                     session_id=fence.session_id, run_id=run.id,

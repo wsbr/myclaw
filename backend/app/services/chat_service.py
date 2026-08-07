@@ -136,10 +136,9 @@ async def enqueue_chat_message(
     run_budget = default_run_budget(resolved_mode)
     run = Run(
         id=uuid7(), session_id=session.id, user_id=user_id, mode=resolved_mode,
-        wait_reason=None, status="active", entry_agent_id=agent.id,
+        wait_reason=None, status="active",
         permission_mode=session.permission_mode, hard_budget_snapshot=run_budget,
         deadline_at=deadline_from_budget(run_budget, mode=resolved_mode),
-        started_at=utcnow(),
     )
     work = WorkItem(
         id=uuid7(), run_id=run.id, session_id=session.id, user_id=user_id,

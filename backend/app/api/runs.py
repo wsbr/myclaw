@@ -591,10 +591,7 @@ async def cancel_run(
     old_version = run.version
     run.status = "cancelled"
     run.wait_reason = None
-    run.error_code = "cancelled_by_user"
     run.terminal_reason = "cancelled_by_user"
-    run.result_summary = body.reason
-    run.finished_at = now
     run.completed_at = now
     run.version += 1
     plans = list(await db.scalars(select(WorkingPlan).where(

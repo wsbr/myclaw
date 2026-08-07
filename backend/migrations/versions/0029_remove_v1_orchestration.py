@@ -140,6 +140,11 @@ def upgrade() -> None:
         "ix_legacy_uat_fact_source", "legacy_uat_fact_archive",
         ["source_table", "id"],
     )
+    op.add_column("provider_attempt", sa.Column("first_payload_at", sa.DateTime()))
+    op.add_column(
+        "agent_turn",
+        sa.Column("schema_repair_count", sa.Integer(), nullable=False, server_default="0"),
+    )
 
     # Capture complete rows before any compatibility column is translated.
     for table in LEGACY_TABLES:
@@ -345,6 +350,15 @@ def upgrade() -> None:
         "run", "permission_mode", existing_type=sa.String(32),
         nullable=False, server_default="direct",
     )
+    _drop_foreign_keys(
+        "run", local_columns={"entry_agent_id", "source_run_id"}
+    )
+    for column in (
+        "entry_agent_id", "source_run_id", "result_summary", "error_code",
+        "started_at", "finished_at",
+    ):
+        if _has_column("run", column):
+            op.drop_column("run", column)
 
     _drop_check_if_present("group_session", "ck_group_session_status")
     op.alter_column(

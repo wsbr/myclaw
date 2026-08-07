@@ -247,9 +247,7 @@ async def _create_native_group_run_graph(
         id=uuid7(), session_id=session.id, user_id=session.user_id, mode="group",
         status="active",
         permission_mode="direct", hard_budget_snapshot=default_budget,
-        entry_agent_id=recipient_id,
         deadline_at=deadline_from_budget(default_budget, mode="group"),
-        started_at=utcnow(),
     )
     group_run = GroupRun(
         id=uuid7(), run_id=run.id, group_session_id=group.id,

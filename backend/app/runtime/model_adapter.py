@@ -122,10 +122,18 @@ class ModelAdapter:
                     list(request.messages), list(request.tools) or None,
                     dict(request.parameters),
                 ):
+                    if (
+                        not received_payload
+                        and chunk.type in {"transport_payload", "text_delta", "tool_call_delta"}
+                    ):
+                        received_payload = True
+                        await _notify(attempt_observer, ProviderAttemptEvent(
+                            phase="payload", attempt_no=attempt_no,
+                            received_payload=True, request_hash=request_hash,
+                        ))
                     if chunk.type == "transport_payload":
-                        received_payload = True
-                    elif chunk.type == "text_delta" and chunk.content is not None:
-                        received_payload = True
+                        continue
+                    if chunk.type == "text_delta" and chunk.content is not None:
                         if chunk.item_index is not None:
                             item_index = chunk.item_index
                             next_item_index = max(next_item_index, item_index + 1)
@@ -139,7 +147,6 @@ class ModelAdapter:
                             type="text_delta", data={"content": chunk.content},
                         ))
                     elif chunk.type == "tool_call_delta" and chunk.tool_call is not None:
-                        received_payload = True
                         if not isinstance(chunk.tool_call.arguments, dict):
                             raise ProviderSchemaError("Tool arguments must be a JSON object")
                         item_index = (

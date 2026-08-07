@@ -82,6 +82,12 @@ class _TurnRecorder:
             await self.db.flush()
             return
         attempt = self.attempts[event.attempt_no]
+        if event.phase == "payload":
+            attempt.received_payload = True
+            if attempt.first_payload_at is None:
+                attempt.first_payload_at = utcnow()
+            await self.db.flush()
+            return
         attempt.received_payload = event.received_payload
         attempt.ended_at = utcnow()
         if event.phase == "succeeded" and event.result is not None:
@@ -249,6 +255,7 @@ class AgentLoopCoordinator:
                     } for call in tool_calls],
                 })
                 waiting = False
+                turn_schema_repairs = 0
                 turn_dispatches: list[DispatchResult] = []
                 for call in tool_calls:
                     dispatched = await self.dispatcher.dispatch(
@@ -265,7 +272,9 @@ class AgentLoopCoordinator:
                     waiting = waiting or dispatched.durable_wait
                     if dispatched.schema_error:
                         schema_repairs += 1
+                        turn_schema_repairs += 1
                 if persisted_turn is not None:
+                    persisted_turn.schema_repair_count = turn_schema_repairs
                     persisted_turn.status = "waiting_actions" if waiting else "completed"
                     persisted_turn.ended_at = utcnow()
                     progress = None

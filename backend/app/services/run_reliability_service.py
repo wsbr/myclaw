@@ -404,10 +404,7 @@ async def expire_one_run_deadline(db, *, actor_id: str) -> bool:
 
     run.status = "failed"
     run.wait_reason = None
-    run.error_code = "run_deadline_exceeded"
     run.terminal_reason = "run_deadline_exceeded"
-    run.result_summary = "Run hard deadline elapsed"
-    run.finished_at = now
     run.completed_at = now
     run.version += 1
     await ExecutionEventWriter(db).append(

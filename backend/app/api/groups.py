@@ -626,9 +626,9 @@ async def _cancel_group_run_state(
         work.status = "cancelled"; work.active_runner_id = None
         work.error_code = "run_cancelled"; work.version += 1
     run.status = "cancelled"; run.wait_reason = None
-    run.cancellation_requested_at = now; run.finished_at = now
+    run.cancellation_requested_at = now
     run.completed_at = now; run.terminal_reason = "cancelled_by_user"
-    run.error_code = "cancelled_by_user"; run.result_summary = reason; run.version += 1
+    run.version += 1
     cancelled_event = await ExecutionEventWriter(db).append(session_id=run.session_id, run_id=run.id,
         group_session_id=group_run.group_session_id, group_run_id=group_run.id,
         event_type="run.cancelled", event_dedupe_key=event_key, actor_type="user", actor_id=run.user_id,

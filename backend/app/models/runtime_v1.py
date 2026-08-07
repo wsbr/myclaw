@@ -98,18 +98,12 @@ class Run(Base, TimestampMixin, VersionMixin):
     mode: Mapped[str] = mapped_column(String(20), nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="active", nullable=False)
     wait_reason: Mapped[str | None] = mapped_column(String(32))
-    entry_agent_id: Mapped[str] = mapped_column(String(36), ForeignKey("agent.id"), nullable=False)
     root_work_item_id: Mapped[str | None] = mapped_column(String(36))
     permission_mode: Mapped[str] = mapped_column(
         String(32), default="direct", nullable=False
     )
     hard_budget_snapshot: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
-    source_run_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("run.id"))
-    result_summary: Mapped[str | None] = mapped_column(Text)
-    error_code: Mapped[str | None] = mapped_column(String(100))
     cancellation_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
     terminal_reason: Mapped[str | None] = mapped_column(String(100))
     deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
@@ -298,6 +292,7 @@ class AgentTurn(Base):
     input_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     turn_items: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
     stop_reason: Mapped[str | None] = mapped_column(String(64))
+    schema_repair_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     usage: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     provider_state_ref: Mapped[str | None] = mapped_column(String(500))
     error_code: Mapped[str | None] = mapped_column(String(100))
@@ -344,6 +339,7 @@ class ProviderAttempt(Base):
     error_code: Mapped[str | None] = mapped_column(String(100))
     error_detail: Mapped[str | None] = mapped_column(Text)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    first_payload_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=False), default=utcnow, nullable=False
