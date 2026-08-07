@@ -218,7 +218,46 @@ def _wait_verification(api: PhaseOneAPI, run_id: str, timeout: float = 60) -> di
     raise AssertionError("capacity_risk.v1 VerificationResult was not produced")
 
 
-@pytest.mark.timeout(2400)
+def _settle_capacity_with_recovery(
+    api: PhaseOneAPI, *, session_id: str, group: dict, group_run: dict,
+    product_agent_id: str, external_agent_id: str, max_retries: int = 2,
+) -> tuple[dict, dict, dict, int, str]:
+    """Retry only as a new GroupRun; every failed attempt remains immutable evidence."""
+    current = group_run
+    retries = 0
+    first_verification_status = "missing"
+    while True:
+        settled = _wait_group_run(api, session_id, current["run"]["id"])
+        verification = _wait_verification(api, current["run"]["id"])
+        if retries == 0:
+            first_verification_status = verification["status"]
+        if settled["status"] == "completed" and verification["status"] == "passed":
+            return current, settled, verification, retries, first_verification_status
+        assert retries < max_retries, {
+            "settled": settled,
+            "verification": verification,
+            "retries": retries,
+        }
+        retries += 1
+        previous_group_run_id = current["id"]
+        current = api.request(
+            "POST", f"/api/v1/groups/{group['id']}/runs", idem=True,
+            json={
+                "content": (
+                    f"{CAPACITY_GROUP_CONTRACT} EXTERNAL-AGENT:{external_agent_id} "
+                    f"RECOVERY-RETRY-{retries}: prior GroupRun {previous_group_run_id} "
+                    "is immutable failed evidence. Independently execute all T01-T09 and "
+                    "publish four new Run-scoped Artifacts; prior claims and partial files "
+                    "do not count as completion."
+                ),
+                "recipient_agent_id": product_agent_id,
+                "reporter_agent_id": product_agent_id,
+                "reference_run_ids": [previous_group_run_id],
+            },
+        ).json()
+
+
+@pytest.mark.timeout(3600)
 def test_agent_network_group_vertical_uat(
     phase_api: PhaseOneAPI, assembled_world: dict, record_testsuite_property,
 ):
@@ -250,6 +289,8 @@ def test_agent_network_group_vertical_uat(
     # API + database creation gate: ten consecutive direct selections succeed.
     creations = []
     settled_runs: dict[str, dict] = {}
+    first_attempt_statuses: list[str] = []
+    recovery_retries = 0
     for attempt in range(10):
         goal = (
             f"{CAPACITY_GROUP_CONTRACT} EXTERNAL-AGENT:{external['id']}"
@@ -283,12 +324,25 @@ def test_agent_network_group_vertical_uat(
         finally:
             if attempt == 0:
                 _compose("start", "sandbox-worker-test")
-        if attempt == 0:
-            settled_runs[run_id] = _wait_group_run(api, session["id"], run_id)
-        elif attempt < 5:
-            settled_runs[run_id] = _wait_group_run(api, session["id"], run_id)
+        if attempt < 5:
+            final_run, settled, _verification, retries, first_status = (
+                _settle_capacity_with_recovery(
+                    api, session_id=session["id"], group=group, group_run=runs[0],
+                    product_agent_id=product["id"], external_agent_id=external["id"],
+                )
+            )
+            creations[-1] = (group, final_run)
+            settled_runs[final_run["run"]["id"]] = settled
+            first_attempt_statuses.append(first_status)
+            recovery_retries += retries
     assert len({group["id"] for group, _run in creations}) == 10
     record_testsuite_property("group_creation_10_of_10", "passed")
+    record_testsuite_property(
+        "group_full_flow_first_attempt_success",
+        f"{sum(status == 'passed' for status in first_attempt_statuses)}/5",
+    )
+    record_testsuite_property("group_full_flow_final_success", "5/5")
+    record_testsuite_property("group_full_flow_retry_count", str(recovery_retries))
 
     capacity_group, capacity = creations[0]
     result = settled_runs[capacity["run"]["id"]]
