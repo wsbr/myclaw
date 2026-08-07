@@ -506,47 +506,64 @@ def _capacity_group_tool(
                 "visibility": "direct",
                 "recipient_agent_id": test_id,
             }
-        if not tool_results and "write_file" in names:
+        if '"path":"requirements.md"' not in compact_results and "write_file" in names:
             return "write_file", {
                 "path": "requirements.md", "content": CAPACITY_REQUIREMENTS,
                 "mode": "create",
             }
-        if '"path":"requirements.md"' in compact_results and "write_file" in names:
+        if (
+            '"path":"capacity_risk.py"' not in compact_results
+            and "write_file" in names
+        ):
             return "write_file", {
                 "path": "capacity_risk.py", "content": CAPACITY_PROGRAM,
                 "mode": "create",
             }
-        if '"path":"capacity_risk.py"' in compact_results and "execute" in names:
+        if (
+            "execute" in names
+            and not any(marker in tool_results for _argv, marker in CAPACITY_CASE_CALLS)
+        ):
             return "execute", {
                 "argv": CAPACITY_CASE_CALLS[0][0], "cwd": ".", "timeout_seconds": 20,
             }
-        for index, (_argv, marker) in enumerate(CAPACITY_CASE_CALLS):
-            if marker not in tool_results:
-                continue
-            if index + 1 < len(CAPACITY_CASE_CALLS) and "execute" in names:
+        completed_case_index = next((
+            index for index in range(len(CAPACITY_CASE_CALLS) - 1, -1, -1)
+            if CAPACITY_CASE_CALLS[index][1] in tool_results
+        ), None)
+        if completed_case_index is not None:
+            if completed_case_index + 1 < len(CAPACITY_CASE_CALLS) and "execute" in names:
                 return "execute", {
-                    "argv": CAPACITY_CASE_CALLS[index + 1][0],
+                    "argv": CAPACITY_CASE_CALLS[completed_case_index + 1][0],
                     "cwd": ".", "timeout_seconds": 20,
                 }
-            if "write_file" in names:
+            if (
+                '"path":"test_report.md"' not in compact_results
+                and "write_file" in names
+            ):
                 return "write_file", {
                     "path": "test_report.md", "content": CAPACITY_TEST_REPORT,
                     "mode": "create",
                 }
-        if '"path":"test_report.md"' in compact_results and "write_file" in names:
+        if (
+            '"path":"acceptance_report.md"' not in compact_results
+            and "write_file" in names
+        ):
             return "write_file", {
                 "path": "acceptance_report.md", "content": CAPACITY_ACCEPTANCE_REPORT,
                 "mode": "create",
             }
         publish_transition = (
-            ('"path":"acceptance_report.md"', "requirements.md"),
+            (None, "requirements.md"),
             ('"name":"requirements.md"', "capacity_risk.py"),
             ('"name":"capacity_risk.py"', "test_report.md"),
             ('"name":"test_report.md"', "acceptance_report.md"),
         )
         if "publish_artifact" in names:
             for prior_marker, artifact_name in publish_transition:
-                if prior_marker in compact_results:
+                if (
+                    (prior_marker is None or prior_marker in compact_results)
+                    and f'"name":"{artifact_name}"' not in compact_results
+                ):
                     return "publish_artifact", {
                         "path": artifact_name, "name": artifact_name,
                         "mime_type": (
