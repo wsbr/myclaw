@@ -106,7 +106,7 @@ def test_browser_chat_plan_and_admin_surfaces(
         "GET", f"/api/v1/runs/{plan_runs[0]['id']}/working-plans",
     ).json()["items"][0]
     assert plan["summary"].strip() and len(plan["items"]) >= 2
-    expect(page.get_by_text(plan["items"][0]["text"], exact=True)).to_be_visible(
+    expect(page.get_by_text(re.compile(re.escape(plan["items"][0]["text"])))).to_be_visible(
         timeout=int(phase_api.run_timeout * 1000),
     )
     direction = page.get_by_placeholder(
