@@ -159,7 +159,11 @@ def assembled_world(phase_api: PhaseOneAPI):
         json={
             "provider": "openai_compatible", "model_name": model_name,
             "endpoint": endpoint, "credential_ref": credential_ref,
-            "default_parameters": {"temperature": 0, "max_tokens": 1024},
+            "default_parameters": {
+                "temperature": 0,
+                "max_tokens": 1024,
+                **({"extra_body": {"enable_thinking": False}} if real_model else {}),
+            },
             "capabilities": {
                 "streaming": True, "native_tool_calling": True,
                 "parallel_tool_calling": False, "tool_result_continuation": True,

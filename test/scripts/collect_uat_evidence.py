@@ -120,6 +120,8 @@ def main() -> int:
             cursor.execute("""
                 SELECT a.id,a.current_published_version_id,av.version_no,av.content_hash,
                        av.name,mv.id AS model_version_id,mv.model_name,mv.provider,
+                       mv.default_parameters AS model_default_parameters,
+                       mv.capabilities AS model_capabilities,
                        mv.content_hash AS model_content_hash
                   FROM agent a
                   JOIN agent_version av ON av.id=a.current_published_version_id
