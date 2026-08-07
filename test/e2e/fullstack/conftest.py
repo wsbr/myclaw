@@ -288,12 +288,18 @@ def assembled_world(phase_api: PhaseOneAPI):
         "非 Group 模式不得调用 search_group_history。若目标包含 PLAN-APPROVAL-ARTIFACT-V2，"
         "只读阶段创建一次 WorkingPlan；用户修改方向时只修订一次；批准进入 direct 后不得再"
         "调用 update_plan，write_file 与 publish_artifact 各成功一次即结束。若目标包含 "
-        "UI-PLAN-UAT-V2，遵守开头更严格的单 revision 规则；批准后只创建并发布目标文件，不再修改 "
-        "WorkingPlan。若目标包含 plan-agent-network ask clarification，遵守开头的无过滤目录规则，"
+        "UI-PLAN-UAT-V2，遵守开头更严格的单 revision 规则；批准进入 direct 后禁止执行修改方向中"
+        "提到的辅助脚本或任何其他 Tool，只调用 write_file 一次，path 精确为‘验收报告 2026.txt’"
+        "且 content 精确为‘artifact-e2e’，再调用 publish_artifact 一次，name 与 path 都精确为"
+        "‘验收报告 2026.txt’且 publish_to_group=false，然后立即结束，不再修改 WorkingPlan。"
+        "若目标包含 plan-agent-network ask clarification，遵守开头的无过滤目录规则，"
         "完成一次产品经理 invoke_agent 后提交可审批计划。"
         "若目标要求《验收报告 2026.txt》正文 artifact-e2e，先 write_file 写入精确字节后再 "
         "publish_artifact；publish_artifact 的 name 必须精确为‘验收报告 2026.txt’，不得省略扩展名。"
-        "若目标包含 CAPACITY-RISK-PLAN-V2，严格按目标顺序完成四个文件、"
+        "若目标包含 CAPACITY-RISK-PLAN-V2，capacity_risk.py 必须使用精确赋值 "
+        "utilization_percent = float(round(committed / capacity * 100, 2))，严禁在百分比为整数时"
+        "转成 int；T01-T06 的 utilization_percent 必须依次序列化为 115.0、74.0、75.0、90.0、"
+        "91.0、0.0。严格按目标顺序完成四个文件、"
         "T01-T09 九次 execute 和四次发布；每次只调用一个 Tool，全部完成前不得结束。",
         [],
         required_tools,
@@ -301,7 +307,8 @@ def assembled_world(phase_api: PhaseOneAPI):
     product_manager = create_agent(
         "产品经理",
         "澄清产品目标、用户价值、范围边界和验收优先级。",
-        "若当前委派文字包含 plan-agent-network-product，此规则优先于所有其他规则：直接用普通"
+        "若当前委派文字包含 plan-agent-network ask clarification 或 plan-agent-network-product，"
+        "此规则优先于所有其他规则：直接用普通"
         "消息返回产品范围、用户价值和验收风险复核，禁止调用任何 Tool，也禁止 ask_user。"
         "若当前 WorkItem 目标包含 CAPACITY-RISK-NETWORK-V2 HISTORY-CHECK，此规则优先于后面"
         "所有规则：只调用 search_group_history 恰好一次；该成功 ToolResult 返回后立即用普通消息"

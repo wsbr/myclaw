@@ -102,8 +102,11 @@ export default function SessionPage() {
   const { data: workingPlans = [] } = useQuery({
     queryKey: ['working-plans', latestRunId],
     queryFn: () => sessionsApi.getWorkingPlans(latestRunId!), enabled: !!latestRunId,
-    refetchInterval: activeRun && !['completed', 'cancelled', 'failed'].includes(activeRun.status)
-      ? 2000 : false,
+    refetchInterval: query => {
+      if (!latestRunId || query.state.data?.length) return false
+      if (activeRun && ['completed', 'cancelled', 'failed'].includes(activeRun.status)) return false
+      return 1000
+    },
   })
   const activeWorkingPlan = workingPlans.find(plan => plan.status === 'active') || workingPlans[0]
   const { data: agentInvocations = [] } = useQuery({
