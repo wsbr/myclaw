@@ -270,7 +270,11 @@ def test_plan_revision_cas_restart_approval_and_same_session_implementation(
     record_testsuite_property("plan_approval_execution", "passed")
 
 
-@pytest.mark.timeout(300)
+# This scenario performs one clarified delegation plus three independent
+# role-selection delegations.  Keep each Run's real-model wait bounded by
+# PhaseOneAPI.run_timeout, while allowing the sequential scenario to consume
+# the sum of those per-Run budgets.
+@pytest.mark.timeout(1200)
 def test_plan_dynamic_agent_invocation_rejection_and_cancel_paths(
     phase_api: PhaseOneAPI, assembled_world: dict,
 ):
