@@ -13,10 +13,18 @@ import pytest
 class PhaseOneAPI:
     def __init__(self, base_url: str):
         self.base_url = base_url.rstrip("/")
-        self.client = httpx.Client(base_url=self.base_url, timeout=30, trust_env=False)
+        real_model = os.getenv("MYCLAW_LLM_MODE", "mock") == "real"
+        # Provider ConformanceRun intentionally executes several physical
+        # probes inside one admin request. A reasoning model can legitimately
+        # take longer than the ordinary API timeout while those probes remain
+        # individually bounded and durably recorded by the server.
+        self.client = httpx.Client(
+            base_url=self.base_url, timeout=900 if real_model else 30,
+            trust_env=False,
+        )
         self.token = ""
         self.user_id = ""
-        self.run_timeout = 180 if os.getenv("MYCLAW_LLM_MODE", "mock") == "real" else 75
+        self.run_timeout = 180 if real_model else 75
 
     @property
     def auth(self) -> dict[str, str]:
