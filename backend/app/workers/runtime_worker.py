@@ -1986,6 +1986,7 @@ class RuntimeWorker:
 
     async def process_one_group_control(self) -> bool:
         command_id = None
+        verification_runner_id = None
         try:
             async with AsyncSessionLocal.begin() as db:
                 command = await db.scalar(select(OutboxCommand).where(
@@ -2003,10 +2004,21 @@ class RuntimeWorker:
                 command.dispatch_lease_token = uuid7()
                 command.attempt_count += 1
                 if command.action == "verify_run":
+                    verification_run_id = str(
+                        command.payload_ref.get("run_id") or command.aggregate_id
+                    )
                     await maybe_verify_capacity_risk(
                         db,
-                        run_id=str(command.payload_ref.get("run_id") or command.aggregate_id),
+                        run_id=verification_run_id,
                         actor_id=self.worker_id,
+                    )
+                    verification_runner_id = await db.scalar(
+                        select(DurableRunner.id).where(
+                            DurableRunner.run_id == verification_run_id,
+                        ).order_by(
+                            DurableRunner.ended_at.desc(),
+                            DurableRunner.created_at.desc(),
+                        ).limit(1)
                     )
                 else:
                     await self._evaluate_group_quiescence(
@@ -2018,7 +2030,11 @@ class RuntimeWorker:
                 command.completed_at = utcnow()
                 command.dispatch_lease_owner = None
                 command.dispatch_lease_token = None
-                return True
+            if verification_runner_id is not None:
+                await record_runner_fact_spans(
+                    verification_runner_id, session_factory=AsyncSessionLocal,
+                )
+            return True
         except Exception as error:
             # The control transaction rolled back. Persist a separate bounded
             # delivery fact; never replay a business payload because control
