@@ -332,15 +332,27 @@ def test_plan_dynamic_agent_invocation_rejection_and_cancel_paths(
     # Candidate choice stays model-driven: three separate PM goals cause three
     # directory queries and exact product/development/test delegations without
     # a platform-fixed participant set or order.
-    for marker, role_name in (
-        ("plan-agent-network-product", "产品经理"),
-        ("plan-agent-network-development", "开发工程师"),
-        ("plan-agent-network-test", "测试工程师"),
+    for marker, role_name, review_scope in (
+        (
+            "plan-agent-network-product", "产品经理",
+            "复核范围边界、用户价值和验收标准",
+        ),
+        (
+            "plan-agent-network-development", "开发工程师",
+            "复核 Python 3 与 MySQL 8 实施步骤、接口边界和技术风险",
+        ),
+        (
+            "plan-agent-network-test", "测试工程师",
+            "复核正常、差异和失败路径的测试覆盖与通过标准",
+        ),
     ):
         role_session = _session(api, assembled_world["project_manager"]["id"])
         role_run = _enter(
             api, role_session,
-            f"复杂任务 {marker}：按需查询并调用对应专业候选进行只读复核。",
+            f"复杂任务 {marker}：2026 年第二季度支付侧退款 100 笔、订单侧 97 笔，"
+            f"需规划核对 3 笔差异；{review_scope}。按需查询并调用对应专业候选进行"
+            "一次只读复核。以上事实已确认且输入充分，只需形成实施前计划，不需要"
+            "文件、外部数据、代码修改或进一步澄清。",
         )["run"]
         assert _wait_plan(api, role_run["id"])["status"] == "waiting_approval"
         role_invocations = api.request(
