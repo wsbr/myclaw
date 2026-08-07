@@ -104,7 +104,7 @@ export default function SessionPage() {
     queryFn: () => sessionsApi.getWorkingPlans(latestRunId!), enabled: !!latestRunId,
     refetchInterval: query => {
       if (!latestRunId || query.state.data?.length) return false
-      if (activeRun && ['completed', 'cancelled', 'failed'].includes(activeRun.status)) return false
+      if (activeRun?.id === latestRunId && ['completed', 'cancelled', 'failed'].includes(activeRun.status)) return false
       return 1000
     },
   })
@@ -232,6 +232,7 @@ export default function SessionPage() {
     },
     onSuccess: result => {
       setActiveRunId(result.run.id)
+      queryClient.setQueryData(['run', result.run.id], result.run)
       setLiveText('')
       setInput('')
       queryClient.invalidateQueries({ queryKey: ['messages', result.message.session_id] })
