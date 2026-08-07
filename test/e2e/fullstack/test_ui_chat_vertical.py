@@ -103,7 +103,9 @@ def test_browser_chat_reconnect_clarification_approval_artifact_and_working_plan
     )
     composer.fill(complex_goal)
     page.get_by_role("button", name=re.compile("发送$")).click()
-    expect(page.get_by_text("WorkingPlan", exact=True)).to_be_visible(timeout=15_000)
+    expect(page.get_by_text("WorkingPlan", exact=True)).to_be_visible(
+        timeout=int(api.run_timeout * 1000),
+    )
     expect(page.get_by_text("revision 1", exact=True)).to_be_visible()
     messages = api.request("GET", f"/api/v1/sessions/{session_id}/messages").json()["items"]
     complex_message = next(

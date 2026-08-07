@@ -460,7 +460,9 @@ class RuntimeWorker:
                         "publish, or claim implementation succeeded. WorkingPlan is dynamic context/UI "
                         "state and never creates or schedules WorkItems. If the goal already names the "
                         "scope, deliverables, or acceptance criteria, plan from those facts without "
-                        "requesting optional detail."
+                        "requesting optional detail. A completed invoke_agent result is authoritative: "
+                        "reuse it and continue planning instead of immediately repeating an identical "
+                        "target, task, and input invocation."
                     )
                 elif run.mode == "plan":
                     platform_rules = (
@@ -1133,10 +1135,15 @@ class RuntimeWorker:
                 },
             })
             succeeded = item.status == "succeeded"
+            authoritative_summary = item.result_summary or (
+                "Invoked Agent completed" if succeeded else "Invoked Agent failed"
+            )
             result = {
                 "status": "succeeded" if succeeded else "failed",
-                "summary": item.result_summary or item.error_detail or (
-                    "Invoked Agent completed" if succeeded else "Invoked Agent failed"
+                "summary": (
+                    "The invoked Agent result is authoritative; reuse it instead of repeating "
+                    f"an identical invocation.\n{authoritative_summary}"
+                    if succeeded else item.error_detail or authoritative_summary
                 ),
                 "data": {
                     "agent_invocation_id": item.id,
