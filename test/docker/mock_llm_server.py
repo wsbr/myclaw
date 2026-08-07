@@ -627,13 +627,38 @@ def _requested_working_plan_tool(
 ) -> tuple[str, dict] | None:
     names = _tool_names(tools)
     all_text = " ".join(message.content or "" for message in messages)
+    tool_results = " ".join(
+        message.content or "" for message in messages if message.role == "tool"
+    )
+    direction_change = "Update the WorkingPlan to a new revision" in all_text
     if (
-        "update_plan" not in names or _has_tool_result(messages)
+        "update_plan" not in names
+        or (_has_tool_result(messages) and not direction_change)
         or ("plan_readonly" not in all_text and "WorkingPlan:" in all_text)
     ):
         return None
+    if direction_change:
+        snapshot = re.search(
+            r'WorkingPlan:\s*\{.*?"revision"\s*:\s*(\d+)', all_text,
+        )
+        saved_revisions = [
+            int(value) for value in re.findall(
+                r'"revision"\s*:\s*(\d+)', tool_results,
+            )
+        ]
+        if (
+            snapshot
+            and saved_revisions
+            and max(saved_revisions) > int(snapshot.group(1))
+        ):
+            return None
     text = _current_request_text(messages).lower()
-    if not any(marker in text for marker in ("复杂任务", "分步骤", "multi-step", "workingplan")):
+    if (
+        not direction_change
+        and not any(
+            marker in text for marker in ("复杂任务", "分步骤", "multi-step", "workingplan")
+        )
+    ):
         return None
     return "update_plan", {
         "summary": "完成复杂任务的分步交付",
