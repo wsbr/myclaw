@@ -84,7 +84,10 @@ export default function TracePage() {
           <Collapse items={traces.map(trace => ({
             key: trace.runner_id,
             label: <span><Tag>{trace.runner_id.slice(0, 12)}</Tag><Tag color={trace.trace?.status === 'completed' ? 'green' : trace.trace?.status === 'failed' ? 'red' : 'default'}>{trace.trace?.status || 'not available'}</Tag></span>,
-            children: trace.status === 'not_available' ? <Empty description="Trace 尚不可用" /> : (
+            children: <div>
+              <Typography.Text type="secondary">跨账本权威引用（Trace 本身非权威）</Typography.Text>
+              <pre className="mb-3 mt-2 overflow-x-auto rounded-lg bg-muted p-3 text-xs">{JSON.stringify(trace.ledger_refs, null, 2)}</pre>
+              {trace.status === 'not_available' ? <Empty description="Trace 尚不可用" /> : <>
               <Timeline items={trace.spans.map(span => ({
                 color: span.status === 'ok' ? 'green' : 'red',
                 children: <div>
@@ -93,7 +96,9 @@ export default function TracePage() {
                   {Object.keys(span.attributes || {}).length > 0 && <pre className="mt-2 overflow-x-auto rounded-lg bg-muted p-3 text-xs">{JSON.stringify(span.attributes, null, 2)}</pre>}
                 </div>,
               }))} />
-            ),
+              {trace.links.length > 0 && <pre className="overflow-x-auto rounded-lg bg-muted p-3 text-xs">{JSON.stringify(trace.links, null, 2)}</pre>}
+              </>}
+            </div>,
           }))} />
         )}
       </Card>

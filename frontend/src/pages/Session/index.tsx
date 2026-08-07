@@ -187,15 +187,18 @@ export default function SessionPage() {
       if (event.event_type.startsWith('artifact.')) {
         queryClient.invalidateQueries({ queryKey: ['artifacts', sessionId] })
       }
+      if (event.event_type.startsWith('verification.') && 'run_id' in event) {
+        queryClient.invalidateQueries({ queryKey: ['verification-results', event.run_id] })
+      }
       queryClient.invalidateQueries({ queryKey: ['session-inspector-events', sessionId] })
       if ('run_id' in event && event.run_id) {
         queryClient.invalidateQueries({ queryKey: ['run', event.run_id] })
         queryClient.invalidateQueries({ queryKey: ['session-runs', sessionId] })
       }
-      if ((event.event_type === 'run.completed' || event.event_type === 'run.cancelled') && 'run_id' in event) {
+      if (['run.completed', 'run.cancelled', 'run.failed'].includes(event.event_type) && 'run_id' in event) {
         queryClient.invalidateQueries({ queryKey: ['run', event.run_id] })
         setActiveRunId(null)
-        if (event.event_type === 'run.completed' && event.payload.outcome === 'failed') toast.error('Agent 执行失败，请查看 Timeline')
+        if (event.event_type === 'run.failed') toast.error(`Agent 执行失败：${String(event.payload.error_code || 'unknown')}`)
       }
     }, value => { setConnected(value); if (!value) setLiveText('') }, () => {
       setLiveText('')
@@ -421,6 +424,11 @@ export default function SessionPage() {
           </Space>
         </header>
         {!connected && <Alert banner type="warning" message="实时事件连接中断，任务仍在后台执行；正在自动重连。" />}
+        {activeRun?.status === 'failed' && <Alert banner type="error"
+          message={`Run 失败：${activeRun.terminal_reason || activeRun.error_code || 'unknown'}`}
+          description="Timeline 保留权限拒绝、超时、失败与迟到结果的权威事件。" />}
+        {activeRun?.status === 'cancelled' && <Alert banner type="warning"
+          message={`Run 已取消：${activeRun.terminal_reason || activeRun.error_code || 'cancelled'}`} />}
 
         <section className="flex-1 overflow-y-auto px-5 py-6">
           <div className="mx-auto max-w-3xl">
@@ -522,7 +530,7 @@ export default function SessionPage() {
           </div>
         </footer>
       </main>
-      <SessionInspector sessionId={sessionId} />
+      <SessionInspector sessionId={sessionId} runId={latestRunId} />
     </div>
   )
 }

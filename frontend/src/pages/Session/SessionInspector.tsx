@@ -1,15 +1,19 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Button, Empty, Modal, Tabs, Tag, Timeline, Typography, message } from 'antd'
 import { DownloadOutlined, DeleteOutlined } from '@ant-design/icons'
-import { Artifact, sessionsApi } from '@/api/sessions'
+import { Artifact, sessionsApi, VerificationResult } from '@/api/sessions'
 
-export default function SessionInspector({ sessionId }: { sessionId: string | null }) {
+export default function SessionInspector({ sessionId, runId }: { sessionId: string | null; runId: string | null }) {
   const client = useQueryClient()
   const { data: artifacts = [] } = useQuery({
     queryKey: ['artifacts', sessionId], queryFn: () => sessionsApi.getArtifacts(sessionId!), enabled: !!sessionId,
   })
   const { data: events } = useQuery({
     queryKey: ['session-inspector-events', sessionId], queryFn: () => sessionsApi.getEvents(sessionId!, 0), enabled: !!sessionId,
+  })
+  const { data: verifications = [] } = useQuery({
+    queryKey: ['verification-results', runId],
+    queryFn: () => sessionsApi.getVerificationResults(runId!), enabled: !!runId,
   })
   const remove = useMutation({
     mutationFn: sessionsApi.deleteArtifact,
@@ -35,9 +39,31 @@ export default function SessionInspector({ sessionId }: { sessionId: string | nu
     color: event.event_type.includes('failed') ? 'red' : event.event_type.includes('completed') ? 'green' : 'blue',
     children: <div><p className="text-xs font-medium">{event.summary}</p><p className="text-[11px] text-muted-foreground">#{event.sequence} · {event.event_type}</p></div>,
   }))
+  const verificationItems = verifications.length ? verifications.map((result: VerificationResult) => {
+    const cases = result.observed_facts.filter(item => typeof item.case_id === 'string')
+    const passedCases = cases.filter(item => Object.values(
+      (item.checks as Record<string, boolean> | undefined) || {},
+    ).every(Boolean)).length
+    const artifacts = result.observed_facts.filter(item => typeof item.artifact_id === 'string')
+    const color = result.status === 'passed' ? 'green' : result.status === 'failed' ? 'red' : 'orange'
+    return <div key={result.id} className="mb-3 rounded-lg border p-3">
+      <div className="flex items-center justify-between gap-2">
+        <Typography.Text strong>{result.rule_key}</Typography.Text>
+        <Tag color={color}>{result.status}</Tag>
+      </div>
+      <p className="mt-2 text-xs text-muted-foreground">
+        epoch {result.verification_epoch} · cases {passedCases}/{cases.length || 9} · artifacts {artifacts.length}/4
+      </p>
+      <p className="mt-1 text-xs text-muted-foreground">authoritative refs: {result.source_refs.length}</p>
+      {result.missing_facts.length > 0 && <pre className="mt-2 max-h-40 overflow-auto rounded bg-muted p-2 text-[10px]">
+        {JSON.stringify(result.missing_facts, null, 2)}
+      </pre>}
+    </div>
+  }) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前 Run 暂无确定性 Verification" />
   return <aside className="w-80 shrink-0 overflow-y-auto border-l bg-muted/20 p-3">
     <Tabs size="small" items={[
       { key: 'artifacts', label: `Artifacts (${artifacts.length})`, children: artifactItems },
+      { key: 'verification', label: `Verification (${verifications.length})`, children: verificationItems },
       { key: 'timeline', label: 'Timeline', children: timelineItems.length ? <Timeline items={timelineItems} /> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} /> },
     ]} />
   </aside>

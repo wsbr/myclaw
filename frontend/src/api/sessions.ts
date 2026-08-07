@@ -42,6 +42,8 @@ export interface Run {
   version: number
   result_summary: string | null
   error_code: string | null
+  terminal_reason: string | null
+  deadline_at: string | null
   cancellation_requested_at: string | null
 }
 
@@ -69,6 +71,31 @@ export interface RunnerTraceView {
     input_tokens: number | null; output_tokens: number | null; error_code: string | null
   }>
   links: Array<{ span_id: string | null; linked_trace_id: string; linked_span_id: string | null; link_type: string; entity_type: string | null; entity_id: string | null }>
+  ledger_refs: {
+    run_id: string; work_item_id: string; runner_id: string
+    agent_turn_ids: string[]; provider_attempt_ids: string[]
+    tool_invocation_ids: string[]; tool_attempt_ids: string[]
+    verification_result_ids: string[]
+  }
+}
+
+export interface VerificationResult {
+  id: string
+  run_id: string
+  rule_key: string
+  rule_version: string
+  verification_epoch: number
+  status: 'passed' | 'failed' | 'insufficient_evidence'
+  observed_facts: Array<Record<string, unknown>>
+  missing_facts: Array<Record<string, unknown>>
+  source_refs: Array<{
+    evidence_type: 'tool_attempt' | 'artifact' | 'workspace_checksum' | 'business_fact'
+    ref_id: string | null
+    external_fact_ref: string | null
+    workspace_generation: number | null
+    checksum: string | null
+  }>
+  created_at: string
 }
 
 export interface Runner {
@@ -512,6 +539,9 @@ export const sessionsApi = {
   }>(`/runs/${id}/timeline`, { params: { after_sequence: afterSequence } }).then(r => r.data),
   getRunRunners: (id: string) => client.get<{ items: Runner[] }>(`/runs/${id}/runners`).then(r => r.data.items),
   getRunnerTrace: (id: string) => client.get<RunnerTraceView>(`/runners/${id}/trace`).then(r => r.data),
+  getVerificationResults: (id: string) => client.get<{ items: VerificationResult[] }>(
+    `/runs/${id}/verification-results`,
+  ).then(r => r.data.items),
   cancelRun: (run: Run, reason: string) => client.post<Run>(
     `/runs/${run.id}/cancel`, { reason }, {
       headers: { 'Idempotency-Key': crypto.randomUUID(), 'If-Match': `"${run.version}"` },
