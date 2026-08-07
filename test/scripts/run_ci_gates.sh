@@ -97,7 +97,7 @@ run_migration_gate() {
     --label "org.opencontainers.image.revision=$COMMIT_SHA" \
     --tag "$backend_image" \
     "$ROOT/backend"
-  compose run -d --no-deps --name "$mysql_container" mysql-test >/dev/null
+  compose run -d --service-ports --no-deps --name "$mysql_container" mysql-test >/dev/null
   wait_for_mysql "$mysql_container"
   docker run --rm \
     --network "${COMPOSE_PROJECT_NAME}_default" \
