@@ -168,7 +168,8 @@ def test_chat_clarification_working_plan_artifact_restart_and_ten_of_ten(
     # A complex Chat may use update_plan, but it still owns exactly one WorkItem.
     complex_run = _chat(
         api, simple_session["id"],
-        "这是复杂任务，请分步骤完成退款差异分析，并在完成后给出简短结论。",
+        "这是复杂任务。已确认事实：第二季度支付侧退款 100 笔、订单侧 97 笔，差异 3 笔；"
+        "请基于这些现有事实分步骤完成分析，并在完成后给出简短结论，不需要额外数据。",
     )["run"]
     assert api.wait_run(complex_run["id"])["status"] == "completed"
     plans = api.request("GET", f"/api/v1/runs/{complex_run['id']}/working-plans").json()["items"]

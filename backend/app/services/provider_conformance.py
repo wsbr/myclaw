@@ -112,6 +112,27 @@ def _hash(value: object) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
+def _forced_tool_parameters(
+    base_parameters: dict[str, Any], tool_choice: str | dict[str, Any],
+) -> dict[str, Any]:
+    """Build a forced-choice probe without changing the frozen runtime mode.
+
+    Some OpenAI-compatible reasoning modes support native Tool calls in auto
+    mode but reject the wire-level ``tool_choice`` field.  Their documented
+    non-thinking mode supports forced choice.  Conformance therefore exercises
+    the exact frozen reasoning mode for ordinary streaming/continuation probes
+    and, only for a forced-choice protocol probe, uses the provider's compatible
+    non-thinking variant.  Runtime Agent turns continue to use the immutable
+    ModelVersion defaults unchanged.
+    """
+    parameters = dict(base_parameters)
+    extra_body = parameters.get("extra_body")
+    if isinstance(extra_body, dict) and extra_body.get("enable_thinking") is True:
+        parameters["extra_body"] = {**extra_body, "enable_thinking": False}
+    parameters["tool_choice"] = tool_choice
+    return parameters
+
+
 def resolve_credential(reference: str | None) -> str:
     if not reference:
         return "local-development-key"
@@ -178,10 +199,9 @@ class ProviderConformanceSuite:
             "details": {"physical_attempts": zero_payload_proxy.calls, "logical_turns": 1},
         })
 
-        tool_parameters = dict(base_parameters)
-        tool_parameters["tool_choice"] = {
+        tool_parameters = _forced_tool_parameters(base_parameters, {
             "type": "function", "function": {"name": PROBE_TOOL["name"]},
-        }
+        })
         requested = await self.adapter.invoke(ProviderRequest(
             messages=({
                 "role": "user",
@@ -196,7 +216,11 @@ class ProviderConformanceSuite:
         )
         probes.append({
             "name": "native_tool_call", "passed": tool_passed,
-            "details": requested.as_dict(),
+            "details": {
+                "result": requested.as_dict(),
+                "runtime_extra_body": base_parameters.get("extra_body"),
+                "forced_choice_extra_body": tool_parameters.get("extra_body"),
+            },
         })
         if not tool_passed:
             return ConformanceReport(False, tuple(probes))
@@ -293,8 +317,7 @@ class ProviderConformanceSuite:
         parallel_result = None
         parallel_passed = True
         if parallel_declared:
-            parallel_parameters = dict(base_parameters)
-            parallel_parameters["tool_choice"] = "required"
+            parallel_parameters = _forced_tool_parameters(base_parameters, "required")
             parallel_result = await self.adapter.invoke(ProviderRequest(
                 messages=({
                     "role": "user",
@@ -384,10 +407,9 @@ class ProviderConformanceSuite:
         coordination_details = []
         coordination_passed = True
         for tool_name, expected_arguments, prompt in coordination_cases:
-            coordination_parameters = dict(base_parameters)
-            coordination_parameters["tool_choice"] = {
+            coordination_parameters = _forced_tool_parameters(base_parameters, {
                 "type": "function", "function": {"name": tool_name},
-            }
+            })
             coordination_result = await self.adapter.invoke(ProviderRequest(
                 messages=({"role": "user", "content": prompt},),
                 tools=COORDINATION_PROBE_TOOLS,
@@ -416,6 +438,10 @@ class ProviderConformanceSuite:
             "details": {
                 "schema_bundle_hash": _hash(COORDINATION_PROBE_TOOLS),
                 "sent_tool_names": [item["name"] for item in COORDINATION_PROBE_TOOLS],
+                "runtime_extra_body": base_parameters.get("extra_body"),
+                "forced_choice_extra_body": _forced_tool_parameters(
+                    base_parameters, "required",
+                ).get("extra_body"),
                 "cases": coordination_details,
             },
         })

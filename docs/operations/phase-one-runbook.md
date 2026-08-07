@@ -37,7 +37,7 @@ Redis 和 Workspace/Artifact 数据，不读取、迁移或删除旧 `myclaw-uat
 4. 验证 `/health`、Frontend `/healthz`、数据库连接、Redis 限流、Worker 心跳、Outbox backlog 和 Collector health。
 5. Schema 迁移只允许前进。应用回滚必须使用与当前 Schema 兼容的已验证镜像；若迁移不可兼容，停止写流量后按恢复演练从备份恢复到新的空数据库，不得在原库试错。该流程只形成 UAT 恢复数据，不等于已承诺生产 RPO/RTO。
 
-`init-env.sh` 从旧环境只读取真实模型连接信息，生成独立密码并绑定当前 clean SHA；旧 UAT 容器、卷和失败记录不参与新环境写流量。本次受控 UAT 的不可变 ModelVersion 将 `qwen3.5-plus` 固定为 `temperature=0`、`max_tokens=1024`、`extra_body.enable_thinking=false`，以使用该混合模型的非思考 native tool-calling 模式；同时冻结华北 2（北京）不超过 128K 输入档的公开表价（输入/输出分别为 0.8/4.8 CNY 每百万 Token）、价格生效日期与来源 URL。统计脚本在单次输入越档时直接失败，避免使用错误档位估算成本。
+`init-env.sh` 从旧环境只读取真实模型连接信息，生成独立密码并绑定当前 clean SHA；旧 UAT 容器、卷和失败记录不参与新环境写流量。本次受控 UAT 的不可变 ModelVersion 将 `qwen3.5-plus` 固定为 `temperature=0`、`max_tokens=4096`、`extra_body.enable_thinking=true`，使用该混合模型的思考模式与自动 native tool calling。Provider 的思考模式不接受 wire-level 强制 `tool_choice`；因此 ConformanceRun 的普通消息、Tool continuation 和运行时调用保持冻结的思考模式，仅强制 Tool 选择的协议探针切换到同一模型公开支持的 `enable_thinking=false` 兼容变体，并在探针事实中保留该边界，正式 Agent Turn 不覆盖 ModelVersion 参数。同时冻结华北 2（北京）不超过 128K 输入档的公开表价（输入/输出分别为 0.8/4.8 CNY 每百万 Token）、价格生效日期与来源 URL。统计脚本在单次输入越档时直接失败，避免使用错误档位估算成本。
 
 最终演练调用 `deployment-drill.sh <previous-compatible-clean-sha>`：先生成备份，再临时切到
 声明与 `0029` 兼容的上一镜像，除健康检查外必须真实登录并通过 Run ORM 列表查询；随后

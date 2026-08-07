@@ -94,7 +94,10 @@ def test_browser_chat_reconnect_clarification_approval_artifact_and_working_plan
     expect(page.get_by_text("验收报告 2026.txt", exact=True)).to_be_visible(timeout=25_000)
     expect(page.get_by_text("published", exact=True)).to_be_visible()
 
-    complex_goal = "这是复杂任务，请分步骤完成退款分析并交付结论。"
+    complex_goal = (
+        "这是复杂任务。已确认第二季度支付侧退款 100 笔、订单侧 97 笔；"
+        "请基于现有事实分步骤完成退款分析并交付结论，不需要额外数据。"
+    )
     composer.fill(complex_goal)
     page.get_by_role("button", name=re.compile("发送$")).click()
     expect(page.get_by_text("WorkingPlan", exact=True)).to_be_visible(timeout=15_000)

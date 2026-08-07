@@ -93,8 +93,8 @@ def main() -> int:
                     "credential_ref": "env://MYCLAW_REAL_LLM_API_KEY",
                     "default_parameters": {
                         "temperature": 0,
-                        "max_tokens": 512,
-                        "extra_body": {"enable_thinking": False},
+                        "max_tokens": 4096,
+                        "extra_body": {"enable_thinking": True},
                     },
                     "capabilities": {
                         "streaming": True,
@@ -103,7 +103,7 @@ def main() -> int:
                         "tool_result_continuation": True,
                         "usage_in_stream": True,
                         "stop_reason": True,
-                        "context_window": 1_000_000,
+                        "context_window": 16384,
                         "structured_output": "none",
                     },
                 },

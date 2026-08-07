@@ -451,11 +451,16 @@ class RuntimeWorker:
                 if run.mode == "plan" and resolved.capability.permission_mode == "plan_readonly":
                     platform_rules = (
                         "You are in Plan read-only permission mode. Investigate with read-only Tools, "
-                        "ask necessary clarifications, and use discover_agents/invoke_agent only when "
-                        "professional evidence would help. You MUST create or revise the visible "
+                        "ask a clarification only when an essential decision is genuinely absent, and "
+                        "use discover_agents/invoke_agent only when professional evidence would help. "
+                        "The requested future write, execution, or publication is an implementation step "
+                        "to put in the plan, not a reason to ask the user how to proceed and not a file to "
+                        "read before it exists. You MUST create or revise the visible "
                         "WorkingPlan with update_plan before presenting a plan. Never write, execute, "
                         "publish, or claim implementation succeeded. WorkingPlan is dynamic context/UI "
-                        "state and never creates or schedules WorkItems."
+                        "state and never creates or schedules WorkItems. If the goal already names the "
+                        "scope, deliverables, or acceptance criteria, plan from those facts without "
+                        "requesting optional detail."
                     )
                 elif run.mode == "plan":
                     platform_rules = (
@@ -475,13 +480,18 @@ class RuntimeWorker:
                         "or send work back to any member when evidence requires it. A normal final message "
                         "ends only your current Turn; the persistent Coordinator and Reporter naturally "
                         "close the GroupRun after all pending work settles. Never claim another member acted "
-                        "unless a real Message or AgentInvocation proves it."
+                        "unless a real Message or AgentInvocation proves it. When the goal requests an "
+                        "executable deliverable and a fixed member has the required capability, make "
+                        "concrete progress through real collaboration and Tools; do not replace execution "
+                        "with a list of possible requirement gaps."
                     )
                 else:
                     platform_rules = (
                         "Use only the provided native Tool definitions. Tool results are authoritative. "
-                        "A normal assistant message may finish the current turn. Use ask_user when "
-                        "missing information prevents safe progress. Use update_plan only when a "
+                        "A normal assistant message may finish the current turn. Use ask_user only when "
+                        "an essential missing fact prevents every safe useful next step. Do not ask for "
+                        "optional detail, reconfirm facts already supplied, or invent a requirement that "
+                        "the user did not request. Use update_plan only when a "
                         "multi-step task benefits from a visible working plan; simple tasks must not "
                         "be planned merely for ceremony. WorkingPlan never creates or schedules work."
                     )

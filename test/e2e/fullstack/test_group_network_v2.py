@@ -20,6 +20,36 @@ from app.services.verification_service import CAPACITY_ARTIFACT_NAMES, CAPACITY_
 pytestmark = pytest.mark.fullstack
 
 
+CAPACITY_GROUP_CONTRACT = (
+    "CAPACITY-RISK-NETWORK-V2 Build and deliver a real capacity risk calculator. "
+    "Create requirements.md, capacity_risk.py, test_report.md, acceptance_report.md; "
+    "execute T01-T09 and publish all four as Group Artifacts. "
+    "The exact rule is utilization=committed/capacity*100; risk is low below 75, "
+    "medium from 75 through 90 inclusive, and high above 90; over_capacity_hours is "
+    "max(committed-capacity,0). capacity<=0, committed<0, and missing committed each "
+    "exit 2. Emit compact JSON with sorted keys and a trailing newline; normalize integral "
+    "capacity/committed/over-capacity values to JSON integers, while utilization_percent "
+    "must be a JSON float rounded to two decimals. Errors use "
+    "{\"error\":{\"code\":CODE,\"message\":MESSAGE}}. "
+    "Run exactly these argv in order: "
+    "T01 python3 capacity_risk.py --capacity 120 --committed 138; "
+    "T02 python3 capacity_risk.py --capacity 100 --committed 74; "
+    "T03 python3 capacity_risk.py --capacity 100 --committed 75; "
+    "T04 python3 capacity_risk.py --capacity 100 --committed 90; "
+    "T05 python3 capacity_risk.py --capacity 100 --committed 91; "
+    "T06 python3 capacity_risk.py --capacity 100 --committed 0; "
+    "T07 python3 capacity_risk.py --capacity 0 --committed 10; "
+    "T08 python3 capacity_risk.py --capacity 100 --committed -1; "
+    "T09 python3 capacity_risk.py --capacity 100 with no --committed. "
+    "Error code/message pairs are invalid_capacity/total_capacity_hours must be greater "
+    "than 0, invalid_committed/committed_hours must be greater than or equal to 0, and "
+    "missing_committed/--committed is required. requirements.md must contain the formulas, "
+    "all threshold/validation rules, and labels T01 through T09. test_report.md must contain "
+    "9/9, argv, stdout, stderr, exit code, and labels T01 through T09. acceptance_report.md "
+    "must contain capacity_risk.v1, accepted, 9/9, and all four Artifact filenames."
+)
+
+
 def _compose(*args: str) -> None:
     test_root = Path(__file__).resolve().parents[2]
     compose_file = Path(os.getenv(
@@ -216,8 +246,7 @@ def test_agent_network_group_vertical_uat(
     settled_runs: dict[str, dict] = {}
     for attempt in range(10):
         goal = (
-            "CAPACITY-RISK-NETWORK-V2 Build a real capacity risk calculator with executable "
-            f"boundary tests and an Artifact. EXTERNAL-AGENT:{external['id']}"
+            f"{CAPACITY_GROUP_CONTRACT} EXTERNAL-AGENT:{external['id']}"
             if attempt < 5 else f"GROUP-CREATE-ONLY-{attempt}: verify direct three-member creation"
         )
         if attempt == 0:

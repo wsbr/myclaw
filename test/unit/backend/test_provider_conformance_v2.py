@@ -11,9 +11,26 @@ from app.core.model_hub.anthropic import AnthropicLLM, normalize_messages_for_an
 from app.core.model_hub.openai import OpenAILLM
 from app.core.model_hub.registry import ModelHub
 from app.models.registry import ModelVersion
-from app.services.provider_conformance import ProviderConformanceSuite
+from app.services.provider_conformance import (
+    ProviderConformanceSuite,
+    _forced_tool_parameters,
+)
 
 pytestmark = pytest.mark.unit
+
+
+def test_forced_tool_probe_uses_compatible_variant_without_mutating_runtime_defaults():
+    frozen = {
+        "temperature": 0,
+        "extra_body": {"enable_thinking": True, "trace": "kept"},
+    }
+    probed = _forced_tool_parameters(frozen, "required")
+    assert probed == {
+        "temperature": 0,
+        "extra_body": {"enable_thinking": False, "trace": "kept"},
+        "tool_choice": "required",
+    }
+    assert frozen["extra_body"]["enable_thinking"] is True
 
 
 def _version(provider: str) -> ModelVersion:
