@@ -274,7 +274,14 @@ class ProviderConformanceSuite:
         if repeat_call:
             repeat_final = await self.adapter.invoke(ProviderRequest(
                 messages=(
-                    {"role": "user", "content": "Call the echo Tool again and report its result."},
+                    {
+                        "role": "user",
+                        "content": (
+                            "Call the echo Tool exactly once and then report its result. "
+                            "After the Tool result below, do not call any Tool again; return only "
+                            "an ordinary Assistant Message describing that completed result."
+                        ),
+                    },
                     {"role": "assistant", "content": "", "tool_calls": [{
                         "id": repeat_call.call_id, "type": "tool_use", "name": repeat_call.name,
                         "input": repeat_call.arguments,
@@ -293,6 +300,8 @@ class ProviderConformanceSuite:
                 "first_call_id": call.call_id,
                 "second_call_id": repeat_call.call_id if repeat_call else None,
                 "tool_still_visible": True,
+                "tool_call_result": repeated.as_dict(),
+                "final_result": repeat_final.as_dict() if repeat_call else None,
             },
         })
 
