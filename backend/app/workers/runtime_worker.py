@@ -482,7 +482,12 @@ class RuntimeWorker:
                         "The current WorkingPlan was approved and this same Plan Run now has direct "
                         "implementation permission. Implement dynamically with native Tools. Revise "
                         "the WorkingPlan when requirements or test evidence changes; do not treat it "
-                        "as a frozen graph or fixed participant list. Choose collaborators on demand."
+                        "as a frozen graph or fixed participant list. Choose collaborators on demand. "
+                        "When the user requires exact, literal, verbatim, or byte-contiguous text in "
+                        "a file or Artifact, preserve every required sequence contiguously: do not "
+                        "insert Markdown emphasis, code delimiters, typographic substitutions, or "
+                        "other characters inside it. Before publishing, read the source file, check "
+                        "each named literal, and correct any mismatch."
                     )
                 elif run.mode == "group":
                     platform_rules = (
