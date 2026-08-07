@@ -14,6 +14,7 @@ from app.models.registry import SandboxProfile
 from app.models.runtime_v1 import DurableRunner, Message, Run, SessionSandbox, Workspace, WorkItem
 from app.persistence.reliable_writes import ExecutionEventWriter, OutboxWriter
 from app.persistence.runtime_graph import persist_new_work_runner
+from app.services.run_reliability_service import default_run_budget, deadline_from_budget
 
 
 class AgentUnavailable(RuntimeError):
@@ -132,11 +133,13 @@ async def enqueue_chat_message(
         sender_type="user", sender_user_id=user_id, recipient_type="session",
         role="user", content=content, content_format="markdown", status="committed",
     )
+    run_budget = default_run_budget(resolved_mode)
     run = Run(
         id=uuid7(), session_id=session.id, user_id=user_id, mode=resolved_mode,
         execution_kind=execution_kind, lifecycle="running", wait_reason=None,
         status="active", outcome=None, entry_agent_id=agent.id,
-        permission_mode=session.permission_mode, hard_budget_snapshot={},
+        permission_mode=session.permission_mode, hard_budget_snapshot=run_budget,
+        deadline_at=deadline_from_budget(run_budget, mode=resolved_mode),
         started_at=utcnow(),
     )
     work = WorkItem(

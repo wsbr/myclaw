@@ -26,6 +26,7 @@ from app.persistence.reliable_writes import (
 )
 from app.persistence.runtime_graph import persist_new_work_runner
 from app.services.agent_directory_service import resolve_callable_agent
+from app.services.run_reliability_service import default_run_budget, deadline_from_budget
 
 
 class GroupPolicyError(ValueError):
@@ -249,12 +250,14 @@ async def _create_native_group_run_graph(
     if recipient_id not in by_agent:
         raise GroupPolicyError("group_member_unavailable", "Recipient must be an available member")
 
-    default_budget = {"max_turns": 40, "max_agent_invocations": 40, "max_depth": 8}
+    default_budget = default_run_budget("group")
     run = Run(
         id=uuid7(), session_id=session.id, user_id=session.user_id, mode="group",
         execution_kind="normal", lifecycle="running", status="active",
         permission_mode="direct", hard_budget_snapshot=default_budget,
-        entry_agent_id=recipient_id, started_at=utcnow(),
+        entry_agent_id=recipient_id,
+        deadline_at=deadline_from_budget(default_budget, mode="group"),
+        started_at=utcnow(),
     )
     group_run = GroupRun(
         id=uuid7(), run_id=run.id, group_session_id=group.id,

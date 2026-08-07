@@ -2216,7 +2216,7 @@ components:
     Run:
       type: object
       additionalProperties: false
-      required: [id, session_id, mode, status, wait_reason, permission_mode, version]
+      required: [id, session_id, mode, status, wait_reason, terminal_reason, deadline_at, permission_mode, version]
       properties:
         id: {$ref: '#/components/schemas/Uuid'}
         session_id: {$ref: '#/components/schemas/Uuid'}
@@ -2224,6 +2224,7 @@ components:
         status: {$ref: '#/components/schemas/RunStatus'}
         wait_reason: {$ref: '#/components/schemas/WaitReason'}
         terminal_reason: {type: [string, 'null']}
+        deadline_at: {oneOf: [{$ref: '#/components/schemas/Timestamp'}, {type: 'null'}]}
         root_work_item_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
         permission_mode: {$ref: '#/components/schemas/PermissionMode'}
         cancellation_requested_at: {oneOf: [{$ref: '#/components/schemas/Timestamp'}, {type: 'null'}]}
@@ -2671,9 +2672,16 @@ components:
       properties: {run_id: {$ref: '#/components/schemas/Uuid'}, items: {type: array, items: {$ref: '#/components/schemas/JsonObject'}}}
     TraceProjection:
       type: object
-      additionalProperties: false
-      required: [runner_id, trace_id, spans, redacted]
-      properties: {runner_id: {$ref: '#/components/schemas/Uuid'}, trace_id: {type: string}, spans: {type: array, items: {$ref: '#/components/schemas/JsonObject'}}, redacted: {type: boolean, const: true}}
+      additionalProperties: true
+      required: [runner_id, spans, ledger_refs]
+      properties:
+        runner_id: {$ref: '#/components/schemas/Uuid'}
+        status: {type: string, enum: [available, not_available]}
+        trace: {oneOf: [{$ref: '#/components/schemas/JsonObject'}, {type: 'null'}]}
+        spans: {type: array, items: {$ref: '#/components/schemas/JsonObject'}}
+        links: {type: array, items: {$ref: '#/components/schemas/JsonObject'}}
+        harness: {$ref: '#/components/schemas/JsonObject'}
+        ledger_refs: {$ref: '#/components/schemas/JsonObject'}
     Memory:
       type: object
       additionalProperties: false

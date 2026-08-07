@@ -52,6 +52,7 @@ from app.persistence.runtime_graph import persist_new_work_runner, persist_repla
 from app.runtime import (
     ActionDispatcher,
     AgentLoopCoordinator,
+    AgentLoopError,
     ContextAssembler,
     LoopIdentity,
     ModelAdapter,
@@ -61,6 +62,8 @@ from app.services.provider_conformance import resolve_credential
 from app.services.plan_mode_service import create_plan_approval
 from app.services.runtime_resume_service import queue_work_item_resume
 from app.services.working_plan_service import current_working_plan, working_plan_view
+from app.services.verification_service import maybe_verify_capacity_risk
+from app.services.run_reliability_service import expire_one_run_deadline
 
 
 logger = logging.getLogger(__name__)
@@ -171,6 +174,120 @@ class RuntimeWorker:
                 .with_for_update(skip_locked=True).limit(1)
             )
             if command is None:
+                return None
+            if command.attempt_count >= settings.outbox_max_delivery_attempts:
+                runner_id = str(command.payload_ref.get("runner_id") or command.aggregate_id)
+                runner = await db.scalar(select(DurableRunner).where(
+                    DurableRunner.id == runner_id,
+                ).with_for_update())
+                work = await db.scalar(select(WorkItem).where(
+                    WorkItem.id == runner.work_item_id,
+                ).with_for_update()) if runner else None
+                run = await db.scalar(select(Run).where(
+                    Run.id == runner.run_id,
+                ).with_for_update()) if runner else None
+                command.status = "dead"
+                command.last_error = "outbox_delivery_budget_exhausted"
+                command.dispatch_lease_owner = None
+                command.dispatch_lease_token = None
+                command.dispatch_lease_expires_at = None
+                if (
+                    runner is not None and work is not None and run is not None
+                    and runner.status == "queued"
+                    and work.active_runner_id == runner.id
+                    and run.status not in {"completed", "cancelled", "failed"}
+                ):
+                    await self._lock_event_session(db, run.session_id)
+                    now = utcnow()
+                    runner.status = "failed"
+                    runner.failure_code = "outbox_delivery_budget_exhausted"
+                    runner.error_code = runner.failure_code
+                    runner.error_detail = "Runner command exceeded its bounded delivery budget"
+                    runner.ended_at = now
+                    runner.version += 1
+                    work.status = "failed"
+                    work.error_code = runner.failure_code
+                    work.error_detail = runner.error_detail
+                    work.active_runner_id = None
+                    work.version += 1
+                    if work.group_run_id:
+                        is_summary = work.purpose == "group_summary"
+                        summary_epoch = (runner.input_snapshot or {}).get("summary_epoch")
+                        request = None
+                        if is_summary and summary_epoch is not None:
+                            request = await db.scalar(select(GroupSummaryRequest).where(
+                                GroupSummaryRequest.group_run_id == work.group_run_id,
+                                GroupSummaryRequest.summary_epoch == int(summary_epoch),
+                            ).with_for_update())
+                            if request is not None:
+                                request.status = "failed"
+                                request.version += 1
+                            reporter = await db.scalar(select(GroupRunMember).where(
+                                GroupRunMember.group_run_id == work.group_run_id,
+                                GroupRunMember.agent_id == runner.agent_id,
+                            ).with_for_update())
+                            if reporter is not None:
+                                reporter.participation_status = "unavailable"
+                                reporter.version += 1
+                        run.status = "waiting_user" if is_summary else "active"
+                        run.lifecycle = "waiting" if is_summary else "running"
+                        run.wait_reason = "waiting_user" if is_summary else None
+                        run.version += 1
+                        failed = await ExecutionEventWriter(db).append(
+                            session_id=run.session_id, run_id=run.id,
+                            group_run_id=work.group_run_id,
+                            event_type=(
+                                "group.reporter_unavailable" if is_summary
+                                else "group.member_turn_failed"
+                            ),
+                            event_dedupe_key=f"runner:{runner.id}:delivery-budget",
+                            actor_type="service", actor_id=self.worker_id,
+                            entity_type=(
+                                "group_summary_request" if request is not None else "work_item"
+                            ),
+                            entity_id=request.id if request is not None else work.id,
+                            entity_version=request.version if request is not None else work.version,
+                            visibility="user" if is_summary else "group",
+                            summary=(
+                                "Group Reporter delivery budget exhausted"
+                                if is_summary
+                                else "Group member Runner delivery budget exhausted"
+                            ),
+                            payload={
+                                "agent_id": runner.agent_id,
+                                "error_code": runner.failure_code,
+                                "summary_epoch": summary_epoch,
+                            },
+                            correlation_id=run.id,
+                        )
+                        group_run = await db.get(GroupRun, work.group_run_id)
+                        if group_run is not None and not is_summary:
+                            await self._enqueue_group_quiescence(
+                                db, group_run=group_run, run=run,
+                                cause_event_id=failed.id,
+                            )
+                    else:
+                        run.status = "failed"
+                        run.lifecycle = "completed"
+                        run.wait_reason = None
+                        run.outcome = "failed"
+                        run.error_code = runner.failure_code
+                        run.terminal_reason = runner.failure_code
+                        run.result_summary = runner.error_detail
+                        run.finished_at = now
+                        run.completed_at = now
+                        run.version += 1
+                        await ExecutionEventWriter(db).append(
+                            session_id=run.session_id, run_id=run.id,
+                            event_type="run.failed",
+                            event_dedupe_key=f"run:{run.id}:delivery-budget",
+                            actor_type="service", actor_id=self.worker_id,
+                            entity_type="run", entity_id=run.id,
+                            entity_version=run.version, visibility="user",
+                            summary="Run failed because Runner delivery budget was exhausted",
+                            payload={"error_code": runner.failure_code},
+                            correlation_id=run.id,
+                        )
                 return None
             token = uuid7()
             command.status = "claimed"
@@ -471,6 +588,7 @@ class RuntimeWorker:
                 permission_revision=int(
                     runner.principal_snapshot.get("permission_revision") or 1
                 ),
+                execution_epoch=fence.execution_epoch,
                 authentication_source=str(
                     runner.principal_snapshot.get("authentication_source") or "web_session"
                 ),
@@ -484,24 +602,33 @@ class RuntimeWorker:
             dispatcher = ActionDispatcher(tool_definitions)
             async with AsyncSessionLocal() as db:
                 capability = await db.get(CapabilitySnapshot, capability_id)
-                result = await AgentLoopCoordinator(
-                    ModelAdapter(provider), dispatcher,
-                ).run(
-                    context=context, tool_definitions=tool_definitions,
-                    capability_snapshot=capability, runtime_context=runtime_context,
-                    model_parameters={
-                        **dict(model_version.default_parameters or {}),
-                        "model_id": model_version.model_name,
-                    },
-                    db=db,
-                    identity=LoopIdentity(
-                        runner_id=fence.runner_id, work_item_id=fence.work_item_id,
-                        run_id=fence.run_id, agent_version_id=assembly.id,
-                        model_version_id=model_version.id, provider=model_version.provider,
-                        execution_epoch=fence.execution_epoch,
-                    ),
-                )
-                await db.commit()
+                try:
+                    result = await AgentLoopCoordinator(
+                        ModelAdapter(provider), dispatcher,
+                        reliability_enabled=True,
+                    ).run(
+                        context=context, tool_definitions=tool_definitions,
+                        capability_snapshot=capability, runtime_context=runtime_context,
+                        model_parameters={
+                            **dict(model_version.default_parameters or {}),
+                            "model_id": model_version.model_name,
+                        },
+                        db=db,
+                        identity=LoopIdentity(
+                            runner_id=fence.runner_id, work_item_id=fence.work_item_id,
+                            run_id=fence.run_id, agent_version_id=assembly.id,
+                            model_version_id=model_version.id, provider=model_version.provider,
+                            execution_epoch=fence.execution_epoch,
+                        ),
+                    )
+                except AgentLoopError:
+                    # Provider/repair/budget facts are authoritative even when
+                    # the logical loop fails. Persist them before the Runner
+                    # terminal transaction records the failure.
+                    await db.commit()
+                    raise
+                else:
+                    await db.commit()
             if result.status == "completed":
                 await self._settle_with_retry(
                     self._settle_completed,
@@ -651,6 +778,7 @@ class RuntimeWorker:
             run.status = "completed"
             run.lifecycle = "completed"
             run.outcome = "succeeded"
+            run.terminal_reason = "completed"
             run.result_summary = content[:4000]
             run.completed_at = runner.ended_at
             run.finished_at = runner.ended_at
@@ -686,7 +814,7 @@ class RuntimeWorker:
                 correlation_id=run.id,
             )
             message.caused_by_event_id = event.id
-            await ExecutionEventWriter(db).append(
+            completed = await ExecutionEventWriter(db).append(
                 session_id=fence.session_id, run_id=run.id,
                 event_type="run.completed",
                 event_dedupe_key=f"run:{run.id}:completed:v{run.version}",
@@ -696,6 +824,13 @@ class RuntimeWorker:
                 payload={"root_work_item_id": work.id, "outcome": "succeeded"},
                 correlation_id=run.id,
                 caused_by_event_id=event.id,
+            )
+            await OutboxWriter(db).enqueue(
+                topic="runtime.control", action="verify_run",
+                aggregate_type="run", aggregate_id=run.id,
+                partition_key=run.session_id,
+                dedupe_key=f"event:{completed.id}:verify-run",
+                payload_ref={"run_id": run.id},
             )
 
     async def _group_pending_exists(
@@ -852,6 +987,7 @@ class RuntimeWorker:
         run.status = "completed"
         run.lifecycle = "completed"
         run.outcome = "succeeded"
+        run.terminal_reason = "completed"
         run.result_summary = content[:4000]
         run.completed_at = now
         run.finished_at = now
@@ -870,7 +1006,7 @@ class RuntimeWorker:
             payload={"summary_epoch": summary_epoch, "message_id": message.id},
             correlation_id=run.id, caused_by_event_id=created.id,
         )
-        await ExecutionEventWriter(db).append(
+        completed = await ExecutionEventWriter(db).append(
             session_id=run.session_id, run_id=run.id,
             group_session_id=group_run.group_session_id,
             group_run_id=group_run.id,
@@ -881,6 +1017,13 @@ class RuntimeWorker:
             visibility="user", summary="GroupRun completed after Reporter delivery",
             payload={"summary_epoch": summary_epoch, "reporter_agent_id": runner.agent_id},
             correlation_id=run.id, caused_by_event_id=delivered.id,
+        )
+        await OutboxWriter(db).enqueue(
+            topic="runtime.control", action="verify_run",
+            aggregate_type="run", aggregate_id=run.id,
+            partition_key=run.session_id,
+            dedupe_key=f"event:{completed.id}:verify-run",
+            payload_ref={"run_id": run.id},
         )
 
     async def _settle_plan_proposal(
@@ -1316,6 +1459,7 @@ class RuntimeWorker:
                     ).with_for_update())
                     if reporter is not None:
                         reporter.participation_status = "unavailable"
+                        reporter.version += 1
                     run.status = "waiting_user"
                     run.lifecycle = "waiting"
                     run.wait_reason = "waiting_user"
@@ -1365,6 +1509,7 @@ class RuntimeWorker:
                 run.lifecycle = "completed"
                 run.outcome = "failed"
                 run.error_code = code
+                run.terminal_reason = code
                 run.completed_at = runner.ended_at
                 run.finished_at = runner.ended_at
                 run.version += 1
@@ -1754,41 +1899,72 @@ class RuntimeWorker:
         )
 
     async def process_one_group_control(self) -> bool:
+        command_id = None
         try:
             async with AsyncSessionLocal.begin() as db:
                 command = await db.scalar(select(OutboxCommand).where(
                     OutboxCommand.topic == "runtime.control",
-                    OutboxCommand.action == "evaluate_group_quiescence",
+                    OutboxCommand.action.in_(("evaluate_group_quiescence", "verify_run")),
                     OutboxCommand.status.in_(("pending", "retry_wait")),
                     OutboxCommand.available_at <= utcnow(),
                 ).order_by(OutboxCommand.priority.desc(), OutboxCommand.created_at)
                  .with_for_update(skip_locked=True).limit(1))
                 if command is None:
                     return False
+                command_id = command.id
                 command.status = "claimed"
                 command.dispatch_lease_owner = self.worker_id
                 command.dispatch_lease_token = uuid7()
                 command.attempt_count += 1
-                await self._evaluate_group_quiescence(
-                    db,
-                    group_run_id=str(command.payload_ref.get("group_run_id") or command.aggregate_id),
-                    trigger_event_id=command.payload_ref.get("cause_event_id"),
-                )
+                if command.action == "verify_run":
+                    await maybe_verify_capacity_risk(
+                        db,
+                        run_id=str(command.payload_ref.get("run_id") or command.aggregate_id),
+                        actor_id=self.worker_id,
+                    )
+                else:
+                    await self._evaluate_group_quiescence(
+                        db,
+                        group_run_id=str(command.payload_ref.get("group_run_id") or command.aggregate_id),
+                        trigger_event_id=command.payload_ref.get("cause_event_id"),
+                    )
                 command.status = "completed"
                 command.completed_at = utcnow()
                 command.dispatch_lease_owner = None
                 command.dispatch_lease_token = None
                 return True
-        except Exception:
-            # The transaction rolled back, leaving the command claimable. A
-            # later poll or another worker retries the same idempotent command.
-            logger.exception("Group quiescence command failed and will retry")
+        except Exception as error:
+            # The control transaction rolled back. Persist a separate bounded
+            # delivery fact; never replay a business payload because control
+            # commands are idempotent database convergence operations only.
+            if command_id is not None:
+                async with AsyncSessionLocal.begin() as db:
+                    failed = await db.scalar(select(OutboxCommand).where(
+                        OutboxCommand.id == command_id,
+                    ).with_for_update())
+                    if failed is not None and failed.status in {"pending", "retry_wait"}:
+                        failed.attempt_count += 1
+                        failed.last_error = str(error)[:4000]
+                        failed.dispatch_lease_owner = None
+                        failed.dispatch_lease_token = None
+                        failed.dispatch_lease_expires_at = None
+                        if failed.attempt_count >= settings.outbox_max_delivery_attempts:
+                            failed.status = "dead"
+                        else:
+                            failed.status = "retry_wait"
+                            failed.available_at = utcnow() + timedelta(
+                                seconds=min(60, 2 ** failed.attempt_count),
+                            )
+            logger.exception("Runtime control command failed and will retry")
             return False
 
     async def run_forever(self, poll_seconds: float | None = None) -> None:
         interval = settings.runtime_worker_poll_seconds if poll_seconds is None else poll_seconds
         while True:
             try:
+                async with AsyncSessionLocal.begin() as db:
+                    if await expire_one_run_deadline(db, actor_id=self.worker_id):
+                        continue
                 if await self.recover_one_expired_runner():
                     continue
                 if await self.process_one_group_control():

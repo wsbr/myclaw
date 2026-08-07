@@ -103,6 +103,8 @@ class RunResponse(BaseModel):
     permission_mode: str = "direct"
     result_summary: str | None
     error_code: str | None
+    terminal_reason: str | None = None
+    deadline_at: datetime | None = None
     cancellation_requested_at: datetime | None
     version: int
     started_at: datetime

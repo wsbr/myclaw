@@ -7,6 +7,7 @@ import signal
 from app.core.tool_registry.base import BaseTool, RuntimeContext, ToolResult
 from app.services.workspace_file_service import (
     execution_workspace_root, resolve_workspace_path, sandbox_environment,
+    sha256_file,
 )
 
 
@@ -58,6 +59,17 @@ class ExecuteTool(BaseTool):
         if not cwd.is_dir():
             return ToolResult(success=False, error="cwd does not exist or is not a directory")
         environment = sandbox_environment(root, args.get("env"))
+        input_file_checksums = {}
+        for value in argv[1:]:
+            if value.startswith("-"):
+                continue
+            candidate = (cwd / value).resolve(strict=False)
+            try:
+                candidate.relative_to(root.resolve())
+            except ValueError:
+                continue
+            if candidate.is_file() and not candidate.is_symlink():
+                input_file_checksums[value] = sha256_file(candidate)
         before = _snapshot(root)
         try:
             process = await asyncio.create_subprocess_exec(
@@ -89,6 +101,10 @@ class ExecuteTool(BaseTool):
             "stdout_truncated": len(stdout) > output_limit,
             "stderr_truncated": len(stderr) > output_limit,
             "output_files": changed,
+            # These checksums bind the observed process result to the exact
+            # Workspace bytes it consumed. They are execution evidence, not a
+            # claim inferred later from a similarly named Artifact.
+            "input_file_checksums": input_file_checksums,
         }
         if timed_out:
             return ToolResult(success=False, data=data, error="process timed out")

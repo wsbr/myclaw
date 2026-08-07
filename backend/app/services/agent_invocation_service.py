@@ -90,6 +90,7 @@ async def persist_rejected_agent_invocation(
             "permission_revision": caller_runner.principal_snapshot.get("permission_revision"),
         },
         completed_at=utcnow(),
+        deadline_at=run.deadline_at,
         group_session_id=group_run.group_session_id if group_run else None,
         group_run_id=group_run.id if group_run else None,
     )
@@ -364,6 +365,7 @@ async def dispatch_agent_invocation(
         },
         group_session_id=group_run.group_session_id if run.mode == "group" else None,
         group_run_id=group_run.id if run.mode == "group" else None,
+        deadline_at=run.deadline_at,
     )
     if tool_invocation is not None:
         tool_invocation.status = "waiting_resource"

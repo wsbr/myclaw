@@ -87,6 +87,7 @@ async def create_plan_approval(
             "target_permission_mode": "direct",
         },
         status="pending",
+        deadline_at=run.deadline_at,
     )
     db.add(approval)
     await db.flush()

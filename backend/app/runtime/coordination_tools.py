@@ -335,12 +335,14 @@ async def dispatch_coordination_tool(
             data={"clarification_id": existing.id, "status": "waiting_user"},
         ), existing.status == "open", "clarification" if existing.status == "open" else None
     question = str(arguments["question"]).strip()
+    owning_run = await db.get(Run, run_id)
     clarification = Clarification(
         id=uuid7(), work_item_id=work_item_id, run_id=run_id,
         session_id=context.session_id, asked_by_agent_id=context.agent_id,
         target_user_id=context.user_id, question=question, status="open",
         idempotency_key=operation_key, source_turn_id=source_turn_id,
         provider_tool_call_id=provider_call_id,
+        deadline_at=owning_run.deadline_at if owning_run else None,
     )
     message = Message(
         id=uuid7(), session_id=context.session_id, user_id=context.user_id,

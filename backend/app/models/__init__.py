@@ -56,6 +56,10 @@ from app.models.channel_v1 import (
 )
 from app.models.observability_v1 import RunnerTrace, ObservabilitySpan, ObservabilitySpanLink
 from app.models.history_v1 import HistorySummary
+from app.models.verification_v1 import (
+    LateResultObservation, RunProgressMark, VerificationEvidenceRef,
+    VerificationResult,
+)
 
 __all__ = [
     "UserIdentity", "PlatformAccount", "PlatformAccountRole", "IdempotencyRecord", "AgentApiKey",
@@ -83,4 +87,6 @@ __all__ = [
     "NotificationDelivery", "NotificationDeliveryAttempt",
     "RunnerTrace", "ObservabilitySpan", "ObservabilitySpanLink",
     "HistorySummary",
+    "VerificationResult", "VerificationEvidenceRef", "RunProgressMark",
+    "LateResultObservation",
 ]

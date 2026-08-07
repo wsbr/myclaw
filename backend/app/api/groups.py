@@ -30,6 +30,7 @@ from app.schemas.group_v1 import (
 from app.services.group_formation_service import (
     GroupFormationValidationError, create_revision, proposal_view, revision_view, validate_formation,
 )
+from app.services.run_reliability_service import default_run_budget, deadline_from_budget
 from app.services.cursor_service import SortKey, paginate_scalars
 from app.services.group_collaboration_service import (
     GroupPolicyError,
@@ -139,9 +140,11 @@ async def create_group_formation(
         raise HTTPException(status_code=409, detail={"code": "entry_agent_group_unavailable"})
     group = GroupSession(id=uuid7(), parent_session_id=session.id, user_id=session.user_id,
                          entry_agent_id=agent.id, status="forming")
+    run_budget = default_run_budget("group")
     run = Run(id=uuid7(), session_id=session.id, user_id=session.user_id, mode="group",
               execution_kind="proposal_generation", lifecycle="running", entry_agent_id=agent.id,
-              started_at=utcnow())
+              hard_budget_snapshot=run_budget,
+              deadline_at=deadline_from_budget(run_budget, mode="group"), started_at=utcnow())
     proposal = GroupFormationProposal(id=uuid7(), parent_session_id=session.id, group_session_id=group.id,
                                       user_id=session.user_id, entry_agent_id=agent.id,
                                       generation_run_id=run.id, status="generating", current_revision_no=0)
@@ -316,8 +319,11 @@ async def confirm_group_formation(
             target_node_id=nodes[edge.target_participant_id].id, label=edge.label, rationale=edge.rationale,
             source_edge_id=edge.id))
     entry_participant = next(row for row in participants if row.is_entry); owner_node = nodes[entry_participant.id]
+    run_budget = default_run_budget("group")
     run = Run(id=uuid7(), session_id=group.parent_session_id, user_id=group.user_id, mode="group",
-              execution_kind="normal", lifecycle="running", entry_agent_id=group.entry_agent_id, started_at=utcnow())
+              execution_kind="normal", lifecycle="running", entry_agent_id=group.entry_agent_id,
+              hard_budget_snapshot=run_budget,
+              deadline_at=deadline_from_budget(run_budget, mode="group"), started_at=utcnow())
     group_run = GroupRun(id=uuid7(), run_id=run.id, group_session_id=group.id, owner_node_id=owner_node.id,
                          goal=revision.goal)
     db.add(run); await db.flush()
@@ -766,9 +772,11 @@ async def create_group_run(
     if any(run.lifecycle not in {"completed", "cancelled"} for run in referenced_runs):
         raise HTTPException(status_code=409, detail={"code": "group_run_reference_not_terminal"})
 
+    run_budget = default_run_budget("group")
     run = Run(id=uuid7(), session_id=group.parent_session_id, user_id=group.user_id, mode="group",
               execution_kind="normal", lifecycle="running", entry_agent_id=group.entry_agent_id,
-              started_at=utcnow())
+              hard_budget_snapshot=run_budget,
+              deadline_at=deadline_from_budget(run_budget, mode="group"), started_at=utcnow())
     group_run = GroupRun(id=uuid7(), run_id=run.id, group_session_id=group.id,
                          owner_node_id=owner.id, goal=content)
     message = Message(id=uuid7(), session_id=group.parent_session_id, user_id=group.user_id,

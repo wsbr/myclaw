@@ -105,6 +105,8 @@ class Run(Base, TimestampMixin, VersionMixin):
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    terminal_reason: Mapped[str | None] = mapped_column(String(100))
+    deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
 
 
 class WorkItem(Base, TimestampMixin, VersionMixin):
@@ -433,6 +435,7 @@ class Clarification(Base, TimestampMixin, VersionMixin):
         String(36), ForeignKey("agent_turn.id")
     )
     provider_tool_call_id: Mapped[str | None] = mapped_column(String(191))
+    deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
 
 
 class Approval(Base, TimestampMixin, VersionMixin):
@@ -492,6 +495,7 @@ class Approval(Base, TimestampMixin, VersionMixin):
         String(36), ForeignKey("platform_account.id")
     )
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
 
 
 class SessionGrant(Base, TimestampMixin, VersionMixin):
@@ -648,6 +652,14 @@ class ToolInvocation(Base, TimestampMixin, VersionMixin):
     error_code: Mapped[str | None] = mapped_column(String(100))
     error_detail: Mapped[str | None] = mapped_column(Text)
     attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    active_attempt_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey(
+            "tool_attempt.id", use_alter=True,
+            name="fk_tool_invocation_active_attempt",
+        )
+    )
+    execution_epoch: Mapped[int] = mapped_column(BigInteger, default=1, nullable=False)
+    deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
 
 
 class ToolAttempt(Base, TimestampMixin):
@@ -674,6 +686,15 @@ class ToolAttempt(Base, TimestampMixin):
     error_code: Mapped[str | None] = mapped_column(String(100))
     error_detail: Mapped[str | None] = mapped_column(Text)
     retryable: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    execution_epoch: Mapped[int] = mapped_column(BigInteger, default=1, nullable=False)
+    fencing_token: Mapped[int] = mapped_column(BigInteger, default=1, nullable=False)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    request_hash: Mapped[str | None] = mapped_column(String(64))
+    side_effect_started: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    outcome_confirmed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
 
 
 class ToolConfirmation(Base, TimestampMixin, VersionMixin):
@@ -745,6 +766,7 @@ class AgentInvocation(Base, TimestampMixin, VersionMixin):
     group_run_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("group_run.id")
     )
+    deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
 
 
 class RunnerSkillSnapshot(Base):

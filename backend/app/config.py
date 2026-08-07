@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     sandbox_worker_poll_seconds: float = Field(default=0.5, gt=0)
     sandbox_outbox_claim_lease_seconds: int = Field(default=30, gt=0)
     sandbox_attempt_stale_seconds: int = Field(default=60, gt=0)
+    sandbox_attempt_lease_seconds: int = Field(default=45, gt=0)
+    sandbox_attempt_heartbeat_seconds: int = Field(default=10, gt=0)
+    sandbox_tool_max_attempts: int = Field(default=3, gt=0, le=10)
+    outbox_max_delivery_attempts: int = Field(default=12, gt=0, le=100)
     provider_conformance_suite_version: str = "agent-native-v2.2"
     runtime_release_id: str = "agent-native-v2"
     provider_adapter_version: str = "2"
@@ -79,6 +83,8 @@ class Settings(BaseSettings):
     def validate_production_safety(self):
         if self.runtime_runner_heartbeat_seconds >= self.runtime_runner_lease_seconds:
             raise ValueError("RUNTIME_RUNNER_HEARTBEAT_SECONDS must be below RUNTIME_RUNNER_LEASE_SECONDS")
+        if self.sandbox_attempt_heartbeat_seconds >= self.sandbox_attempt_lease_seconds:
+            raise ValueError("SANDBOX_ATTEMPT_HEARTBEAT_SECONDS must be below SANDBOX_ATTEMPT_LEASE_SECONDS")
         if self.myclaw_environment.lower() == "production":
             unsafe = {
                 "SECRET_KEY": self.secret_key.startswith("change-me"),

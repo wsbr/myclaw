@@ -15,10 +15,11 @@ from app.core.tool_registry.base import RuntimeContext, ToolError, ToolResult
 from app.core.tool_registry.registry import ToolRegistry
 from app.models.common import utcnow, uuid7
 from app.models.foundation import UserSession
-from app.models.runtime_v1 import Approval, CapabilitySnapshot, SessionGrant, ToolInvocation
+from app.models.runtime_v1 import Approval, CapabilitySnapshot, Run, SessionGrant, ToolInvocation
 from app.persistence.reliable_writes import ExecutionEventWriter
 from app.runtime.coordination_tools import dispatch_coordination_tool
 from app.runtime.protocol import ToolCallItem
+from app.services.run_reliability_service import BudgetExceeded, assert_action_budget
 
 
 @dataclass(frozen=True)
@@ -93,6 +94,38 @@ async def _builtin_executor(name, arguments, context, db):
     return await ToolRegistry.execute(name, arguments, context, db=db)
 
 
+async def _record_authorization_rejection(
+    db: AsyncSession | None, *, call: ToolCallItem, context: RuntimeContext,
+    run_id: str | None, source_turn_id: str | None, error_code: str,
+) -> None:
+    """Project a denied Tool call without manufacturing an invocation fact."""
+
+    if db is None or not run_id or not source_turn_id:
+        return
+    await db.scalar(select(UserSession).where(
+        UserSession.id == context.session_id,
+    ).execution_options(populate_existing=True).with_for_update())
+    arguments_hash = hashlib.sha256(json.dumps(
+        call.arguments, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":"), default=str,
+    ).encode()).hexdigest()
+    await ExecutionEventWriter(db).append(
+        session_id=context.session_id, run_id=run_id,
+        event_type="tool_invocation.rejected",
+        event_dedupe_key=(
+            f"tool-rejection:{source_turn_id}:{call.call_id}:{error_code}"
+        ),
+        actor_type="service", actor_id="runtime-action-dispatcher",
+        entity_type="agent_turn", entity_id=source_turn_id,
+        visibility="user", summary=f"Tool request rejected: {call.name}",
+        payload={
+            "tool_key": call.name, "error_code": error_code,
+            "arguments_hash": arguments_hash,
+        },
+        correlation_id=run_id,
+    )
+
+
 class ActionDispatcher:
     def __init__(
         self, tool_definitions: list[dict[str, Any]], *,
@@ -119,6 +152,11 @@ class ActionDispatcher:
         )
         definition = self.definitions.get(call.name)
         if call.name not in effective or definition is None:
+            await _record_authorization_rejection(
+                db, call=call, context=runtime_context, run_id=run_id,
+                source_turn_id=source_turn_id,
+                error_code="tool_not_in_capability_snapshot",
+            )
             return DispatchResult(
                 call.call_id, call.name,
                 ToolResult(
@@ -151,6 +189,11 @@ class ActionDispatcher:
             runtime_context.permission_mode == "plan_readonly"
             and definition.get("side_effect", "none") != "none"
         ):
+            await _record_authorization_rejection(
+                db, call=call, context=runtime_context, run_id=run_id,
+                source_turn_id=source_turn_id,
+                error_code="permission_mode_denied",
+            )
             return DispatchResult(
                 call.call_id, call.name,
                 ToolResult(
@@ -188,6 +231,24 @@ class ActionDispatcher:
                         error_category="permanent",
                     ),
                 )
+            if call.name == "invoke_agent":
+                try:
+                    await assert_action_budget(db, run_id, action_kind="agent")
+                except BudgetExceeded as error:
+                    return DispatchResult(
+                        call.call_id, call.name,
+                        ToolResult(
+                            status="failed", summary=str(error),
+                            error=ToolError(
+                                code=error.code, message=str(error),
+                                category="permanent",
+                                details={
+                                    "dimension": error.dimension,
+                                    "limit": error.limit, "used": error.used,
+                                },
+                            ),
+                        ),
+                    )
             result, durable_wait, wait_reason = await dispatch_coordination_tool(
                 call.name, call.arguments, context=runtime_context, db=db,
                 run_id=run_id, work_item_id=work_item_id,
@@ -203,6 +264,67 @@ class ActionDispatcher:
             encoded = json.dumps(call.arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             arguments_hash = hashlib.sha256(encoded.encode()).hexdigest()
             operation_key = f"turn:{source_turn_id}:call:{call.call_id}"
+            existing = await db.scalar(select(ToolInvocation).where(
+                ToolInvocation.work_item_id == work_item_id,
+                ToolInvocation.business_idempotency_key == operation_key,
+            ).with_for_update())
+            if existing is not None:
+                if (
+                    existing.arguments_hash != arguments_hash
+                    or existing.tool_key != call.name
+                ):
+                    return DispatchResult(
+                        call.call_id, call.name,
+                        ToolResult(
+                            status="failed", summary="Operation key conflicts with another request",
+                            error=ToolError(
+                                code="idempotency_conflict",
+                                message="The existing operation key has different Tool arguments",
+                                category="permanent", details={
+                                    "invocation_id": existing.id,
+                                },
+                            ),
+                        ),
+                        invocation_id=existing.id,
+                    )
+                terminal = {
+                    "succeeded", "failed", "rejected", "cancelled", "outcome_unknown",
+                }
+                if existing.status in terminal and existing.result_data:
+                    replayed = ToolResult.model_validate(existing.result_data)
+                    return DispatchResult(
+                        call.call_id, call.name, replayed,
+                        invocation_id=existing.id,
+                    )
+                return DispatchResult(
+                    call.call_id, call.name,
+                    ToolResult(
+                        status="succeeded", summary="Existing Tool operation is still durable",
+                        data={"invocation_id": existing.id, "status": existing.status},
+                    ),
+                    invocation_id=existing.id, durable_wait=True,
+                    wait_reason=(
+                        "approval" if existing.status == "waiting_confirmation" else "tool"
+                    ),
+                )
+            owning_run = await db.get(Run, run_id)
+            if owning_run is not None:
+                try:
+                    await assert_action_budget(db, run_id, action_kind="tool")
+                except BudgetExceeded as error:
+                    return DispatchResult(
+                        call.call_id, call.name,
+                        ToolResult(
+                            status="failed", summary=str(error),
+                            error=ToolError(
+                                code=error.code, message=str(error), category="permanent",
+                                details={
+                                    "dimension": error.dimension,
+                                    "limit": error.limit, "used": error.used,
+                                },
+                            ),
+                        ),
+                    )
             invocation = ToolInvocation(
                 id=uuid7(), runner_id=runtime_context.runner_id,
                 work_item_id=work_item_id, run_id=run_id,
@@ -232,6 +354,8 @@ class ActionDispatcher:
                     "agent_id": runtime_context.agent_id,
                     "permission_revision": runtime_context.permission_revision,
                 }, sort_keys=True).encode()).hexdigest(), attempt_count=0,
+                execution_epoch=runtime_context.execution_epoch,
+                deadline_at=owning_run.deadline_at if owning_run else None,
             )
             db.add(invocation)
             await db.flush()
@@ -299,6 +423,7 @@ class ActionDispatcher:
                         "tool_key": call.name, "arguments": call.arguments,
                     },
                     status="pending",
+                    deadline_at=owning_run.deadline_at if owning_run else None,
                 )
                 db.add(approval)
                 await db.flush()

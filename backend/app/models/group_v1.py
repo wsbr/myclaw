@@ -233,7 +233,7 @@ class GroupMembership(Base, TimestampMixin, VersionMixin):
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
 
 
-class GroupRunMember(Base):
+class GroupRunMember(Base, VersionMixin):
     """Immutable AgentVersion, permission, sharing, and budget snapshot."""
 
     __tablename__ = "group_run_member"

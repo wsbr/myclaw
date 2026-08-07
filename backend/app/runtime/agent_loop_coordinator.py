@@ -26,10 +26,16 @@ from app.runtime.protocol import (
     ProviderRequest,
     StopReason,
 )
+from app.services.run_reliability_service import (
+    BudgetExceeded, assert_post_provider_budget, assert_turn_budget,
+    record_progress,
+)
 
 
 class AgentLoopError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, code: str = "agent_loop_error") -> None:
+        self.code = code
+        super().__init__(message)
 
 
 @dataclass(frozen=True)
@@ -87,7 +93,10 @@ class _TurnRecorder:
             attempt.provider_state_ref = event.result.provider_state_ref
         else:
             error = event.error
-            attempt.status = "failed"
+            # Any provider payload makes transparent replay unsafe. Preserve
+            # that uncertainty instead of disguising it as a clean transport
+            # failure.
+            attempt.status = "outcome_unknown" if event.received_payload else "failed"
             attempt.error_code = getattr(error, "code", type(error).__name__)
             attempt.error_detail = str(error)
         await self.db.flush()
@@ -101,11 +110,14 @@ class AgentLoopCoordinator:
         *,
         max_turns: int = 24,
         max_schema_repairs: int = 1,
+        reliability_enabled: bool = False,
     ) -> None:
         self.adapter = adapter
         self.dispatcher = dispatcher
         self.max_turns = max_turns
         self.max_schema_repairs = max_schema_repairs
+        self.reliability_enabled = reliability_enabled
+        self._configured_transport_retries = adapter.max_zero_payload_retries
 
     async def run(
         self,
@@ -126,9 +138,25 @@ class AgentLoopCoordinator:
         for turn_index in range(1, self.max_turns + 1):
             persisted_turn = None
             recorder = None
+            budget_state = None
             if db is not None:
                 if identity is None:
                     raise ValueError("identity is required when persisting an Agent loop")
+                if self.reliability_enabled:
+                    try:
+                        budget_state = await assert_turn_budget(db, identity.run_id)
+                    except BudgetExceeded as error:
+                        raise AgentLoopError(str(error), code=error.code) from error
+                    provider_remaining = max(
+                        0,
+                        int(budget_state.limits["max_provider_attempts"])
+                        - int(budget_state.usage["provider_attempts"]) - 1,
+                    )
+                    self.adapter.max_zero_payload_retries = min(
+                        self._configured_transport_retries,
+                        budget_state.remaining_transport_retries,
+                        provider_remaining,
+                    )
                 previous = await db.scalar(select(func.max(AgentTurn.turn_no)).where(
                     AgentTurn.runner_id == identity.runner_id
                 )) or 0
@@ -164,9 +192,43 @@ class AgentLoopCoordinator:
                     persisted_turn.status = "failed"
                     persisted_turn.error_code = error.code
                     persisted_turn.ended_at = utcnow()
+                    if self.reliability_enabled:
+                        await record_progress(
+                            db, run_id=identity.run_id,
+                            work_item_id=identity.work_item_id,
+                            runner_id=identity.runner_id,
+                            agent_turn_id=persisted_turn.id,
+                            made_progress=False,
+                            payload={"provider_error": error.code},
+                            reason_code="provider_error",
+                        )
                     await db.flush()
-                raise AgentLoopError(f"Provider call failed: {error.code}") from error
+                raise AgentLoopError(
+                    f"Provider call failed: {error.code}", code=error.code,
+                ) from error
             turns.append(result)
+            if self.reliability_enabled:
+                try:
+                    budget_state = await assert_post_provider_budget(db, identity.run_id)
+                except BudgetExceeded as error:
+                    if persisted_turn is not None:
+                        persisted_turn.status = "failed"
+                        persisted_turn.error_code = error.code
+                        persisted_turn.ended_at = utcnow()
+                        await record_progress(
+                            db, run_id=identity.run_id,
+                            work_item_id=identity.work_item_id,
+                            runner_id=identity.runner_id,
+                            agent_turn_id=persisted_turn.id,
+                            made_progress=False,
+                            payload={
+                                "budget_dimension": error.dimension,
+                                "used": error.used, "limit": error.limit,
+                            },
+                            reason_code="budget_exhausted",
+                        )
+                        await db.flush()
+                    raise AgentLoopError(str(error), code=error.code) from error
             if persisted_turn is not None:
                 persisted_turn.turn_items = [item.as_dict() for item in result.items]
                 persisted_turn.stop_reason = result.stop_reason.value
@@ -206,6 +268,43 @@ class AgentLoopCoordinator:
                 if persisted_turn is not None:
                     persisted_turn.status = "waiting_actions" if waiting else "completed"
                     persisted_turn.ended_at = utcnow()
+                    progress = None
+                    if self.reliability_enabled:
+                        progress = await record_progress(
+                            db, run_id=identity.run_id,
+                            work_item_id=identity.work_item_id,
+                            runner_id=identity.runner_id,
+                            agent_turn_id=persisted_turn.id,
+                            made_progress=any(
+                                item.invocation_id is not None
+                                or (item.result.success and not item.schema_error)
+                                for item in turn_dispatches
+                            ),
+                            payload={
+                                "assistant_text_hash": hashlib.sha256(
+                                    assistant_text.encode()
+                                ).hexdigest(),
+                                "dispatches": [
+                                    {
+                                        "tool": item.tool_name,
+                                        "invocation_id": item.invocation_id,
+                                        "status": item.result.status,
+                                        "error_code": (
+                                            item.result.error.code if item.result.error else None
+                                        ),
+                                    }
+                                    for item in turn_dispatches
+                                ],
+                            },
+                            reason_code=(
+                                "authoritative_action"
+                                if any(
+                                    item.invocation_id is not None
+                                    or (item.result.success and not item.schema_error)
+                                    for item in turn_dispatches
+                                ) else "no_authoritative_change"
+                            ),
+                        )
                     await db.flush()
                 if schema_repairs > self.max_schema_repairs:
                     raise AgentLoopError("Tool schema repair budget exhausted")
@@ -256,6 +355,21 @@ class AgentLoopCoordinator:
                         safe_to_resume=True,
                     ))
                     await db.flush()
+                    threshold = int(
+                        (budget_state.limits if budget_state else {}).get(
+                            "no_progress_turns", 4
+                        )
+                    )
+                    if progress is not None and progress.consecutive_no_progress >= threshold:
+                        messages.append({
+                            "role": "system",
+                            "content": (
+                                "Runtime diagnostic: recent Turns produced no new durable fact. "
+                                "Reassess the current evidence, change approach, ask for missing "
+                                "information, or give a bounded factual report. Do not repeat the "
+                                "same call merely to consume budget."
+                            ),
+                        })
                 # Tool definitions intentionally remain unchanged here. A Tool
                 # used successfully is still visible on the next model turn.
                 continue
@@ -263,6 +377,24 @@ class AgentLoopCoordinator:
             if persisted_turn is not None:
                 persisted_turn.status = "completed"
                 persisted_turn.ended_at = utcnow()
+                if self.reliability_enabled:
+                    await record_progress(
+                        db, run_id=identity.run_id,
+                        work_item_id=identity.work_item_id,
+                        runner_id=identity.runner_id,
+                        agent_turn_id=persisted_turn.id,
+                        made_progress=bool(assistant_text.strip()),
+                        payload={
+                            "assistant_text_hash": hashlib.sha256(
+                                assistant_text.encode()
+                            ).hexdigest(),
+                            "stop_reason": result.stop_reason.value,
+                        },
+                        reason_code=(
+                            "assistant_message" if assistant_text.strip()
+                            else "empty_provider_result"
+                        ),
+                    )
                 await db.flush()
             if result.assistant_messages:
                 messages.append({"role": "assistant", "content": assistant_text})
@@ -274,4 +406,4 @@ class AgentLoopCoordinator:
             if result.stop_reason in {StopReason.MAX_TOKENS, StopReason.CONTENT_FILTER}:
                 raise AgentLoopError(f"Provider stopped without a final message: {result.stop_reason}")
             raise AgentLoopError("Provider returned no Tool Call and no assistant message")
-        raise AgentLoopError("Agent turn budget exhausted")
+        raise AgentLoopError("Agent turn budget exhausted", code="budget_exhausted")

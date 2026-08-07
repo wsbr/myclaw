@@ -25,6 +25,7 @@ from app.schemas.runtime_v1 import RunCancelRequest
 from app.services.plan_service import (
     PlanValidationError, frozen_hash, graph_view, plan_view, replace_draft_graph, validate_graph,
 )
+from app.services.run_reliability_service import default_run_budget, deadline_from_budget
 from app.services.cursor_service import SortKey, paginate_scalars
 from app.workers.runtime_worker_v1 import RuntimeWorker
 
@@ -94,10 +95,13 @@ async def create_plan(
         sender_type="user", sender_user_id=session.user_id, recipient_type="session",
         role="user", content=body.goal.strip(), content_format="markdown", status="committed",
     )
+    run_budget = default_run_budget("plan")
     run = Run(
         id=uuid7(), session_id=session.id, user_id=session.user_id, mode="plan",
         execution_kind="proposal_generation", lifecycle="running", wait_reason=None,
         outcome=None, entry_agent_id=agent.id, started_at=utcnow(),
+        hard_budget_snapshot=run_budget,
+        deadline_at=deadline_from_budget(run_budget, mode="plan"),
     )
     plan = PlanExecution(
         id=uuid7(), run_id=run.id, session_id=session.id, user_id=session.user_id,

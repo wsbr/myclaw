@@ -193,7 +193,7 @@ AgentVersion 的四个逻辑 Policy FK 必须分别匹配 policy_type，发布�
 
 ### `run`
 
-`id PK`、`session_id FK`、`mode chat|plan|group`、`status active|waiting_user|waiting_approval|waiting_tool|waiting_agent|completed|cancelled|failed`、`wait_reason NULL|waiting_user|waiting_approval|waiting_tool|waiting_agent`、`terminal_reason NULL`、`root_work_item_id FK NULL`、`permission_mode_snapshot direct|plan_readonly`、`hard_budget_json`、`cancellation_requested_at NULL`、`completed_at NULL`、`version`。CHECK 要求非 waiting 状态的 wait_reason 为空、终态 completed_at 非空、非终态 completed_at 为空。
+`id PK`、`session_id FK`、`mode chat|plan|group`、`status active|waiting_user|waiting_approval|waiting_tool|waiting_agent|completed|cancelled|failed`、`wait_reason NULL|waiting_user|waiting_approval|waiting_tool|waiting_agent`、`terminal_reason NULL`、`root_work_item_id FK NULL`、`permission_mode_snapshot direct|plan_readonly`、`hard_budget_json`、`deadline_at NULL`、`cancellation_requested_at NULL`、`completed_at NULL`、`version`。CHECK 要求非 waiting 状态的 wait_reason 为空、终态 completed_at 非空、非终态 completed_at 为空。deadline 是持久事实，由 Worker 扫描而不是进程内 timer 驱动。
 
 `run.status` 是所有模式的唯一 lifecycle/terminal 权威；不另存 outcome 镜像。成功、部分完成和业务失败由 `terminal_reason + verified/accepted 投影 + 最终消息` 表达，状态枚举见状态机。
 
@@ -210,8 +210,8 @@ Plan 模式不创建冻结 DAG 或 PlanExecution lifecycle。`permission_mode=pl
 
 ### `clarification`、`approval`
 
-- `clarification`：`id PK`、`tenant_id FK`、`run_id FK`、`work_item_id FK`、`clarification_type general|reporter_selection`、`target_account_id`、`question`、`allowed_answer_refs_json NULL`、`idempotency_key`、`request_hash`、`status open|answered|cancelled`、`answer_message_id FK NULL`、`version`；复合 FK `(tenant_id,target_account_id) → platform_account(tenant_id,id)`，唯一 `(work_item_id,idempotency_key)`；
-- `approval`：`id PK`、`tenant_id FK`、`run_id FK`、`work_item_id FK`、`approval_type plan_implementation|tool|membership|session_grant`、`target_account_id`、`subject_ref_type`、`subject_ref_id`、`subject_hash`、`idempotency_key`、`request_hash`、`status pending|approved|rejected|cancelled`、`decision_message_id FK NULL`、`version`；复合 FK `(tenant_id,target_account_id) → platform_account(tenant_id,id)`，唯一 `(approval_type,subject_ref_type,subject_ref_id,subject_hash)` 和 `(work_item_id,idempotency_key)`。
+- `clarification`：`id PK`、`tenant_id FK`、`run_id FK`、`work_item_id FK`、`clarification_type general|reporter_selection`、`target_account_id`、`question`、`allowed_answer_refs_json NULL`、`idempotency_key`、`request_hash`、`status open|answered|cancelled`、`answer_message_id FK NULL`、`deadline_at NULL`、`version`；复合 FK `(tenant_id,target_account_id) → platform_account(tenant_id,id)`，唯一 `(work_item_id,idempotency_key)`；
+- `approval`：`id PK`、`tenant_id FK`、`run_id FK`、`work_item_id FK`、`approval_type plan_implementation|tool|membership|session_grant`、`target_account_id`、`subject_ref_type`、`subject_ref_id`、`subject_hash`、`idempotency_key`、`request_hash`、`status pending|approved|rejected|cancelled`、`decision_message_id FK NULL`、`deadline_at NULL`、`version`；复合 FK `(tenant_id,target_account_id) → platform_account(tenant_id,id)`，唯一 `(approval_type,subject_ref_type,subject_ref_id,subject_hash)` 和 `(work_item_id,idempotency_key)`。
 
 相同 idempotency key/request hash 返回既有动作；同 key 不同 hash 冲突。结算使用 `id + expected version + current status` CAS，因此同一个 open/pending 动作只能结算一次。
 
@@ -258,8 +258,8 @@ Memory 的修改创建新 MemoryVersion 并 CAS 更新 current pointer；删除�
 
 ### `tool_invocation`、`tool_attempt`
 
-- `tool_invocation`：`id PK`、`run_id FK`、`work_item_id FK`、`agent_turn_id FK`、`tool_id FK`、`tool_key_snapshot`、`arguments_json`、`arguments_hash`、`operation_key`、`idempotency_scope_hash`、`status created|waiting_confirmation|waiting_resource|queued|running|succeeded|failed|rejected|cancelled|outcome_unknown`、`approval_id FK NULL`、`session_grant_id FK NULL`、`result_json NULL`、`error_code NULL`、`version`；
-- `tool_attempt`：`id PK`、`tool_invocation_id FK`、`attempt_no`、`status queued|running|succeeded|failed|timed_out|cancelled|outcome_unknown`、`lease_owner NULL`、`lease_token NULL`、`lease_expires_at NULL`、`heartbeat_at NULL`、`provider_operation_id NULL`、`result_json NULL`、`error_code NULL`、`started_at NULL`、`ended_at NULL`、`version`；唯一 `(tool_invocation_id,attempt_no)`，索引 `(status,lease_expires_at)`。
+- `tool_invocation`：`id PK`、`run_id FK`、`work_item_id FK`、`agent_turn_id FK`、`tool_id FK`、`tool_key_snapshot`、`arguments_json`、`arguments_hash`、`operation_key`、`idempotency_scope_hash`、`status created|waiting_confirmation|waiting_resource|queued|running|succeeded|failed|rejected|cancelled|outcome_unknown`、`approval_id FK NULL`、`session_grant_id FK NULL`、`active_attempt_id FK NULL`、`execution_epoch`、`deadline_at NULL`、`result_json NULL`、`error_code NULL`、`version`；
+- `tool_attempt`：`id PK`、`tool_invocation_id FK`、`attempt_no`、`status queued|running|succeeded|failed|timed_out|cancelled|outcome_unknown`、`lease_owner NULL`、`lease_token NULL`、`lease_expires_at NULL`、`heartbeat_at NULL`、`execution_epoch`、`fencing_token`、`request_hash`、`side_effect_started`、`outcome_confirmed`、`provider_operation_id NULL`、`request_snapshot`、`result_json NULL`、`error_code NULL`、`started_at NULL`、`ended_at NULL`；唯一 `(tool_invocation_id,attempt_no)`，索引 `(status,lease_expires_at)`。
 
 唯一 `(tool_id,idempotency_scope_hash,operation_key)`；相同 operation key 但请求 hash 不同必须冲突。外部副作用 outcome_unknown 禁止盲目重试。
 
@@ -271,7 +271,7 @@ Grant 只由已批准的 `approval_type=session_grant` 创建；参数匹配使�
 
 ### `agent_invocation`
 
-`id PK`、`run_id FK`、`caller_work_item_id FK`、`caller_agent_id FK`、`target_agent_id FK`、`target_agent_version_id FK NULL`、`target_work_item_id FK NULL`、`group_session_id FK NULL`、`group_run_id FK NULL`、`request_message_id FK NULL`、`return_route caller|direct|group`、`status created|queued|running|succeeded|failed|cancelled|timed_out|rejected`、`operation_key`、`request_hash`、`result_message_id FK NULL`、`error_code NULL`、`version`。
+`id PK`、`run_id FK`、`caller_work_item_id FK`、`caller_agent_id FK`、`target_agent_id FK`、`target_agent_version_id FK NULL`、`target_work_item_id FK NULL`、`group_session_id FK NULL`、`group_run_id FK NULL`、`request_message_id FK NULL`、`return_route caller|direct|group`、`status created|queued|running|succeeded|failed|cancelled|timed_out|rejected`、`operation_key`、`request_hash`、`deadline_at NULL`、`result_message_id FK NULL`、`error_code NULL`、`version`。
 
 唯一 `(caller_work_item_id,operation_key)`。授权拒绝也创建 terminal rejected 记录；只有成功校验后才允许 target_work_item 非空。
 
@@ -292,7 +292,7 @@ Grant 只由已批准的 `approval_type=session_grant` 创建；参数匹配使�
 
 ### `group_run_member`
 
-`group_run_id FK`、`agent_id FK`、`agent_version_id FK NULL`、`participation_status available|unavailable`、`unavailable_reason NULL`、`context_scope_json`、`capability_boundary_json`；PK `(group_run_id,agent_id)`。
+`group_run_id FK`、`agent_id FK`、`agent_version_id FK NULL`、`participation_status available|unavailable`、`unavailable_reason NULL`、`context_scope_json`、`capability_boundary_json`、`version`；PK `(group_run_id,agent_id)`。Reporter 可用性变更在锁定成员快照后递增 `version`，供失败投影和 CAS 诊断使用。
 
 Reporter 必须是本快照中 available 的成员。唯一 `(group_run_id,agent_version_id)` 不成立，因为同一版本不应限制多逻辑用途；按 Agent 主键即可。
 
@@ -311,9 +311,16 @@ Reporter 必须是本快照中 available 的成员。唯一 `(group_run_id,agent
 
 ### `verification_result`
 
-`verification_result`：`id PK`、`run_id FK`、`group_run_id FK NULL`、`rule_key`、`rule_version`、`verification_epoch BIGINT`、`status passed|failed|insufficient_evidence`、`observed_facts_json`、`missing_facts_json`、`created_at`；唯一 `(run_id,rule_key,rule_version,verification_epoch)`。epoch 在锁定 `run_id + rule_key + rule_version` 后单调分配，同一规则可在新事实后重新验证，不覆盖旧结果。
+`verification_result`：`id PK`、`run_id FK`、`group_run_id FK NULL`、`rule_key`、`rule_version`、`verification_epoch BIGINT`、`status passed|failed|insufficient_evidence`、`fact_fingerprint CHAR(64)`、`observed_facts_json`、`missing_facts_json`、`created_at`；唯一 `(run_id,rule_key,rule_version,verification_epoch)` 和 `(run_id,rule_key,rule_version,fact_fingerprint)`。epoch 在锁定 `run_id + rule_key + rule_version` 后单调分配；完全相同的权威事实幂等返回旧结果，新事实才创建新 epoch，旧结果不覆盖。
 
 - `verification_evidence_ref`：`verification_result_id FK`、`evidence_type tool_attempt|artifact|workspace_checksum|business_fact`、`tool_attempt_id FK NULL`、`artifact_id FK NULL`、`workspace_entry_id FK NULL`、`workspace_generation NULL`、`external_fact_ref NULL`、`checksum CHAR(64) NULL`、`evidence_key GENERATED`、`sort_order`；PK `(verification_result_id,sort_order)`，唯一 `(verification_result_id,evidence_type,evidence_key)`。CHECK 要求类型对应的引用恰好一个非空，workspace/business_fact 必须有 checksum，workspace 还必须固定 generation。领域服务校验数据属于同 tenant/Run 且对当前 account/Group 可见；结果不由模型文字直接写入。
+
+### `run_progress_mark`、`late_result_observation`
+
+- `run_progress_mark`：`id PK`、`run_id FK`、`work_item_id FK`、`runner_id FK`、`agent_turn_id FK UNIQUE`、`made_progress`、`progress_fingerprint`、`reason_code`、`consecutive_no_progress`、`created_at`；只追加，只用于预算诊断和给 Agent 的有界反馈，不能结算 Run；
+- `late_result_observation`：`id PK`、`run_id FK`、`work_item_id FK NULL`、`source_type tool_attempt|provider_attempt|agent_invocation`、`source_id`、`original_status`、`result_hash`、`safe_result_json`、`observed_at`；唯一 `(source_type,source_id,result_hash)`。它只保存脱敏摘要与 stdout/stderr hash，绝不覆盖原 Invocation、唤醒 WorkItem 或修改终态 Run。
+
+Verification、EvidenceRef、ProgressMark 和 LateResultObservation 由 MySQL trigger 同时禁止 UPDATE 与 DELETE。Run、ToolInvocation 和 ToolAttempt 的终态也由 trigger 禁止后续 UPDATE，应用层 CAS/fencing 之外再提供数据库终态保护。
 
 ## 9. Workspace 与 Artifact
 

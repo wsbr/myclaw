@@ -72,6 +72,7 @@ class RuntimeContext(BaseModel):
     account_id: str | None = None
     permission_mode: str = "direct"
     permission_revision: int = 1
+    execution_epoch: int = 1
     authentication_source: str = "web_session"
     call_chain: list[str] = []
     max_depth: int = 5

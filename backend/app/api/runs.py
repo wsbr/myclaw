@@ -15,9 +15,11 @@ from app.models.common import utcnow, uuid7
 from app.models.foundation import IdempotencyRecord, UserSession
 from app.models.observability_v1 import ObservabilitySpan, ObservabilitySpanLink, RunnerTrace
 from app.models.runtime_v1 import (
-    AgentInvocation, Approval, Clarification, DurableRunner, Run,
-    ToolConfirmation, ToolInvocation, WorkItem, WorkingPlan,
+    AgentInvocation, AgentTurn, Approval, Clarification, DurableRunner,
+    ProviderAttempt, Run, ToolAttempt, ToolConfirmation, ToolInvocation,
+    WorkItem, WorkingPlan,
 )
+from app.models.verification_v1 import VerificationResult
 from app.persistence.reliable_writes import ExecutionEventWriter, OutboxWriter
 from app.persistence.runtime_graph import persist_replacement_runner
 from app.services.notification_delivery_service import create_notification_delivery_if_channel
@@ -31,6 +33,7 @@ from app.services.agent_invocation_service import (
 )
 from app.services.visible_events import VisibleEventProjection, event_public_dict
 from app.services.cursor_service import SortKey, paginate_scalars
+from app.services.verification_service import verification_result_view
 
 router = APIRouter(tags=["runs"])
 NON_TERMINAL_WORK = {
@@ -160,6 +163,24 @@ async def list_run_agent_invocations(
         AgentInvocation.run_id == run_id,
     ).order_by(AgentInvocation.created_at, AgentInvocation.id)))
     return {"items": [_agent_invocation_view(row) for row in rows], "next_cursor": None}
+
+
+@router.get("/runs/{run_id}/verification-results", response_model=dict)
+async def list_run_verification_results(
+    run_id: str,
+    db: AsyncSession = Depends(get_db),
+    current: SessionActor = Depends(get_session_actor),
+):
+    await _owned_run(db, run_id, current)
+    rows = list(await db.scalars(select(VerificationResult).where(
+        VerificationResult.run_id == run_id,
+    ).order_by(
+        VerificationResult.created_at.desc(), VerificationResult.id.desc(),
+    )))
+    return {
+        "items": [await verification_result_view(db, row) for row in rows],
+        "next_cursor": None,
+    }
 
 
 @router.post("/runs/{run_id}/agent-invocations", status_code=202)
@@ -363,11 +384,41 @@ async def get_runner_trace(
     if runner is None:
         raise HTTPException(status_code=404, detail="Runner not found")
     await _owned_run(db, runner.run_id, current)
+    turn_ids = list(await db.scalars(select(AgentTurn.id).where(
+        AgentTurn.runner_id == runner.id,
+    ).order_by(AgentTurn.created_at, AgentTurn.id)))
+    provider_attempt_ids = [] if not turn_ids else list(await db.scalars(select(
+        ProviderAttempt.id,
+    ).where(
+        ProviderAttempt.agent_turn_id.in_(turn_ids),
+    ).order_by(ProviderAttempt.started_at, ProviderAttempt.id)))
+    invocation_ids = list(await db.scalars(select(ToolInvocation.id).where(
+        ToolInvocation.runner_id == runner.id,
+    ).order_by(ToolInvocation.created_at, ToolInvocation.id)))
+    tool_attempt_ids = [] if not invocation_ids else list(await db.scalars(select(
+        ToolAttempt.id,
+    ).where(
+        ToolAttempt.tool_invocation_id.in_(invocation_ids),
+    ).order_by(ToolAttempt.created_at, ToolAttempt.id)))
+    verification_ids = list(await db.scalars(select(VerificationResult.id).where(
+        VerificationResult.run_id == runner.run_id,
+    ).order_by(VerificationResult.created_at, VerificationResult.id)))
+    ledger_refs = {
+        "run_id": runner.run_id,
+        "work_item_id": runner.work_item_id,
+        "runner_id": runner.id,
+        "agent_turn_ids": turn_ids,
+        "provider_attempt_ids": provider_attempt_ids,
+        "tool_invocation_ids": invocation_ids,
+        "tool_attempt_ids": tool_attempt_ids,
+        "verification_result_ids": verification_ids,
+    }
     trace = await db.scalar(select(RunnerTrace).where(RunnerTrace.runner_id == runner.id))
     if trace is None:
         return {
             "status": "not_available", "runner_id": runner.id, "trace": None,
             "harness": _safe_harness_diagnostics(runner), "spans": [], "links": [],
+            "ledger_refs": ledger_refs,
         }
     spans = list(await db.scalars(
         select(ObservabilitySpan)
@@ -383,6 +434,7 @@ async def get_runner_trace(
     return {
         "status": "available",
         "runner_id": runner.id,
+        "ledger_refs": ledger_refs,
         "harness": _safe_harness_diagnostics(runner),
         "trace": {
             "trace_id": trace.trace_id,
@@ -494,9 +546,28 @@ async def cancel_run(
             ToolInvocation.status.in_(("created", "waiting_confirmation", "waiting_resource", "queued", "running", "cancel_requested")),
         ).with_for_update()))
         for invocation in invocations:
-            invocation.status = "cancelled"
-            invocation.error_code = "run_cancelled"
+            attempts = list(await db.scalars(select(ToolAttempt).where(
+                ToolAttempt.tool_invocation_id == invocation.id,
+                ToolAttempt.status == "running",
+            ).with_for_update()))
+            uncertain = any(attempt.side_effect_started for attempt in attempts)
+            invocation.status = "outcome_unknown" if uncertain else "cancelled"
+            invocation.error_code = (
+                "run_cancelled_outcome_unknown" if uncertain else "run_cancelled"
+            )
             invocation.version += 1
+            for attempt in attempts:
+                attempt.status = (
+                    "outcome_unknown" if attempt.side_effect_started else "cancelled"
+                )
+                attempt.error_code = (
+                    "run_cancelled_outcome_unknown"
+                    if attempt.side_effect_started else "run_cancelled"
+                )
+                attempt.error_detail = "Run was cancelled while the ToolAttempt was in flight"
+                attempt.outcome_confirmed = not attempt.side_effect_started
+                attempt.lease_expires_at = None
+                attempt.ended_at = now
             confirmation = await db.scalar(select(ToolConfirmation).where(
                 ToolConfirmation.tool_invocation_id == invocation.id,
                 ToolConfirmation.status == "pending",
@@ -539,6 +610,7 @@ async def cancel_run(
     run.wait_reason = None
     run.outcome = None
     run.error_code = "cancelled_by_user"
+    run.terminal_reason = "cancelled_by_user"
     run.result_summary = body.reason
     run.finished_at = now
     run.completed_at = now
