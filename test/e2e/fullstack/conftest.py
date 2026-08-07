@@ -158,28 +158,40 @@ def assembled_world(phase_api: PhaseOneAPI):
         model_name = "mock-model"
         endpoint = "http://mock-llm:9090/v1"
         credential_ref = None
-    model = api.request("POST", "/api/v1/admin/models", idem=True, json={
-        "key": model_key, "name": f"Acceptance {model_key}",
-    }).json()
-    model_version = api.request(
-        "POST", f"/api/v1/admin/models/{model['id']}/versions", idem=True,
-        headers={"If-Match": f'W/"{model["version"]}"'},
-        json={
-            "provider": "openai_compatible", "model_name": model_name,
-            "endpoint": endpoint, "credential_ref": credential_ref,
-            "default_parameters": {
-                "temperature": 0,
-                "max_tokens": 4096 if real_model else 1024,
-                **({"extra_body": {"enable_thinking": True}} if real_model else {}),
-            },
-            "capabilities": {
-                "streaming": True, "native_tool_calling": True,
-                "parallel_tool_calling": False, "tool_result_continuation": True,
-                "usage_in_stream": True, "stop_reason": True,
-                "context_window": 16384, "structured_output": "none",
-            },
+    model_payload = {"key": model_key, "name": f"Acceptance {model_key}"}
+    version_payload = {
+        "provider": "openai_compatible", "model_name": model_name,
+        "endpoint": endpoint, "credential_ref": credential_ref,
+        "default_parameters": {
+            "temperature": 0,
+            "max_tokens": 4096 if real_model else 1024,
+            **({"extra_body": {"enable_thinking": True}} if real_model else {}),
         },
-    ).json()
+        "capabilities": {
+            "streaming": True, "native_tool_calling": True,
+            "parallel_tool_calling": False, "tool_result_continuation": True,
+            "usage_in_stream": True, "stop_reason": True,
+            "context_window": 16384, "structured_output": "none",
+        },
+    }
+    models = api.request("GET", "/api/v1/admin/models", params={"limit": 50}).json()["items"]
+    model = next((item for item in models if item["key"] == model_key), None)
+    if model is None:
+        model = api.request(
+            "POST", "/api/v1/admin/models", idem=True, json=model_payload,
+        ).json()
+    versions = api.request(
+        "GET", f"/api/v1/admin/models/{model['id']}/versions", params={"limit": 50},
+    ).json()["items"]
+    if versions:
+        assert len(versions) == 1, versions
+        model_version = versions[0]
+        assert all(model_version[key] == value for key, value in version_payload.items()), model_version
+    else:
+        model_version = api.request(
+            "POST", f"/api/v1/admin/models/{model['id']}/versions", idem=True,
+            headers={"If-Match": f'W/"{model["version"]}"'}, json=version_payload,
+        ).json()
     conformance = api.request(
         "POST", f"/api/v1/admin/models/{model['id']}/versions/{model_version['id']}/conformance",
         idem=True,
