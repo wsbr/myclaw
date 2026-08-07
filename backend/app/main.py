@@ -13,7 +13,7 @@ from app.api.router import api_router
 from app.models.common import uuid7
 from app.core.rate_limit import consume, request_identifier
 from app.services.registry_reconcile import (
-    legacy_builtin_specs,
+    builtin_tool_specs,
     reconcile_platform_tools,
     seed_core_registries,
 )
@@ -79,7 +79,7 @@ async def _init_phase_one_registries():
         await seed_core_registries(db)
         await reconcile_platform_tools(
             db,
-            legacy_builtin_specs(),
+            builtin_tool_specs(),
             job_run_id=uuid7(),
         )
 

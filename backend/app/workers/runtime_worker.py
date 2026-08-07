@@ -230,7 +230,6 @@ class RuntimeWorker:
                                 reporter.participation_status = "unavailable"
                                 reporter.version += 1
                         run.status = "waiting_user" if is_summary else "active"
-                        run.lifecycle = "waiting" if is_summary else "running"
                         run.wait_reason = "waiting_user" if is_summary else None
                         run.version += 1
                         failed = await ExecutionEventWriter(db).append(
@@ -268,9 +267,7 @@ class RuntimeWorker:
                             )
                     else:
                         run.status = "failed"
-                        run.lifecycle = "completed"
                         run.wait_reason = None
-                        run.outcome = "failed"
                         run.error_code = runner.failure_code
                         run.terminal_reason = runner.failure_code
                         run.result_summary = runner.error_detail
@@ -594,9 +591,9 @@ class RuntimeWorker:
                 ),
                 group_session_id=runner.principal_snapshot.get("group_session_id"),
                 group_run_id=runner.principal_snapshot.get("group_run_id"),
-                group_node_id=(
+                group_membership_id=(
                     runner.principal_snapshot.get("group_membership_id")
-                    or runner.principal_snapshot.get("group_node_id")
+                    or runner.principal_snapshot.get("group_membership_id")
                 ),
             )
             dispatcher = ActionDispatcher(tool_definitions)
@@ -776,8 +773,6 @@ class RuntimeWorker:
             work.active_runner_id = None
             work.version += 1
             run.status = "completed"
-            run.lifecycle = "completed"
-            run.outcome = "succeeded"
             run.terminal_reason = "completed"
             run.result_summary = content[:4000]
             run.completed_at = runner.ended_at
@@ -821,7 +816,7 @@ class RuntimeWorker:
                 actor_type="service", actor_id=self.worker_id,
                 entity_type="run", entity_id=run.id, entity_version=run.version,
                 visibility="user", summary="Run completed",
-                payload={"root_work_item_id": work.id, "outcome": "succeeded"},
+                payload={"root_work_item_id": work.id, "terminal_reason": "completed"},
                 correlation_id=run.id,
                 caused_by_event_id=event.id,
             )
@@ -956,7 +951,6 @@ class RuntimeWorker:
         ))
         if not is_summary:
             run.status = "active"
-            run.lifecycle = "running"
             run.wait_reason = None
             run.version += 1
             await self._enqueue_group_quiescence(
@@ -985,8 +979,6 @@ class RuntimeWorker:
         group_run.delivered_summary_epoch = int(summary_epoch)
         group_run.version += 1
         run.status = "completed"
-        run.lifecycle = "completed"
-        run.outcome = "succeeded"
         run.terminal_reason = "completed"
         run.result_summary = content[:4000]
         run.completed_at = now
@@ -1052,7 +1044,6 @@ class RuntimeWorker:
         work.active_runner_id = None
         work.version += 1
         run.status = "waiting_approval"
-        run.lifecycle = "waiting"
         run.wait_reason = "waiting_approval"
         run.result_summary = content[:4000]
         run.version += 1
@@ -1238,8 +1229,8 @@ class RuntimeWorker:
             sender_type="agent", sender_agent_id=runner.agent_id,
             recipient_type="agent" if group_run else "session",
             recipient_agent_id=invocation.caller_agent_id if group_run else None,
-            recipient_group_node_id=(
-                (await db.get(WorkItem, invocation.caller_work_item_id)).group_node_id
+            recipient_membership_id=(
+                (await db.get(WorkItem, invocation.caller_work_item_id)).group_membership_id
                 if group_run else None
             ),
             visibility="direct" if group_run else "user", role="tool_notice",
@@ -1315,7 +1306,6 @@ class RuntimeWorker:
                 "agent": "waiting_agent",
                 "tool": "waiting_tool",
             }[reason]
-            run.lifecycle = "waiting"
             run.wait_reason = run.status
             run.version += 1
             pending = list(await db.scalars(select(ToolInvocation.id).where(
@@ -1461,14 +1451,12 @@ class RuntimeWorker:
                         reporter.participation_status = "unavailable"
                         reporter.version += 1
                     run.status = "waiting_user"
-                    run.lifecycle = "waiting"
                     run.wait_reason = "waiting_user"
                 else:
                     # A peer Turn failure is local to that Turn. The GroupRun
                     # remains live and can still converge through another peer
                     # and its Reporter; Group is not a fragile all-or-nothing DAG.
                     run.status = "active"
-                    run.lifecycle = "running"
                     run.wait_reason = None
                 run.version += 1
                 failed = await ExecutionEventWriter(db).append(
@@ -1506,8 +1494,6 @@ class RuntimeWorker:
                 return
             if run is not None:
                 run.status = "failed"
-                run.lifecycle = "completed"
-                run.outcome = "failed"
                 run.error_code = code
                 run.terminal_reason = code
                 run.completed_at = runner.ended_at
@@ -1579,7 +1565,6 @@ class RuntimeWorker:
                 work.wait_reason = status
                 work.version += 1
                 run.status = status
-                run.lifecycle = "waiting"
                 run.wait_reason = status
                 run.version += 1
                 waiting = await ExecutionEventWriter(db).append(
@@ -1616,7 +1601,6 @@ class RuntimeWorker:
                 work.wait_reason = "waiting_agent"
                 work.version += 1
                 run.status = "waiting_agent"
-                run.lifecycle = "waiting"
                 run.wait_reason = "waiting_agent"
                 run.version += 1
                 recovered = await ExecutionEventWriter(db).append(
@@ -1667,11 +1651,9 @@ class RuntimeWorker:
                             reporter.participation_status = "unavailable"
                             reporter.version += 1
                         run.status = "waiting_user"
-                        run.lifecycle = "waiting"
                         run.wait_reason = "waiting_user"
                     else:
                         run.status = "active"
-                        run.lifecycle = "running"
                         run.wait_reason = None
                     run.version += 1
                     recovered = await ExecutionEventWriter(db).append(
@@ -1708,8 +1690,7 @@ class RuntimeWorker:
                         )
                     return True
                 run.status = "failed"
-                run.lifecycle = "completed"
-                run.outcome = "failed"
+                run.terminal_reason = "runner_lost_without_safe_checkpoint"
                 run.completed_at = now
                 run.version += 1
                 return True
@@ -1789,7 +1770,6 @@ class RuntimeWorker:
         ))
         if reporter is None or not reporter.agent_version_id:
             run.status = "waiting_user"
-            run.lifecycle = "waiting"
             run.wait_reason = "waiting_user"
             run.version += 1
             await ExecutionEventWriter(db).append(
@@ -1818,7 +1798,7 @@ class RuntimeWorker:
             id=uuid7(), run_id=run.id, session_id=run.session_id, user_id=run.user_id,
             mode="group", owner_agent_id=reporter.agent_id,
             agent_version_id=reporter.agent_version_id,
-            group_run_id=group_run.id, group_node_id=membership.id,
+            group_run_id=group_run.id, group_membership_id=membership.id,
             goal="Deliver the natural GroupRun summary from visible collaboration facts",
             purpose="group_summary", status="queued", execution_epoch=1, attempt_no=1,
         )
@@ -1830,14 +1810,13 @@ class RuntimeWorker:
             principal_snapshot={
                 "user_id": run.user_id, "account_id": session.account_id,
                 "session_id": run.session_id,
-                "entry_agent_id": group.initiator_agent_id or group.entry_agent_id,
+                "entry_agent_id": group.initiator_agent_id,
                 "current_agent_id": reporter.agent_id,
                 "permission_mode": "direct",
                 "permission_revision": session.permission_revision,
                 "mode": "group", "group_session_id": group.id,
                 "group_run_id": group_run.id,
                 "group_membership_id": membership.id,
-                "group_node_id": membership.id,
                 "delegation_chain": [],
             },
             assembly_snapshot={"agent_version_id": reporter.agent_version_id},
@@ -1846,7 +1825,6 @@ class RuntimeWorker:
                 "group_session_id": group.id,
                 "group_run_id": group_run.id,
                 "group_membership_id": membership.id,
-                "group_node_id": membership.id,
                 "group_summary": True,
                 "summary_epoch": epoch,
             },
@@ -1859,7 +1837,6 @@ class RuntimeWorker:
         )
         db.add(request)
         run.status = "active"
-        run.lifecycle = "running"
         run.wait_reason = None
         run.version += 1
         await db.flush()

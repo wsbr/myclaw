@@ -31,10 +31,6 @@ def _database_evidence(group_id: str, run_id: str) -> dict:
         with connection.cursor() as cursor:
             result = {}
             statements = {
-                "formation_count": (
-                    "SELECT COUNT(*) AS value FROM group_formation_proposal WHERE group_session_id=%s",
-                    group_id,
-                ),
                 "members": (
                     "SELECT gm.agent_id,grm.agent_version_id,grm.participation_status,"
                     "grm.membership_policy,grm.capability_boundary,grm.budget_snapshot "
@@ -73,7 +69,7 @@ def _database_evidence(group_id: str, run_id: str) -> dict:
             for name, (statement, parameters) in statements.items():
                 cursor.execute(statement, parameters)
                 rows = list(cursor.fetchall())
-                result[name] = rows[0]["value"] if name == "formation_count" else rows
+                result[name] = rows
             return result
     finally:
         connection.close()
@@ -93,7 +89,7 @@ def _wait_group_run(api: PhaseOneAPI, session_id: str, run_id: str, timeout: flo
     last = None
     while time.monotonic() < deadline:
         last = api.request("GET", f"/api/v1/runs/{run_id}").json()
-        if last["lifecycle"] in {"completed", "cancelled"}:
+        if last["status"] in {"completed", "cancelled", "failed"}:
             return last
         actions = api.request(
             "GET", f"/api/v1/sessions/{session_id}/required-actions",
@@ -192,12 +188,12 @@ def test_agent_network_group_vertical_uat(
 
     capacity_group, capacity = creations[0]
     result = _wait_group_run(api, session["id"], capacity["run"]["id"])
-    assert result["outcome"] == "succeeded", result
+    assert result["status"] == "completed" and result["terminal_reason"] == "completed", result
 
     # Drain the nine simple groups as an HTTP/runtime recovery sanity gate.
     for _group, group_run in creations[1:]:
         settled = _wait_group_run(api, session["id"], group_run["run"]["id"])
-        assert settled["outcome"] == "succeeded"
+        assert settled["status"] == "completed" and settled["terminal_reason"] == "completed"
 
     messages = api.request(
         "GET", f"/api/v1/groups/{capacity_group['id']}/messages",
@@ -221,7 +217,6 @@ def test_agent_network_group_vertical_uat(
     assert (product["id"], test["id"], "agent_invocation") in edges
 
     evidence = _database_evidence(capacity_group["id"], capacity["run"]["id"])
-    assert evidence["formation_count"] == 0
     assert len(evidence["members"]) == 3
     assert {item["agent_version_id"] for item in evidence["members"]} == {
         product["published"]["id"], development["published"]["id"], test["published"]["id"],
@@ -310,7 +305,7 @@ def test_agent_network_group_vertical_uat(
                 "reference_run_ids": [capacity["id"]],
             },
         ).json()
-        assert _wait_group_run(api, session["id"], created["run"]["id"])["outcome"] == "succeeded"
+        assert _wait_group_run(api, session["id"], created["run"]["id"])["status"] == "completed"
         history_runs.append(created)
     for created in history_runs:
         events = api.request("GET", f"/api/v1/runs/{created['run']['id']}/events").json()["items"]

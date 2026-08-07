@@ -84,7 +84,7 @@ export default function AgentNetworkPage() {
       <div>
         <Title level={2} className="!mb-1"><Space><Network className="size-6" />Agent Network</Space></Title>
         <Paragraph type="secondary">
-          这里只展示当前已发布、可见、可用且通过治理过滤的 AgentCard。选择三名对等成员后直接建组，不生成 Formation 或固定流程。
+          这里只展示当前已发布、可见、可用且通过治理过滤的 AgentCard。选择三名对等成员后直接建组，协作路径由真实消息和调用形成。
         </Paragraph>
       </div>
 

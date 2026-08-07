@@ -53,7 +53,7 @@ export default function PlanPanel({
       <Descriptions size="small" column={{ xs: 1, sm: 2 }}>
         <Descriptions.Item label="交互模式">{session.interaction_mode} · r{session.interaction_revision}</Descriptions.Item>
         <Descriptions.Item label="权限版本">{session.permission_mode} · r{session.permission_revision}</Descriptions.Item>
-        <Descriptions.Item label="Run 状态">{run ? <Space><Tag>{run.status}</Tag><span>{run.wait_reason || run.lifecycle}</span></Space> : '等待目标'}</Descriptions.Item>
+        <Descriptions.Item label="Run 状态">{run ? <Space><Tag>{run.status}</Tag><span>{run.wait_reason || run.terminal_reason}</span></Space> : '等待目标'}</Descriptions.Item>
         <Descriptions.Item label="同一执行上下文">{run?.root_work_item_id ? <Typography.Text code>{run.root_work_item_id.slice(0, 12)}</Typography.Text> : '—'}</Descriptions.Item>
       </Descriptions>
       {readonly && <Alert className="mt-4" type="warning" showIcon

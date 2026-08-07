@@ -38,18 +38,18 @@ async def test_tool_approval_resume_preserves_group_runner_snapshots(monkeypatch
         status="succeeded",
         principal_snapshot={
             "user_id": "user", "mode": "group", "current_agent_id": "group-agent",
-            "group_node_id": "group-node", "delegation_chain": ["entry-agent"],
+            "group_membership_id": "group-node", "delegation_chain": ["entry-agent"],
         },
         assembly_snapshot={"agent_version_id": "group-version", "content_hash": "hash"},
-        prompt_manifest={"response_contract": {"key": "conversation.v1"}},
+        prompt_manifest={},
         input_snapshot={
             "group_session_id": "group", "group_run_id": "group-run",
-            "group_node_id": "group-node", "goal": "audit refunds",
+            "group_membership_id": "group-node", "goal": "audit refunds",
         },
     )
     run = SimpleNamespace(
         id="run", session_id="session", user_id="user", entry_agent_id="entry-agent",
-        mode="group", lifecycle="waiting", wait_reason="tool_confirmation", version=2,
+        mode="group", status="waiting_tool", wait_reason="waiting_tool", version=2,
     )
     work = SimpleNamespace(
         id="work", owner_agent_id="group-agent", agent_version_id="group-version",
@@ -94,5 +94,5 @@ async def test_tool_approval_resume_preserves_group_runner_snapshots(monkeypatch
         **source.input_snapshot,
         "resumed_from_confirmation_id": confirmation.id,
     }
-    assert replacement.input_snapshot["group_node_id"] == "group-node"
+    assert replacement.input_snapshot["group_membership_id"] == "group-node"
     assert replacement.principal_snapshot["delegation_chain"] == ["entry-agent"]

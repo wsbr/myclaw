@@ -136,8 +136,7 @@ async def enqueue_chat_message(
     run_budget = default_run_budget(resolved_mode)
     run = Run(
         id=uuid7(), session_id=session.id, user_id=user_id, mode=resolved_mode,
-        execution_kind=execution_kind, lifecycle="running", wait_reason=None,
-        status="active", outcome=None, entry_agent_id=agent.id,
+        wait_reason=None, status="active", entry_agent_id=agent.id,
         permission_mode=session.permission_mode, hard_budget_snapshot=run_budget,
         deadline_at=deadline_from_budget(run_budget, mode=resolved_mode),
         started_at=utcnow(),
@@ -193,7 +192,7 @@ async def enqueue_chat_message(
         actor_type="user", actor_id=user_id, entity_type="run", entity_id=run.id,
         entity_version=run.version, visibility="user",
         summary=f"{resolved_mode.title()} run created",
-        payload={"mode": resolved_mode, "execution_kind": execution_kind}, correlation_id=run.id,
+        payload={"mode": resolved_mode}, correlation_id=run.id,
         caused_by_event_id=message_event.id,
     )
     runner_event = await events.append(

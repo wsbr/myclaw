@@ -32,19 +32,15 @@ export interface Run {
   id: string
   session_id: string
   mode: 'chat' | 'plan' | 'group'
-  execution_kind: string
-  lifecycle: 'running' | 'waiting' | 'settling' | 'completed' | 'cancelled'
   status: 'active' | 'waiting_user' | 'waiting_approval' | 'waiting_tool' | 'waiting_agent' | 'completed' | 'cancelled' | 'failed'
   wait_reason: string | null
-  outcome: 'succeeded' | 'partially_succeeded' | 'failed' | null
   root_work_item_id: string | null
   permission_mode: 'direct' | 'readonly' | 'plan_readonly'
   version: number
-  result_summary: string | null
-  error_code: string | null
   terminal_reason: string | null
   deadline_at: string | null
   cancellation_requested_at: string | null
+  completed_at: string | null
 }
 
 export interface ExecutionEvent {
@@ -204,20 +200,10 @@ export interface ClarificationAction {
   work_item_id: string
   asked_by_agent_id: string
   group_session_id: string | null
-  group_node_id: string | null
+  group_membership_id: string | null
   question: string
   version: number
   created_at: string
-}
-
-export interface GroupConfirmationAction {
-  id: string
-  type: 'group_confirmation'
-  status: 'pending'
-  session_id: string
-  run_id: string
-  version: number
-  revision_no: number
 }
 
 export interface ReporterSelectionAction {
@@ -235,70 +221,9 @@ export interface ReporterSelectionAction {
   }
 }
 
-export interface GroupParticipant {
-  id: string
-  participant_key: string
-  agent_id: string
-  is_entry: boolean
-  initial_responsibility: string
-  sort_order: number
-}
-
-export interface GroupFormationRevision {
-  id: string
-  revision_no: number
-  goal: string
-  bootstrap_context: string
-  content_hash: string
-  participants: GroupParticipant[]
-  initial_work_items: Array<{ id: string; work_item_key: string; participant_key: string; title: string; goal: string; acceptance_criteria: string; sort_order: number }>
-  suggested_edges: Array<{ id: string; source_participant_key: string; target_participant_key: string; label: string; rationale: string; sort_order: number }>
-}
-
-export interface GroupFormationProposal {
-  id: string
-  parent_session_id: string
-  group_session_id: string
-  entry_agent_id: string
-  status: 'generating' | 'awaiting_confirmation' | 'confirmed' | 'rejected' | 'cancelled' | 'failed'
-  current_revision_no: number
-  version: number
-  group_session: { id: string; status: 'forming' | 'open' | 'closed' | 'archived'; version: number }
-  generation_run: { id: string; lifecycle: Run['lifecycle']; outcome: Run['outcome']; version: number }
-  current_revision: GroupFormationRevision | null
-}
-
-export interface GroupNode {
-  id: string
-  agent_id: string
-  is_entry: boolean
-  initial_responsibility: string
-  availability: 'available' | 'unavailable'
-  unavailable_reason: string | null
-  current_agent_version_id: string | null
-  version: number
-}
-
-export interface GroupSuggestedEdge {
-  source_node_id: string
-  target_node_id: string
-  label: string
-  rationale: string
-}
-
-export interface GroupCollaborationEdge {
-  id: string
-  source_node_id: string
-  target_node_id: string
-  first_invocation_id: string
-  created_in_group_run_id: string
-  created_at: string
-}
-
 export interface GroupRun {
   id: string
   group_session_id: string
-  owner_node_id?: string | null
   reporter_agent_id: string | null
   summary_epoch: number
   delivered_summary_epoch: number
@@ -306,7 +231,6 @@ export interface GroupRun {
   display_phase?: string
   run: Run
   members: GroupRunMember[]
-  agent_versions?: Array<{ group_node_id: string; participation_status: 'available' | 'unavailable'; agent_version_id: string | null; unavailable_reason: string | null }>
   shared_context: Record<string, unknown>
   budget_snapshot: Record<string, unknown>
   policy_snapshot: Record<string, unknown>
@@ -318,7 +242,6 @@ export interface GroupMessage {
   sender_type: 'user' | 'agent' | 'system'
   sender_agent_id: string | null
   recipient_agent_id: string | null
-  recipient_group_node_id: string | null
   visibility: 'direct' | 'group' | 'user'
   role: string
   content: string
@@ -403,7 +326,7 @@ export interface Artifact {
   created_at: string
 }
 
-export type RequiredAction = ApprovalAction | ToolConfirmation | ClarificationAction | GroupConfirmationAction | ReporterSelectionAction
+export type RequiredAction = ApprovalAction | ToolConfirmation | ClarificationAction | ReporterSelectionAction
 
 const idempotency = () => ({ headers: { 'Idempotency-Key': crypto.randomUUID() } })
 
@@ -457,41 +380,9 @@ export const sessionsApi = {
       shared_context_refs?: string[]
     },
   ) => client.post<GroupSession>(`/sessions/${sessionId}/groups`, values, idempotency()).then(r => r.data),
-  listGroupFormations: (sessionId: string) => client.get<{ items: GroupFormationProposal[] }>(
-    `/sessions/${sessionId}/group-formations`,
-  ).then(r => r.data.items),
-  createGroupFormation: (sessionId: string, goal: string) => client.post<GroupFormationProposal>(
-    `/sessions/${sessionId}/group-formations`, { goal }, idempotency(),
-  ).then(r => r.data),
-  updateGroupFormation: (proposal: GroupFormationProposal, revision: GroupFormationRevision) =>
-    client.patch<GroupFormationProposal>(`/group-formations/${proposal.id}`, {
-      goal: revision.goal, bootstrap_context: revision.bootstrap_context,
-      participants: revision.participants.map(({ participant_key, agent_id, is_entry, initial_responsibility }) =>
-        ({ participant_key, agent_id, is_entry, initial_responsibility })),
-      initial_work_items: revision.initial_work_items.map(({ work_item_key, participant_key, title, goal, acceptance_criteria }) =>
-        ({ work_item_key, participant_key, title, goal, acceptance_criteria })),
-      suggested_edges: revision.suggested_edges.map(({ source_participant_key, target_participant_key, label, rationale }) =>
-        ({ source_participant_key, target_participant_key, label, rationale })),
-      expected_revision_no: proposal.current_revision_no,
-    }, { headers: { 'Idempotency-Key': crypto.randomUUID(), 'If-Match': `"${proposal.version}"` } }).then(r => r.data),
-  confirmGroupFormation: (proposal: GroupFormationProposal) => client.post(
-    `/group-formations/${proposal.id}/confirm`, { expected_revision_no: proposal.current_revision_no },
-    { headers: { 'Idempotency-Key': crypto.randomUUID(), 'If-Match': `"${proposal.version}"` } },
-  ).then(r => r.data),
-  rejectGroupFormation: (proposal: GroupFormationProposal) => client.post(
-    `/group-formations/${proposal.id}/reject`, {},
-    { headers: { 'Idempotency-Key': crypto.randomUUID(), 'If-Match': `"${proposal.version}"` } },
-  ).then(r => r.data),
   getGroup: (groupId: string) => client.get<GroupSession>(`/groups/${groupId}`).then(r => r.data),
   getGroupMemberships: (groupId: string) => client.get<{ items: GroupMembership[] }>(
     `/groups/${groupId}/memberships`,
-  ).then(r => r.data.items),
-  getGroupNodes: (groupId: string) => client.get<{ items: GroupNode[] }>(`/groups/${groupId}/nodes`).then(r => r.data.items),
-  getGroupSuggestedEdges: (groupId: string) => client.get<{ items: GroupSuggestedEdge[] }>(
-    `/groups/${groupId}/suggested-edges`,
-  ).then(r => r.data.items),
-  getGroupCollaborationEdges: (groupId: string) => client.get<{ items: GroupCollaborationEdge[] }>(
-    `/groups/${groupId}/collaboration-edges`,
   ).then(r => r.data.items),
   getGroupRuns: (groupId: string) => client.get<{ items: GroupRun[] }>(`/groups/${groupId}/runs`).then(r => r.data.items),
   createGroupRun: (groupId: string, content: string, recipientAgentId?: string) => client.post<GroupRun>(

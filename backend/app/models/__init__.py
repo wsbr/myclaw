@@ -38,12 +38,9 @@ from app.models.runtime_v1 import (
     ToolInvocation, ToolAttempt, ToolConfirmation, AgentInvocation,
     RunnerSkillSnapshot, RunnerToolSnapshot, RunnerPolicySnapshot,
 )
-from app.models.plan_v1 import PlanExecution, PlanWorkItemNode, PlanWorkItemDependency, PlanDeclaredAgent
 from app.models.group_v1 import (
-    GroupSession, GroupFormationProposal, GroupFormationRevision, GroupFormationParticipant,
-    GroupFormationWorkItem, GroupFormationSuggestedEdge, GroupAgentNode,
-    GroupInitialSuggestedEdge, GroupRun, GroupRunAgentVersion, GroupRunReference, GroupCollaborationEdge,
-    GroupMembership, GroupRunMember, GroupSummaryRequest, SharedTask,
+    GroupSession, GroupRun, GroupRunReference, GroupMembership, GroupRunMember,
+    GroupSummaryRequest, SharedTask,
 )
 from app.models.artifact_v1 import Artifact, MessageArtifact, GroupArtifact
 from app.models.memory_v1 import (
@@ -75,11 +72,8 @@ __all__ = [
     "SessionSandbox", "Workspace", "WorkspaceLock", "WorkspaceLockRequest", "WorkspaceReadLease",
     "ToolInvocation", "ToolAttempt", "ToolConfirmation", "AgentInvocation",
     "RunnerSkillSnapshot", "RunnerToolSnapshot", "RunnerPolicySnapshot",
-    "PlanExecution", "PlanWorkItemNode", "PlanWorkItemDependency", "PlanDeclaredAgent",
-    "GroupSession", "GroupFormationProposal", "GroupFormationRevision", "GroupFormationParticipant",
-    "GroupFormationWorkItem", "GroupFormationSuggestedEdge", "GroupAgentNode",
-    "GroupInitialSuggestedEdge", "GroupRun", "GroupRunAgentVersion", "GroupRunReference", "GroupCollaborationEdge",
-    "GroupMembership", "GroupRunMember", "GroupSummaryRequest", "SharedTask",
+    "GroupSession", "GroupRun", "GroupRunReference", "GroupMembership",
+    "GroupRunMember", "GroupSummaryRequest", "SharedTask",
     "Artifact", "MessageArtifact", "GroupArtifact",
     "MemoryHead", "MemoryRecord", "MemorySourceMessage", "RunnerMemorySnapshot",
     "MemoryWriteCandidate", "MemoryCandidateSourceMessage",

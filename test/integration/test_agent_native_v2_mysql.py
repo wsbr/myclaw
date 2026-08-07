@@ -183,12 +183,12 @@ async def test_mysql_publication_snapshot_and_native_runtime_round_trip():
         session = UserSession(
             id=uuid7(), user_id=f"v2-user-{suffix}", account_id=account_id,
             entry_agent_id=agent.id, status="active", origin_type="web",
-            permission_mode="standard", permission_revision=1,
+            permission_mode="direct", permission_revision=1,
         )
         run = Run(
             id=uuid7(), session_id=session.id, user_id=session.user_id,
-            mode="chat", execution_kind="normal", lifecycle="running",
-            status="active", entry_agent_id=agent.id, permission_mode="standard",
+            mode="chat", status="active",
+            entry_agent_id=agent.id, permission_mode="direct",
             hard_budget_snapshot={}, started_at=utcnow(),
         )
         work = WorkItem(

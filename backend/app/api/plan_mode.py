@@ -182,9 +182,8 @@ async def _cancel_open_plan_runs(db, *, session: UserSession, reason: str) -> No
             plan.version += 1
         run.cancellation_requested_at = now
         run.status = "cancelled"
-        run.lifecycle = "cancelled"
         run.wait_reason = None
-        run.outcome = None
+        run.terminal_reason = "plan_mode_exited"
         run.error_code = "plan_mode_exited"
         run.result_summary = reason
         run.completed_at = now

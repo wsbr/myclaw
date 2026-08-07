@@ -132,7 +132,6 @@ async def queue_work_item_resume(
         },
     )
     run.status = "active"
-    run.lifecycle = "running"
     run.wait_reason = None
     run.version += 1
     await persist_replacement_runner(db, work, replacement)

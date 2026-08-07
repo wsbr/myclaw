@@ -33,7 +33,7 @@ async def test_sandbox_worker_executes_attempt_and_resumes_work(tmp_path, monkey
         ))
         db.add(Run(
             id=run_id, session_id=session_id, user_id="u1", mode="chat",
-            execution_kind="normal", lifecycle="waiting", wait_reason="waiting_tool",
+            status="waiting_tool", wait_reason="waiting_tool",
             entry_agent_id=uuid7(), started_at=utcnow(),
         ))
         db.add(WorkItem(
@@ -102,7 +102,6 @@ async def test_sandbox_worker_executes_attempt_and_resumes_work(tmp_path, monkey
     async with factory.begin() as db:
         run = await db.get(Run, run_id)
         run.status = "cancelled"
-        run.lifecycle = "cancelled"
         run.wait_reason = None
         run.finished_at = utcnow()
         run.completed_at = utcnow()

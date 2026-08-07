@@ -19,7 +19,7 @@ from app.models.foundation import IdempotencyRecord
 from app.models.registry import PlatformTool, PolicyDefinition, RegisteredModel, SandboxProfile
 from app.persistence.reliable_writes import PlatformAuditWriter
 from app.schemas.registry_v1 import ModelCreate, ModelPatch, PlatformToolPatch, PolicyPatch, SandboxPatch
-from app.services.registry_reconcile import legacy_builtin_specs, reconcile_platform_tools
+from app.services.registry_reconcile import builtin_tool_specs, reconcile_platform_tools
 from app.services.cursor_service import SortKey, paginate_scalars
 
 router = APIRouter(tags=["registries"])
@@ -330,7 +330,7 @@ async def reconcile_tools(
     if replay and record.response_snapshot:
         return record.response_snapshot
     before = {row.tool_key: row.registration_hash for row in await db.scalars(select(PlatformTool))}
-    tools = await reconcile_platform_tools(db, legacy_builtin_specs(), job_run_id=record.id)
+    tools = await reconcile_platform_tools(db, builtin_tool_specs(), job_run_id=record.id)
     created = sum(1 for tool in tools if tool.tool_key not in before)
     updated = sum(1 for tool in tools if tool.tool_key in before and before[tool.tool_key] != tool.registration_hash)
     response = {"created": created, "updated": updated, "registration_missing": [], "audit_event_id": None}

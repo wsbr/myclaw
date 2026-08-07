@@ -69,7 +69,7 @@ async def test_workspace_lock_is_writer_fair_and_fenced():
             ),
             Run(
                 id=ids["run"], session_id=ids["session"], user_id="u1", mode="chat",
-                execution_kind="normal", lifecycle="running", entry_agent_id=ids["agent"],
+                status="active", entry_agent_id=ids["agent"],
                 started_at=utcnow(),
             ),
             WorkItem(

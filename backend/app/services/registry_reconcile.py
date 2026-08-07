@@ -262,8 +262,8 @@ async def reconcile_platform_tools(
     return reconciled
 
 
-def legacy_builtin_specs() -> list[CodeToolSpec]:
-    """Bridge current built-ins into the one authoritative registry."""
+def builtin_tool_specs() -> list[CodeToolSpec]:
+    """Project native built-ins into the one authoritative registry."""
 
     from app.core.tool_registry.registry import BUILTIN_TOOLS
 

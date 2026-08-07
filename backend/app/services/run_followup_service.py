@@ -9,7 +9,7 @@ from app.services.notification_delivery_service import create_notification_deliv
 async def enqueue_run_terminal_followups(db, *, run, runner, completion_event) -> None:
     await create_notification_delivery_if_channel(
         db, session_id=run.session_id, triggering_event_id=completion_event.id,
-        event_type="run_failed" if run.outcome == "failed" else "run_completed",
+        event_type="run_failed" if run.status == "failed" else "run_completed",
         run_id=run.id,
     )
     version = await db.get(AgentAssemblyVersion, runner.agent_version_id)

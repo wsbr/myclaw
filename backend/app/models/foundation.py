@@ -226,7 +226,7 @@ class ExecutionEventRecipient(Base):
     __tablename__ = "execution_event_recipient"
     __table_args__ = (
         CheckConstraint(
-            "recipient_type IN ('user_identity','group_node','agent')",
+            "recipient_type IN ('user_identity','group_membership','agent')",
             name="ck_execution_event_recipient_type",
         ),
         Index("ix_execution_event_recipient_lookup", "recipient_type", "recipient_id", "event_id"),

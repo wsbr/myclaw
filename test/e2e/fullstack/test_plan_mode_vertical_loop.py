@@ -188,7 +188,7 @@ def test_plan_revision_cas_restart_approval_and_same_session_implementation(
     assert approved["run"]["root_work_item_id"] == root_work_item_id
 
     terminal = _approve_tool_actions_until_terminal(api, session["id"], run_id)
-    assert terminal["status"] == "completed" and terminal["outcome"] == "succeeded"
+    assert terminal["status"] == "completed" and terminal["terminal_reason"] == "completed"
     assert terminal["permission_mode"] == "direct"
     work_items = api.request("GET", f"/api/v1/runs/{run_id}/work-items").json()["items"]
     assert [item["id"] for item in work_items] == [root_work_item_id]

@@ -28,7 +28,7 @@ export default function NotificationBell() {
     if ('presentation' in action) return action.presentation.title
     if (action.type === 'clarification') return action.question
     if (action.type === 'tool_confirmation') return action.tool_key
-    return 'Group Formation confirmation'
+    return 'Group action required'
   }
   return <Popover trigger="click" placement="rightTop" open={open} onOpenChange={setOpen} content={
     <div className="w-80"><div className="px-1 pb-2"><Typography.Text strong>待处理操作</Typography.Text>

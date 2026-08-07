@@ -95,7 +95,7 @@ async def test_cancel_run_fences_runner_and_replays_response():
             run.id, RunCancelRequest(reason="stop"), if_match='"1"',
             idempotency_key="cancel-1", db=db, current=current,
         )
-    assert first.lifecycle == "cancelled"
+    assert first.status == "cancelled"
     assert first.cancellation_requested_at is not None
 
     async with factory() as db:
@@ -136,7 +136,7 @@ async def test_run_deadline_fences_actions_and_preserves_unknown_tool_outcome():
         ))
         db.add(Run(
             id=run_id, session_id=session_id, user_id="deadline-user", mode="chat",
-            execution_kind="normal", lifecycle="waiting", status="waiting_tool",
+            status="waiting_tool",
             wait_reason="waiting_tool", entry_agent_id=uuid7(), started_at=utcnow(),
             deadline_at=utcnow() - timedelta(seconds=1),
         ))

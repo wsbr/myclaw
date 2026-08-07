@@ -28,7 +28,7 @@ test/
 | Chat、确认、重连、Runner 恢复 | ✅ | ✅ | Chat 完整往返 |
 | Tool 即时治理、Sandbox、文件与 Artifact | ✅ | ✅ | 管理面与 Timeline |
 | Plan 图编辑、冻结、并行节点与结算 | ✅ | ✅ | 提案、确认、完成 |
-| Group Formation、澄清、协作与历史检索 | ✅ | ✅ | Formation、确认、GroupRun |
+| Group Agent 网络、澄清、协作与历史检索 | ✅ | ✅ | 直接建组、GroupRun |
 | Memory、History、Channel Delivery、Trace | ✅ | ✅ | 管理面与 Timeline |
 | OpenAPI 第一阶段关键路径 | — | ✅ | — |
 

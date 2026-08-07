@@ -470,12 +470,10 @@ async def get_runner_trace(
 
 
 def _safe_harness_diagnostics(runner: DurableRunner) -> dict:
-    """Expose only non-sensitive Harness contract/capability metadata."""
+    """Expose only non-sensitive native capability metadata."""
     assembly = runner.assembly_snapshot or {}
     manifest = runner.prompt_manifest or {}
     capabilities = manifest.get("capabilities") or {}
-    response_contract = manifest.get("response_contract") or {}
-    completion_contract = manifest.get("completion_contract") or {}
     return {
         "agent_version_id": assembly.get("agent_version_id"),
         "model_id": assembly.get("model_id"),
@@ -483,20 +481,6 @@ def _safe_harness_diagnostics(runner: DurableRunner) -> dict:
         "assembled_tool_keys": list(capabilities.get("assembled_tool_keys") or []),
         "effective_tool_keys": list(capabilities.get("effective_tool_keys") or []),
         "harness_tool_keys": list(capabilities.get("harness_tool_keys") or []),
-        "response_contract": response_contract.get("key"),
-        "structured_output": response_contract.get("structured_output"),
-        "repair_no": response_contract.get("repair_no", 0),
-        "completion_contract": {
-            "key": completion_contract.get("key"),
-            "status": completion_contract.get("status"),
-            "reason_code": completion_contract.get("reason_code"),
-            "settlement_mode": completion_contract.get("settlement_mode"),
-            "required_tool_keys": list(completion_contract.get("required_tool_keys") or []),
-            "satisfied_tool_keys": list(completion_contract.get("satisfied_tool_keys") or []),
-            "pending_tool_keys": list(completion_contract.get("pending_tool_keys") or []),
-            "unavailable_tool_keys": list(completion_contract.get("unavailable_tool_keys") or []),
-            "repair_no": completion_contract.get("repair_no", 0),
-        },
     }
 
 
@@ -513,8 +497,8 @@ async def cancel_run(
     if replay and record.response_snapshot:
         return RunResponse.model_validate(record.response_snapshot)
     run = await _owned_run(db, run_id, current, lock=True)
-    if run.lifecycle in {"completed", "cancelled"}:
-        raise HTTPException(status_code=409, detail={"code": "run_terminal", "lifecycle": run.lifecycle})
+    if run.status in {"completed", "cancelled", "failed"}:
+        raise HTTPException(status_code=409, detail={"code": "run_terminal", "status": run.status})
     expected = _expected_version(if_match)
     if run.version != expected:
         raise HTTPException(status_code=409, detail={"code": "version_conflict", "current_version": run.version})
@@ -605,10 +589,8 @@ async def cancel_run(
         work.error_code = "run_cancelled"
         work.version += 1
     old_version = run.version
-    run.lifecycle = "cancelled"
     run.status = "cancelled"
     run.wait_reason = None
-    run.outcome = None
     run.error_code = "cancelled_by_user"
     run.terminal_reason = "cancelled_by_user"
     run.result_summary = body.reason
@@ -652,7 +634,7 @@ async def retry_work_item(
     item = await db.scalar(select(WorkItem).where(WorkItem.id == work_item_id, WorkItem.run_id == run.id).with_for_update())
     if item is None:
         raise HTTPException(status_code=404, detail="Work item not found")
-    if run.lifecycle not in {"running", "waiting"} or item.status != "failed" or not item.retryable:
+    if run.status in {"completed", "cancelled", "failed"} or item.status != "failed" or not item.retryable:
         raise HTTPException(status_code=409, detail={"code": "work_item_not_retryable"})
     item.execution_epoch += 1
     item.attempt_no += 1

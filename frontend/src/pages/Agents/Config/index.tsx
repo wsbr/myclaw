@@ -155,7 +155,7 @@ export default function AgentConfigPage() {
               title: detail.agent.status === 'inactive' ? '重新启用 Agent？' : '停用 Agent？',
               content: detail.agent.status === 'inactive'
                 ? '只影响后续新 Run；已经冻结的 Plan / Group 仍按其版本规则结算。'
-                : '将阻止新的 Chat、Plan Proposal 与 Group Formation；已确认执行不会被移除。',
+                : '将阻止新的 Chat、Plan 与 Group 执行；已固定的运行快照不会被移除。',
               onOk: () => stateChange.mutateAsync(detail.agent.status === 'inactive' ? 'reactivate' : 'deactivate'),
             })}>{detail.agent.status === 'inactive' ? '重新启用' : '停用'}</Button>}
           {!isNew && <Button type="primary" icon={<CloudUploadOutlined />} loading={publish.isPending} onClick={() => publish.mutate()}>发布版本</Button>}

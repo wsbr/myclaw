@@ -56,11 +56,10 @@ export default function SessionPage() {
   })
   const { data: groupRuns = [] } = useQuery({
     queryKey: ['group-runs', groupId], queryFn: () => sessionsApi.getGroupRuns(groupId!), enabled: !!groupId,
-    refetchInterval: query => query.state.data?.some(item => ['running', 'waiting', 'settling'].includes(item.run.lifecycle)) ? 2500 : false,
+    refetchInterval: query => query.state.data?.some(item => !['completed', 'cancelled', 'failed'].includes(item.run.status)) ? 2500 : false,
   })
   const activeGroupRun = groupRuns.find(item => !['completed', 'cancelled', 'failed'].includes(item.run.status)) || groupRuns[0]
   const groupIsOpen = activeGroup?.status === 'open'
-  const groupRunSettling = activeGroupRun?.run.lifecycle === 'settling'
   const { data: groupMessages = [] } = useQuery({
     queryKey: ['group-messages', groupId],
     queryFn: () => sessionsApi.getGroupMessages(groupId!), enabled: !!groupId,
@@ -98,7 +97,7 @@ export default function SessionPage() {
     || [...messages].reverse().find(item => item.run_id)?.run_id || null
   const { data: activeRun } = useQuery({
     queryKey: ['run', latestRunId], queryFn: () => sessionsApi.getRun(latestRunId!), enabled: !!latestRunId,
-    refetchInterval: query => ['running', 'waiting', 'settling'].includes(query.state.data?.lifecycle || '') ? 2000 : false,
+    refetchInterval: query => query.state.data && !['completed', 'cancelled', 'failed'].includes(query.state.data.status) ? 2000 : false,
   })
   const { data: workingPlans = [] } = useQuery({
     queryKey: ['working-plans', latestRunId],
@@ -256,8 +255,7 @@ export default function SessionPage() {
       await ensureSession()
       if (!activeGroup) throw new Error('请先从 Agent Network 选择三名成员直接建组')
       if (!groupIsOpen) throw new Error('Group 已关闭，只能读取历史记录')
-      if (groupRunSettling) throw new Error('当前 GroupRun 正在结算，请稍后再提交')
-      if (activeGroupRun && ['running', 'waiting'].includes(activeGroupRun.run.lifecycle)) {
+      if (activeGroupRun && !['completed', 'cancelled', 'failed'].includes(activeGroupRun.run.status)) {
         return { kind: 'message' as const, value: await sessionsApi.sendGroupRunMessage(activeGroupRun.id, content, groupRecipient) }
       }
       return { kind: 'run' as const, value: await sessionsApi.createGroupRun(activeGroup.id, content, groupRecipient) }
@@ -366,7 +364,7 @@ export default function SessionPage() {
     onError: (error: any) => toast.error(error?.response?.data?.error?.code || '回答提交失败'),
   })
 
-  const isRunning = Boolean(activeRun && ['running', 'waiting', 'settling'].includes(activeRun.lifecycle))
+  const isRunning = Boolean(activeRun && !['completed', 'cancelled', 'failed'].includes(activeRun.status))
   const planBusy = sendPlan.isPending || revisePlan.isPending || confirmPlan.isPending
     || rejectPlan.isPending || exitPlan.isPending
   const groupBusy = replaceReporter.isPending || closeGroup.isPending
@@ -374,7 +372,7 @@ export default function SessionPage() {
   const inputDisabled = send.isPending || sendPlan.isPending || sendGroup.isPending
     || (isRunning && mode !== 'group')
     || (mode === 'plan' && Boolean(planAlreadyEntered))
-    || (mode === 'group' && Boolean(!activeGroup || groupRunSettling || !groupIsOpen))
+    || (mode === 'group' && Boolean(!activeGroup || !groupIsOpen))
 
   return (
     <div className="bg-background flex h-full min-h-[calc(100vh-0px)]">
@@ -409,7 +407,6 @@ export default function SessionPage() {
             {sessionRecord && <Tag color={sessionRecord.permission_mode === 'plan_readonly' ? 'gold' : 'green'}>
               {sessionRecord.permission_mode} · r{sessionRecord.permission_revision}
             </Tag>}
-            {activeRun?.execution_kind === 'draft_test' && <Tag color="purple">草稿测试快照</Tag>}
             {isRunning && <Tag color="processing">后台执行中</Tag>}
             {isRunning && <Button danger size="small" icon={<StopOutlined />} loading={cancel.isPending} onClick={() => Modal.confirm({
               title: '取消本次 Run？', content: '取消会阻止后续执行，但不会回滚已经完成的 Tool 或外部副作用。',
@@ -425,10 +422,10 @@ export default function SessionPage() {
         </header>
         {!connected && <Alert banner type="warning" message="实时事件连接中断，任务仍在后台执行；正在自动重连。" />}
         {activeRun?.status === 'failed' && <Alert banner type="error"
-          message={`Run 失败：${activeRun.terminal_reason || activeRun.error_code || 'unknown'}`}
+          message={`Run 失败：${activeRun.terminal_reason || 'unknown'}`}
           description="Timeline 保留权限拒绝、超时、失败与迟到结果的权威事件。" />}
         {activeRun?.status === 'cancelled' && <Alert banner type="warning"
-          message={`Run 已取消：${activeRun.terminal_reason || activeRun.error_code || 'cancelled'}`} />}
+          message={`Run 已取消：${activeRun.terminal_reason || 'cancelled'}`} />}
 
         <section className="flex-1 overflow-y-auto px-5 py-6">
           <div className="mx-auto max-w-3xl">

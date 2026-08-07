@@ -17,7 +17,7 @@ from app.models.runtime_v1 import (
     ToolConfirmation, ToolInvocation, WorkItem,
 )
 from app.models.group_v1 import (
-    GroupFormationProposal, GroupRun, GroupRunMember, GroupSession,
+    GroupRun, GroupRunMember, GroupSession,
 )
 from app.persistence.reliable_writes import ExecutionEventWriter, OutboxWriter
 from app.persistence.runtime_graph import persist_replacement_runner
@@ -83,7 +83,7 @@ async def list_required_actions(
     allowed_types = {
         "clarification", "tool", "session_grant", "membership",
         "plan_implementation", "reporter_selection",
-        "tool_confirmation", "group_confirmation",
+        "tool_confirmation",
     }
     if action_type is not None and action_type not in allowed_types:
         raise HTTPException(status_code=422, detail={"code": "invalid_required_action_type"})
@@ -111,7 +111,7 @@ async def list_required_actions(
         "action": {"method": "POST", "href": f"/api/v1/clarifications/{item.id}/answer",
                    "required_fields": ["answer"]},
         "question": item.question, "asked_by_agent_id": item.asked_by_agent_id,
-        "group_session_id": item.group_session_id, "group_node_id": item.group_node_id,
+        "group_session_id": item.group_session_id, "group_membership_id": item.group_membership_id,
     } for item in clarifications)
     approvals = list(await db.scalars(select(Approval).where(
         Approval.target_account_id == current.account.id,
@@ -142,20 +142,6 @@ async def list_required_actions(
         item = view(confirmation, invocation).model_dump(mode="json")
         item["type"] = "tool_confirmation"
         items.append(item)
-    formations = list(await db.scalars(select(GroupFormationProposal).where(
-        GroupFormationProposal.user_id == current.account.user_id,
-        GroupFormationProposal.status == "awaiting_confirmation",
-    ).order_by(GroupFormationProposal.created_at, GroupFormationProposal.id)))
-    items.extend({
-        "id": proposal.id, "type": "group_confirmation", "status": "pending",
-        "session_id": proposal.parent_session_id, "run_id": proposal.generation_run_id,
-        "work_item_id": None, "version": proposal.version,
-        "revision_no": proposal.current_revision_no, "created_at": proposal.created_at.isoformat(),
-        "expires_at": None,
-        "presentation": {"title": "Confirm Group Formation", "summary": "Review participants and shared bootstrap context"},
-        "action": {"method": "POST", "href": f"/api/v1/group-formations/{proposal.id}/confirm",
-                   "required_fields": ["expected_revision_no"]},
-    } for proposal in formations)
     reporter_rows = list((await db.execute(
         select(GroupRun, GroupSession, Run)
         .join(GroupSession, GroupSession.id == GroupRun.group_session_id)
@@ -180,7 +166,7 @@ async def list_required_actions(
             "id": group_run.id,
             "type": "reporter_selection",
             "status": "pending",
-            "session_id": group.parent_session_id,
+            "session_id": group.session_id,
             "run_id": run.id,
             "work_item_id": None,
             "version": group_run.version,
@@ -483,7 +469,6 @@ async def decide_approval(
             work.wait_reason = "waiting_tool"
             work.version += 1
             run.status = "waiting_tool"
-            run.lifecycle = "waiting"
             run.wait_reason = "waiting_tool"
             run.version += 1
     elif not await has_pending_actions(db, work_item_id=work.id):
@@ -555,8 +540,8 @@ async def decide_tool_confirmation(
         raise HTTPException(status_code=409, detail={"code": "confirmation_snapshot_mismatch"})
     run = await db.scalar(select(Run).where(Run.id == invocation.run_id).with_for_update())
     work = await db.scalar(select(WorkItem).where(WorkItem.id == invocation.work_item_id).with_for_update())
-    if run.lifecycle in {"completed", "cancelled"}:
-        raise HTTPException(status_code=409, detail={"code": "run_terminal", "lifecycle": run.lifecycle})
+    if run.status in {"completed", "cancelled", "failed"}:
+        raise HTTPException(status_code=409, detail={"code": "run_terminal", "status": run.status})
     confirmation.status = "approved" if decision == "approve" else "rejected"
     confirmation.decision_by_user_id = current.account.user_id
     confirmation.decision_reason = body.reason
@@ -615,7 +600,7 @@ async def decide_tool_confirmation(
             "resumed_from_confirmation_id": confirmation.id,
         },
     )
-    run.lifecycle = "running"
+    run.status = "active"
     run.wait_reason = None
     run.version += 1
     await persist_replacement_runner(db, work, runner)

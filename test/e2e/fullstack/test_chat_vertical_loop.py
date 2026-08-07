@@ -148,7 +148,7 @@ def test_chat_clarification_working_plan_artifact_restart_and_ten_of_ten(
     # A simple Chat does not acquire ceremonial planning state.
     simple_session = _session(api, agent_id)
     simple = _chat(api, simple_session["id"], "请用一句话确认收到任务，本次只需直接回复。")
-    assert api.wait_run(simple["run"]["id"])["outcome"] == "succeeded"
+    assert api.wait_run(simple["run"]["id"])["status"] == "completed"
     assert api.request(
         "GET", f"/api/v1/runs/{simple['run']['id']}/working-plans",
     ).json()["items"] == []
@@ -158,7 +158,7 @@ def test_chat_clarification_working_plan_artifact_restart_and_ten_of_ten(
         api, simple_session["id"],
         "这是复杂任务，请分步骤完成退款差异分析，并在完成后给出简短结论。",
     )["run"]
-    assert api.wait_run(complex_run["id"])["outcome"] == "succeeded"
+    assert api.wait_run(complex_run["id"])["status"] == "completed"
     plans = api.request("GET", f"/api/v1/runs/{complex_run['id']}/working-plans").json()["items"]
     assert len(plans) == 1
     assert plans[0]["revision"] == 1 and plans[0]["status"] == "closed"
@@ -179,7 +179,7 @@ def test_chat_clarification_working_plan_artifact_restart_and_ten_of_ten(
         json={"answer": "采用 2026 年第二季度口径。"},
     ).json()
     assert answered["status"] == "answered"
-    assert api.wait_run(clarification_run["id"])["outcome"] == "succeeded"
+    assert api.wait_run(clarification_run["id"])["status"] == "completed"
     work_items = api.request(
         "GET", f"/api/v1/runs/{clarification_run['id']}/work-items",
     ).json()["items"]
@@ -203,11 +203,11 @@ def test_chat_clarification_working_plan_artifact_restart_and_ten_of_ten(
             f"/api/v1/runs/{artifact_run['id']}",
             lambda item: item["status"] == "waiting_tool",
         )
-        assert waiting["lifecycle"] == "waiting"
+        assert waiting["status"] == "waiting_user"
         _compose("restart", "runtime-worker-test")
     finally:
         _compose("start", "sandbox-worker-test")
-    assert api.wait_run(artifact_run["id"], timeout=120)["outcome"] == "succeeded"
+    assert api.wait_run(artifact_run["id"], timeout=120)["status"] == "completed"
     artifacts = api.request(
         "GET", f"/api/v1/sessions/{simple_session['id']}/artifacts",
         params={"status": "published"},
@@ -224,17 +224,17 @@ def test_chat_clarification_working_plan_artifact_restart_and_ten_of_ten(
     assert counts["artifacts"] == 1
 
     # The explicit UAT criterion: ten consecutive natural Chat turns, all 10/10.
-    outcomes = []
+    statuses = []
     for index in range(10):
         run = _chat(
             api, simple_session["id"],
             f"第 {index + 1} 次连续验收：请只回复已收到，不需要计划或外部操作。",
         )["run"]
-        outcomes.append(api.wait_run(run["id"])["outcome"])
+        statuses.append(api.wait_run(run["id"])["status"])
         assert api.request(
             "GET", f"/api/v1/runs/{run['id']}/working-plans",
         ).json()["items"] == []
-    assert outcomes == ["succeeded"] * 10
+    assert statuses == ["completed"] * 10
     record_testsuite_property("chat_uat", "10/10")
 
 
@@ -289,7 +289,7 @@ def test_agent_api_key_raw_user_id_header_only(
             )
             assert command.status_code == 202, command.text
             run = _raw_wait_run(client, command.json()["run"]["id"], raw)
-            assert run["outcome"] == "succeeded"
+            assert run["status"] == "completed"
     finally:
         api.request("DELETE", f"/api/v1/agents/{agent_id}/api-keys/{key['id']}", idem=True)
 
@@ -312,7 +312,7 @@ def test_sse_last_event_id_and_rest_continuation(
         assert ready.wait(10)
         command = _chat(api, session["id"], "SSE 续读验收：请直接回复收到。")
         expected_run.append(command["run"]["id"])
-        assert api.wait_run(command["run"]["id"])["outcome"] == "succeeded"
+        assert api.wait_run(command["run"]["id"])["status"] == "completed"
         frames = stream.result(timeout=30)
     persisted = [item for item in frames if item["id"] is not None]
     assert persisted and all(item["id"] > baseline for item in persisted)
@@ -340,7 +340,7 @@ def test_sse_last_event_id_and_rest_continuation(
         assert ready.wait(10)
         command2 = _chat(api, session["id"], "SSE 断线恢复第二次验收：请直接回复收到。")
         expected_run.append(command2["run"]["id"])
-        assert api.wait_run(command2["run"]["id"])["outcome"] == "succeeded"
+        assert api.wait_run(command2["run"]["id"])["status"] == "completed"
         resumed = stream.result(timeout=30)
     assert all(
         item["id"] is None or item["id"] > resume_from

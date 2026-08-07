@@ -71,7 +71,7 @@ class PhaseOneAPI:
         last = None
         while time.monotonic() < deadline:
             last = self.request("GET", f"/api/v1/runs/{run_id}").json()
-            if last["lifecycle"] in {"completed", "cancelled"}:
+            if last["status"] in {"completed", "cancelled", "failed"}:
                 return last
             time.sleep(0.25)
         raise AssertionError(f"Run {run_id} did not settle: {last}")

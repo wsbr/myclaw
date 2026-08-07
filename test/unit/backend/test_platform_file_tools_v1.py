@@ -14,7 +14,7 @@ from app.core.tool_registry.registry import ToolRegistry
 from app.database import Base
 from app.models.common import uuid7
 from app.models.foundation import ExecutionEvent, ExecutionEventRecipient, UserIdentity, UserSession
-from app.models.group_v1 import GroupAgentNode, GroupSession
+from app.models.group_v1 import GroupMembership, GroupSession
 from app.models.artifact_v1 import Artifact
 from app.models.runtime_v1 import Message
 
@@ -82,13 +82,8 @@ async def test_read_write_and_execute_are_confined_to_workspace(tmp_path, monkey
 @pytest.mark.asyncio
 async def test_group_history_returns_group_and_own_direct_only():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-    tables = [
-        UserIdentity.__table__, UserSession.__table__, ExecutionEvent.__table__,
-        ExecutionEventRecipient.__table__, Message.__table__, GroupSession.__table__,
-        GroupAgentNode.__table__, Artifact.__table__,
-    ]
     async with engine.begin() as connection:
-        await connection.run_sync(lambda sync: Base.metadata.create_all(sync, tables=tables))
+        await connection.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     session_id, group_id, node_id, other_node = (uuid7() for _ in range(4))
     agent_id = uuid7()
@@ -97,10 +92,11 @@ async def test_group_history_returns_group_and_own_direct_only():
             UserIdentity(user_id="u1", status="active"),
             UserSession(id=session_id, user_id="u1", entry_agent_id=agent_id,
                 status="active", origin_type="web", next_event_sequence=5),
-            GroupSession(id=group_id, parent_session_id=session_id, user_id="u1",
-                entry_agent_id=agent_id, status="open", goal="G"),
-            GroupAgentNode(id=node_id, group_session_id=group_id, agent_id=agent_id,
-                source_participant_id=uuid7(), is_entry=True, initial_responsibility="R"),
+            GroupSession(id=group_id, session_id=session_id, user_id="u1",
+                initiator_agent_id=agent_id, status="open", goal="G"),
+            GroupMembership(id=node_id, group_session_id=group_id, agent_id=agent_id,
+                status="joined", invited_by_kind="user", reason="selected",
+                authorization_source="user_selected"),
             ExecutionEvent(id=uuid7(), session_id=session_id, group_session_id=group_id,
                 sequence=1, event_type="shared.note", event_dedupe_key="shared-1",
                 actor_type="agent", actor_id=agent_id, entity_type="note", entity_id=uuid7(),
@@ -123,12 +119,12 @@ async def test_group_history_returns_group_and_own_direct_only():
         mine = next(row for row in events if isinstance(row, ExecutionEvent) and row.sequence == 2)
         other = next(row for row in events if isinstance(row, ExecutionEvent) and row.sequence == 3)
         db.add_all([
-            ExecutionEventRecipient(event_id=mine.id, recipient_type="group_node", recipient_id=node_id),
-            ExecutionEventRecipient(event_id=other.id, recipient_type="group_node", recipient_id=other_node),
+            ExecutionEventRecipient(event_id=mine.id, recipient_type="group_membership", recipient_id=node_id),
+            ExecutionEventRecipient(event_id=other.id, recipient_type="group_membership", recipient_id=other_node),
         ])
     context = RuntimeContext(
         session_id=session_id, runner_id=uuid7(), user_id="u1", agent_id=agent_id,
-        group_session_id=group_id, group_node_id=node_id,
+        group_session_id=group_id, group_membership_id=node_id,
     )
     async with factory() as db:
         result = await SearchGroupHistoryTool().execute({"query": "needle"}, context, db=db)

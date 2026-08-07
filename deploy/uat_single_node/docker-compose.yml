@@ -1,0 +1,184 @@
+name: myclaw-uat-single-node
+
+x-backend-build: &backend-build
+  context: ../../backend
+  dockerfile: Dockerfile
+  labels:
+    org.opencontainers.image.revision: ${MYCLAW_ACCEPTANCE_COMMIT_SHA:?clean SHA is required}
+    io.myclaw.environment: uat_single_node
+
+x-app-environment: &app-environment
+  MYCLAW_ENVIRONMENT: production
+  DATABASE_URL: ${DATABASE_URL}
+  DATABASE_POOL_SIZE: ${DATABASE_POOL_SIZE:-10}
+  DATABASE_MAX_OVERFLOW: ${DATABASE_MAX_OVERFLOW:-20}
+  REDIS_URL: ${REDIS_URL}
+  SECRET_KEY: ${SECRET_KEY}
+  ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+  DEBUG: "false"
+  CORS_ORIGINS: ${CORS_ORIGINS}
+  INIT_ADMIN_EMAIL: ${INIT_ADMIN_EMAIL}
+  INIT_ADMIN_PASSWORD: ${INIT_ADMIN_PASSWORD}
+  RATE_LIMIT_ENABLED: "true"
+  RATE_LIMIT_REQUESTS: ${RATE_LIMIT_REQUESTS:-600}
+  RATE_LIMIT_UNAUTHENTICATED_REQUESTS: ${RATE_LIMIT_UNAUTHENTICATED_REQUESTS:-60}
+  RATE_LIMIT_WINDOW_SECONDS: ${RATE_LIMIT_WINDOW_SECONDS:-60}
+  RUNTIME_WORKER_POLL_SECONDS: ${RUNTIME_WORKER_POLL_SECONDS:-0.5}
+  RUNTIME_OUTBOX_CLAIM_LEASE_SECONDS: ${RUNTIME_OUTBOX_CLAIM_LEASE_SECONDS:-30}
+  RUNTIME_RUNNER_LEASE_SECONDS: ${RUNTIME_RUNNER_LEASE_SECONDS:-30}
+  RUNTIME_RUNNER_HEARTBEAT_SECONDS: ${RUNTIME_RUNNER_HEARTBEAT_SECONDS:-10}
+  SANDBOX_WORKER_POLL_SECONDS: ${SANDBOX_WORKER_POLL_SECONDS:-0.5}
+  SANDBOX_OUTBOX_CLAIM_LEASE_SECONDS: ${SANDBOX_OUTBOX_CLAIM_LEASE_SECONDS:-30}
+  SANDBOX_ATTEMPT_STALE_SECONDS: ${SANDBOX_ATTEMPT_STALE_SECONDS:-60}
+  MAINTENANCE_POLL_SECONDS: ${MAINTENANCE_POLL_SECONDS:-3600}
+  MAINTENANCE_BATCH_SIZE: ${MAINTENANCE_BATCH_SIZE:-500}
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+  MYCLAW_RELEASE: ${MYCLAW_RELEASE:?release id is required}
+  MYCLAW_ACCEPTANCE_COMMIT_SHA: ${MYCLAW_ACCEPTANCE_COMMIT_SHA}
+
+x-backend-common: &backend-common
+  build: *backend-build
+  restart: unless-stopped
+  volumes:
+    - myclaw_data:/var/lib/myclaw
+
+services:
+  api:
+    <<: *backend-common
+    command: >
+      sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    environment:
+      <<: *app-environment
+      OTEL_SERVICE_NAME: myclaw-uat-single-node-api
+      MYCLAW_REAL_LLM_API_KEY: ${MYCLAW_REAL_LLM_API_KEY:?real model key is required}
+      MYCLAW_REAL_LLM_ENDPOINT: ${MYCLAW_REAL_LLM_ENDPOINT:?model endpoint is required}
+      MYCLAW_REAL_LLM_MODEL: ${MYCLAW_REAL_LLM_MODEL:?model name is required}
+    ports:
+      - "${UAT_BIND_HOST:-127.0.0.1}:${UAT_API_PORT:-8201}:8000"
+    depends_on:
+      mysql: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      otel-collector: {condition: service_started}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+
+  frontend:
+    build:
+      context: ../../frontend
+      dockerfile: Dockerfile
+      labels:
+        org.opencontainers.image.revision: ${MYCLAW_ACCEPTANCE_COMMIT_SHA}
+        io.myclaw.environment: uat_single_node
+      args:
+        VITE_API_BASE_URL: ${UAT_API_PUBLIC_URL:-http://localhost:8201}
+    ports:
+      - "${UAT_BIND_HOST:-127.0.0.1}:${UAT_UI_PORT:-8281}:80"
+    depends_on:
+      api: {condition: service_healthy}
+    restart: unless-stopped
+
+  runtime-worker:
+    <<: *backend-common
+    command: python -m app.workers.runtime_worker
+    environment:
+      <<: *app-environment
+      OTEL_SERVICE_NAME: myclaw-uat-single-node-runtime-worker
+      MYCLAW_REAL_LLM_API_KEY: ${MYCLAW_REAL_LLM_API_KEY}
+      MYCLAW_REAL_LLM_ENDPOINT: ${MYCLAW_REAL_LLM_ENDPOINT}
+      MYCLAW_REAL_LLM_MODEL: ${MYCLAW_REAL_LLM_MODEL}
+    depends_on:
+      api: {condition: service_healthy}
+
+  sandbox-worker:
+    <<: *backend-common
+    command: python -m app.workers.sandbox_worker
+    environment:
+      <<: *app-environment
+      OTEL_SERVICE_NAME: myclaw-uat-single-node-sandbox-worker
+    depends_on:
+      api: {condition: service_healthy}
+
+  maintenance-worker:
+    <<: *backend-common
+    command: python -m app.workers.maintenance_worker
+    environment:
+      <<: *app-environment
+      OTEL_SERVICE_NAME: myclaw-uat-single-node-maintenance-worker
+    depends_on:
+      api: {condition: service_healthy}
+
+  mysql:
+    image: mysql:8.0
+    command: --log-bin-trust-function-creators=1
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    ports:
+      - "127.0.0.1:${UAT_MYSQL_PORT:-3320}:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u\"$${MYSQL_USER}\" -p\"$${MYSQL_PASSWORD}\" --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$$REDIS_PASSWORD\""]
+    ports:
+      - "127.0.0.1:${UAT_REDIS_PORT:-6400}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD}\" ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  otel-volume-init:
+    image: alpine:3.20
+    user: "0:0"
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, FOWNER]
+    security_opt: ["no-new-privileges:true"]
+    command: ["sh", "-c", "install -d -m 0750 -o 10001 -g 10001 /var/lib/myclaw/otel"]
+    volumes:
+      - myclaw_data:/var/lib/myclaw
+    restart: "no"
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.153.0
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ../otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+      - myclaw_data:/var/lib/myclaw
+    ports:
+      - "127.0.0.1:${UAT_OTLP_PORT:-4330}:4318"
+      - "127.0.0.1:${UAT_OTEL_HEALTH_PORT:-13145}:13133"
+    depends_on:
+      otel-volume-init: {condition: service_completed_successfully}
+    restart: unless-stopped
+
+volumes:
+  mysql_data:
+    external: true
+    name: myclaw-uat-single-node-mysql-data
+  redis_data:
+    external: true
+    name: myclaw-uat-single-node-redis-data
+  myclaw_data:
+    external: true
+    name: myclaw-uat-single-node-app-data

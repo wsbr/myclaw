@@ -308,7 +308,7 @@ async def test_run_transport_retry_budget_bounds_zero_payload_replay():
         ))
         db.add(Run(
             id="run-1", session_id="session-1", user_id="user-1", mode="chat",
-            execution_kind="normal", lifecycle="running", status="active",
+            status="active",
             entry_agent_id="agent-1", started_at=utcnow(),
             hard_budget_snapshot={
                 "max_agent_turns": 4, "max_provider_attempts": 4,
@@ -369,7 +369,7 @@ async def test_post_provider_token_overage_blocks_business_tool_dispatch():
         ))
         db.add(Run(
             id="run-1", session_id="session-1", user_id="user-1", mode="chat",
-            execution_kind="normal", lifecycle="running", status="active",
+            status="active",
             entry_agent_id="agent-1", started_at=utcnow(),
             hard_budget_snapshot={
                 "max_agent_turns": 4, "max_provider_attempts": 4,
@@ -420,7 +420,7 @@ async def test_repeated_no_progress_turns_inject_persisted_runtime_diagnostic():
         ))
         db.add(Run(
             id="run-1", session_id="session-1", user_id="user-1", mode="chat",
-            execution_kind="normal", lifecycle="running", status="active",
+            status="active",
             entry_agent_id="agent-1", started_at=utcnow(),
             hard_budget_snapshot={
                 "max_agent_turns": 8, "max_provider_attempts": 8,

@@ -67,8 +67,8 @@ run_unit_gate() {
     cd "$TEST_ROOT"
     PYTHONPATH="$ROOT/backend" "$PYTEST_BIN" unit/backend -m unit -v --tb=short \
       --junitxml="$RESULTS_ROOT/unit.xml" \
-      --cov=app.workers.runtime_worker_v1 \
-      --cov=app.services.group_formation_service \
+      --cov=app.workers.runtime_worker \
+      --cov=app.services.group_collaboration_service \
       --cov=app.api.agents \
       --cov=app.api.groups \
       --cov-branch \
@@ -111,6 +111,30 @@ run_migration_gate() {
     --env DATABASE_URL="$database_url" \
     "$backend_image" alembic heads | tee "$RESULTS_ROOT/migration-heads.txt"
   test "$(grep -cve '^[[:space:]]*$' "$RESULTS_ROOT/migration-heads.txt")" = "1"
+  docker exec "$mysql_container" mysql -umyclaw -pmypassword myclaw_test -N -e "
+    SELECT CONCAT('legacy_tables=', COUNT(*))
+      FROM information_schema.TABLES
+     WHERE TABLE_SCHEMA='myclaw_test'
+       AND TABLE_NAME IN (
+         'plan_execution','plan_work_item_node','plan_work_item_dependency',
+         'plan_declared_agent','group_formation_proposal','group_formation_revision',
+         'group_formation_participant','group_formation_work_item',
+         'group_formation_suggested_edge','group_agent_node',
+         'group_initial_suggested_edge','group_run_agent_version',
+         'group_collaboration_edge'
+       );
+    SELECT CONCAT('legacy_run_columns=', COUNT(*))
+      FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA='myclaw_test' AND TABLE_NAME='run'
+       AND COLUMN_NAME IN ('lifecycle','outcome','execution_kind');
+    SELECT CONCAT('archive_seal_triggers=', COUNT(*))
+      FROM information_schema.TRIGGERS
+     WHERE TRIGGER_SCHEMA='myclaw_test'
+       AND EVENT_OBJECT_TABLE='legacy_uat_fact_archive';
+  " | tee "$RESULTS_ROOT/schema-contract.txt"
+  grep -qx 'legacy_tables=0' "$RESULTS_ROOT/schema-contract.txt"
+  grep -qx 'legacy_run_columns=0' "$RESULTS_ROOT/schema-contract.txt"
+  grep -qx 'archive_seal_triggers=3' "$RESULTS_ROOT/schema-contract.txt"
   cleanup_stack
 }
 

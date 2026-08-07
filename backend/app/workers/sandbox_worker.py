@@ -62,7 +62,7 @@ class SandboxClaim:
     side_effect: str
     group_session_id: str | None
     group_run_id: str | None
-    group_node_id: str | None
+    group_membership_id: str | None
     preflight_error: str | None = None
 
 
@@ -252,7 +252,7 @@ class SandboxWorker:
                 execution_epoch=attempt.execution_epoch,
                 side_effect=tool.side_effect if tool is not None else "non_idempotent",
                 group_session_id=group_session_id, group_run_id=work.group_run_id,
-                group_node_id=work.group_node_id, preflight_error=preflight_error,
+                group_membership_id=work.group_membership_id, preflight_error=preflight_error,
             )
 
     async def execute(self, claim: SandboxClaim) -> None:
@@ -277,7 +277,7 @@ class SandboxWorker:
                 tool_invocation_id=claim.invocation_id,
                 execution_epoch=claim.execution_epoch,
                 group_session_id=claim.group_session_id, group_run_id=claim.group_run_id,
-                group_node_id=claim.group_node_id,
+                group_membership_id=claim.group_membership_id,
             )
             async with AsyncSessionLocal() as tool_db:
                 result = await ToolRegistry.execute(claim.tool_key, claim.arguments, context, db=tool_db)
@@ -474,7 +474,7 @@ class SandboxWorker:
                     fencing_token=claim.workspace_fencing_token,
                 )
             if granted:
-                from app.workers.runtime_worker_v1 import RuntimeWorker
+                from app.workers.runtime_worker import RuntimeWorker
                 await RuntimeWorker(f"{self.worker_id}:lock-release")._resume_workspace_grants(
                     db, granted, caused_by_event_id=settled.id,
                 )
@@ -550,7 +550,7 @@ class SandboxWorker:
                 execution_epoch=attempt.execution_epoch,
                 side_effect=str(platform_tool.side_effect if platform_tool else "non_idempotent"),
                 group_session_id=group_session_id, group_run_id=work.group_run_id,
-                group_node_id=work.group_node_id,
+                group_membership_id=work.group_membership_id,
             )
         await self.settle(claim, ToolResult(
             status="failed", error="Sandbox worker stopped after process execution may have started",

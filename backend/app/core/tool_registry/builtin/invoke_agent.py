@@ -10,7 +10,6 @@ class InvokeAgentTool(BaseTool):
             "agent_id": {"type": "string", "description": "目标 Agent 的 ID"},
             "task": {"type": "string", "description": "要委托给该 Agent 的任务描述"},
             "input": {"type": "object", "description": "任务输入参数（可选）"},
-            "plan_node_key": {"type": "string", "description": "Plan 模式下对应的已确认节点 key"},
         },
         "required": ["agent_id", "task"],
     }

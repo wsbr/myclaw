@@ -47,7 +47,9 @@ class Message(Base, TimestampMixin):
     sender_user_id: Mapped[str | None] = mapped_column(String(191))
     sender_agent_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("agent.id"))
     recipient_type: Mapped[str] = mapped_column(String(20), default="session", nullable=False)
-    recipient_group_node_id: Mapped[str | None] = mapped_column(String(36))
+    recipient_membership_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("group_membership.id")
+    )
     role: Mapped[str] = mapped_column(String(20), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     content_format: Mapped[str] = mapped_column(String(20), default="markdown", nullable=False)
@@ -57,8 +59,7 @@ class Message(Base, TimestampMixin):
     clarification_id: Mapped[str | None] = mapped_column(String(36))
     reply_to_message_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("message.id"))
     caused_by_event_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("execution_event.id"))
-    # Agent-native Group routing. Legacy recipient_group_node_id remains
-    # readable, while active paths address the stable Agent identity.
+    # Agent-native Group routing also records the exact membership principal.
     visibility: Mapped[str] = mapped_column(String(20), default="user", nullable=False)
     recipient_agent_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("agent.id")
@@ -71,27 +72,32 @@ class Run(Base, TimestampMixin, VersionMixin):
     __tablename__ = "run"
     __table_args__ = (
         CheckConstraint("mode IN ('chat','plan','group')", name="ck_run_mode"),
-        CheckConstraint("execution_kind IN ('normal','draft_test','proposal_generation')", name="ck_run_kind"),
-        CheckConstraint("lifecycle IN ('running','waiting','settling','completed','cancelled')", name="ck_run_lifecycle"),
-        CheckConstraint("outcome IS NULL OR outcome IN ('succeeded','partially_succeeded','failed')", name="ck_run_outcome"),
-        CheckConstraint("(lifecycle = 'waiting' AND wait_reason IS NOT NULL) OR (lifecycle != 'waiting' AND wait_reason IS NULL)", name="ck_run_wait_reason"),
-        CheckConstraint("lifecycle != 'completed' OR outcome IS NOT NULL", name="ck_run_completed_outcome"),
+        CheckConstraint(
+            "status IN ('active','waiting_user','waiting_approval','waiting_tool','waiting_agent','completed','cancelled','failed')",
+            name="ck_run_status",
+        ),
+        CheckConstraint(
+            "(status IN ('waiting_user','waiting_approval','waiting_tool','waiting_agent') AND wait_reason = status) OR "
+            "(status NOT IN ('waiting_user','waiting_approval','waiting_tool','waiting_agent') AND wait_reason IS NULL)",
+            name="ck_run_wait_reason",
+        ),
+        CheckConstraint(
+            "(status IN ('completed','cancelled','failed') AND completed_at IS NOT NULL) OR "
+            "(status NOT IN ('completed','cancelled','failed') AND completed_at IS NULL)",
+            name="ck_run_terminal_time",
+        ),
         UniqueConstraint("id", "user_id", name="uq_run_id_user"),
         Index("ix_run_session_created", "session_id", "created_at"),
-        Index("ix_run_user_lifecycle", "user_id", "lifecycle", "updated_at"),
+        Index("ix_run_user_id", "user_id"),
+        Index("ix_run_status_updated", "status", "updated_at", "id"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
     session_id: Mapped[str] = mapped_column(String(36), ForeignKey("user_session.id"), nullable=False)
     user_id: Mapped[str] = mapped_column(String(191), ForeignKey("user_identity.user_id"), nullable=False)
     mode: Mapped[str] = mapped_column(String(20), nullable=False)
-    execution_kind: Mapped[str] = mapped_column(String(32), default="normal", nullable=False)
-    lifecycle: Mapped[str] = mapped_column(String(20), default="running", nullable=False)
-    # Agent-native status is the authoritative v2 lifecycle. The legacy
-    # lifecycle/outcome projection is retained until old UAT readers retire.
     status: Mapped[str] = mapped_column(String(32), default="active", nullable=False)
     wait_reason: Mapped[str | None] = mapped_column(String(32))
-    outcome: Mapped[str | None] = mapped_column(String(32))
     entry_agent_id: Mapped[str] = mapped_column(String(36), ForeignKey("agent.id"), nullable=False)
     root_work_item_id: Mapped[str | None] = mapped_column(String(36))
     permission_mode: Mapped[str] = mapped_column(
@@ -130,11 +136,10 @@ class WorkItem(Base, TimestampMixin, VersionMixin):
     owner_agent_id: Mapped[str] = mapped_column(String(36), ForeignKey("agent.id"), nullable=False)
     agent_version_id: Mapped[str] = mapped_column(String(36), ForeignKey("agent_version.id"), nullable=False)
     parent_work_item_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("work_item.id"))
-    plan_node_id: Mapped[str | None] = mapped_column(String(36))
-    group_formation_proposal_id: Mapped[str | None] = mapped_column(String(36))
-    group_formation_work_item_id: Mapped[str | None] = mapped_column(String(36))
     group_run_id: Mapped[str | None] = mapped_column(String(36))
-    group_node_id: Mapped[str | None] = mapped_column(String(36))
+    group_membership_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("group_membership.id")
+    )
     goal: Mapped[str] = mapped_column(Text, nullable=False)
     purpose: Mapped[str] = mapped_column(
         String(64), default="root_request", nullable=False
@@ -422,7 +427,9 @@ class Clarification(Base, TimestampMixin, VersionMixin):
     run_id: Mapped[str] = mapped_column(String(36), ForeignKey("run.id"), nullable=False)
     session_id: Mapped[str] = mapped_column(String(36), ForeignKey("user_session.id"), nullable=False)
     group_session_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("group_session.id"))
-    group_node_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("group_agent_node.id"))
+    group_membership_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("group_membership.id")
+    )
     asked_by_agent_id: Mapped[str] = mapped_column(String(36), ForeignKey("agent.id"), nullable=False)
     target_user_id: Mapped[str] = mapped_column(String(191), ForeignKey("user_identity.user_id"), nullable=False)
     question: Mapped[str] = mapped_column(Text, nullable=False)

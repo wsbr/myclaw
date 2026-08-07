@@ -68,51 +68,43 @@ class VisibleRecordRepository:
         self.db = db
 
     async def messages_for_runner(self, *, run: Run, runner: DurableRunner) -> list[Message]:
-        # A Group Formation proposal runs before a confirmed Group and its
-        # GroupAgentNodes exist.  Its input is still part of the parent Chat
-        # scope, so it must use that projection instead of requiring a node.
-        projection_mode = (
-            "chat"
-            if run.mode == "group" and run.execution_kind == "proposal_generation"
-            else run.mode
-        )
         return await VisibleEventProjection(self.db).list_direct_messages(
             user_id=run.user_id,
             session_id=run.session_id,
-            mode=projection_mode,
-            group_node_id=(runner.input_snapshot.get("group_node_id")
-                           or runner.principal_snapshot.get("group_node_id")),
+            mode=run.mode,
+            group_membership_id=(runner.input_snapshot.get("group_membership_id")
+                           or runner.principal_snapshot.get("group_membership_id")),
             delegated=bool(runner.input_snapshot.get("agent_invocation_id")),
         )
 
     async def messages_for_summary(self, summary: HistorySummary) -> list[Message]:
         if summary.scope_type == "group_agent":
-            run_mode, group_node_id = "group", summary.group_node_id
+            run_mode, group_membership_id = "group", summary.group_membership_id
         else:
-            run_mode, group_node_id = "chat", None
+            run_mode, group_membership_id = "chat", None
         return await VisibleEventProjection(self.db).list_direct_messages(
             user_id=(await self.db.get(UserSession, summary.session_id)).user_id,
             session_id=summary.session_id,
             mode=run_mode,
-            group_node_id=group_node_id,
+            group_membership_id=group_membership_id,
         )
 
 
 def _scope_values(run: Run, runner: DurableRunner) -> tuple[str, str | None, str | None]:
-    if run.mode != "group" or run.execution_kind == "proposal_generation":
+    if run.mode != "group":
         return "chat", None, None
     return (
         "group_agent",
         runner.input_snapshot.get("group_session_id") or runner.principal_snapshot.get("group_session_id"),
-        runner.input_snapshot.get("group_node_id") or runner.principal_snapshot.get("group_node_id"),
+        runner.input_snapshot.get("group_membership_id") or runner.principal_snapshot.get("group_membership_id"),
     )
 
 
-def _scope_predicates(scope_type: str, group_session_id: str | None, group_node_id: str | None):
+def _scope_predicates(scope_type: str, group_session_id: str | None, group_membership_id: str | None):
     return (
         HistorySummary.scope_type == scope_type,
         HistorySummary.group_session_id.is_(None) if group_session_id is None else HistorySummary.group_session_id == group_session_id,
-        HistorySummary.group_node_id.is_(None) if group_node_id is None else HistorySummary.group_node_id == group_node_id,
+        HistorySummary.group_membership_id.is_(None) if group_membership_id is None else HistorySummary.group_membership_id == group_membership_id,
     )
 
 
@@ -125,14 +117,14 @@ async def select_history(
     token_budget = max(1, min(int(merged["token_budget"]), 100_000))
     max_messages = max(1, min(int(merged["max_messages"]), 200))
     visible = await VisibleRecordRepository(db).messages_for_runner(run=run, runner=runner)
-    scope_type, group_session_id, group_node_id = _scope_values(run, runner)
+    scope_type, group_session_id, group_membership_id = _scope_values(run, runner)
     ready: HistorySummary | None = None
     prefix_count = 0
 
     if policy_key == "history.summary_recent" and visible:
         summaries = list(await db.scalars(select(HistorySummary).where(
             HistorySummary.session_id == run.session_id,
-            *_scope_predicates(scope_type, group_session_id, group_node_id),
+            *_scope_predicates(scope_type, group_session_id, group_membership_id),
             HistorySummary.status == "ready",
         ).order_by(HistorySummary.through_event_sequence.desc()).limit(5)))
         positions = {message.id: index for index, message in enumerate(visible)}
@@ -175,13 +167,13 @@ async def select_history(
                     event_sequence = max(0, session.next_event_sequence - 1)
                 existing = await db.scalar(select(HistorySummary).where(
                     HistorySummary.session_id == run.session_id,
-                    *_scope_predicates(scope_type, group_session_id, group_node_id),
+                    *_scope_predicates(scope_type, group_session_id, group_membership_id),
                     HistorySummary.through_event_sequence == event_sequence,
                 ))
                 if existing is None:
                     pending = HistorySummary(
                         id=uuid7(), session_id=run.session_id, scope_type=scope_type,
-                        group_session_id=group_session_id, group_node_id=group_node_id,
+                        group_session_id=group_session_id, group_membership_id=group_membership_id,
                         through_message_id=through.id, through_event_sequence=event_sequence,
                         source_hash=source_hash(prefix), status="pending", model_id=model_id,
                         parameter_version=policy.parameter_version if policy else 1,
@@ -206,7 +198,7 @@ async def select_history(
             "projection": {
                 "scope_type": scope_type,
                 "group_session_id": group_session_id,
-                "group_node_id": group_node_id,
+                "group_membership_id": group_membership_id,
             },
             "selected_message_ids": [item.id for item in selected],
             "summary_id": ready.id if ready else None,

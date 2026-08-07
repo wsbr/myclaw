@@ -16,7 +16,6 @@ from app.models.agent_v1 import AgentAssemblyVersion, AgentBlueprint, AgentCard
 from app.models.common import utcnow, uuid7
 from app.models.foundation import ExecutionEvent, PlatformAccount, UserIdentity, UserSession
 from app.models.group_v1 import (
-    GroupFormationProposal,
     GroupMembership,
     GroupRun,
     GroupRunMember,
@@ -92,7 +91,7 @@ def _published_agent(account_id: str, name: str, capability: str):
 
 
 @pytest.mark.asyncio
-async def test_direct_group_creation_is_10_of_10_and_has_no_formation_provider():
+async def test_direct_group_creation_is_10_of_10_from_network_members():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
@@ -139,7 +138,6 @@ async def test_direct_group_creation_is_10_of_10_and_has_no_formation_provider()
     assert len({item["id"] for item in created}) == 10
     assert all(item["membership_policy"] == "fixed_for_run" for item in created)
     async with factory() as db:
-        assert await db.scalar(select(func.count()).select_from(GroupFormationProposal)) == 0
         assert await db.scalar(select(func.count()).select_from(GroupMembership)) == 30
         assert await db.scalar(select(func.count()).select_from(GroupRun)) == 10
         assert await db.scalar(select(func.count()).select_from(Run)) == 10
@@ -149,7 +147,6 @@ async def test_direct_group_creation_is_10_of_10_and_has_no_formation_provider()
             ExecutionEvent.event_type == "group.created",
         )))
         assert len(creation_events) == 10
-        assert all(event.payload["formation_provider_called"] is False for event in creation_events)
     await engine.dispose()
 
 
@@ -209,7 +206,7 @@ async def test_group_peers_message_invoke_audit_and_repeat_history():
             session_id=session_id, runner_id=product_runner.id, user_id="peer-user",
             account_id=account_id, agent_id=product_id,
             group_session_id=group_view["id"], group_run_id=group_run.id,
-            group_node_id=memberships[product_id].id,
+            group_membership_id=memberships[product_id].id,
         )
         _message, development_runner = await send_agent_group_message(
             db, context=product_context, run_id=run.id, work_item_id=root_work.id,
@@ -222,7 +219,7 @@ async def test_group_peers_message_invoke_audit_and_repeat_history():
             session_id=session_id, runner_id=development_runner.id, user_id="peer-user",
             account_id=account_id, agent_id=development_id,
             group_session_id=group_view["id"], group_run_id=group_run.id,
-            group_node_id=memberships[development_id].id,
+            group_membership_id=memberships[development_id].id,
         )
         _reverse_message, reverse_product_runner = await send_agent_group_message(
             db, context=development_context, run_id=run.id,
@@ -305,7 +302,7 @@ async def test_group_peers_message_invoke_audit_and_repeat_history():
             context=context,
         )
         assert run.status == "completed"
-        assert run.outcome == "succeeded"
+        assert run.status == "completed" and run.terminal_reason == "completed"
         assert group_run.delivered_summary_epoch == 1
 
     async with factory() as db:
@@ -313,7 +310,7 @@ async def test_group_peers_message_invoke_audit_and_repeat_history():
             session_id=session_id, runner_id=uuid7(), user_id="peer-user",
             account_id=account_id, agent_id=product_id,
             group_session_id=group_view["id"], group_run_id=group_run.id,
-            group_node_id=memberships[product_id].id,
+            group_membership_id=memberships[product_id].id,
         )
         first = await SearchGroupHistoryTool().execute(
             {"query": "Calculator implementation", "limit": 20},

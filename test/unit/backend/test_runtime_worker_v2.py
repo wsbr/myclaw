@@ -123,8 +123,8 @@ async def test_reporter_delivery_budget_projects_durable_replacement_action(monk
         runner = await db.get(DurableRunner, world.runner_id)
         command.attempt_count = settings.outbox_max_delivery_attempts
         db.add(GroupSession(
-            id=group_session_id, parent_session_id=run.session_id, user_id=run.user_id,
-            entry_agent_id=runner.agent_id, initiator_agent_id=runner.agent_id,
+            id=group_session_id, session_id=run.session_id, user_id=run.user_id,
+            initiator_agent_id=runner.agent_id,
             status="open", goal="test", membership_policy="fixed_for_run",
         ))
         db.add(GroupMembership(
@@ -317,7 +317,7 @@ async def test_plan_proposal_waits_for_exact_revision_approval_without_new_work_
         approval = await db.scalar(select(Approval).where(
             Approval.kind == "plan_implementation",
         ))
-        assert run.status == "waiting_approval" and run.lifecycle == "waiting"
+        assert run.status == "waiting_approval" and run.wait_reason == "waiting_approval"
         assert work.status == "waiting_approval" and work.active_runner_id is None
         assert session.permission_mode == "plan_readonly"
         assert await db.scalar(select(func.count()).select_from(WorkItem)) == 1
@@ -360,7 +360,6 @@ async def test_failed_agent_invocation_resumes_project_manager_instead_of_failin
         caller_work.wait_reason = "waiting_agent"
         caller_work.active_runner_id = None
         run.status = "waiting_agent"
-        run.lifecycle = "waiting"
         run.wait_reason = "waiting_agent"
         target_work = WorkItem(
             id=target_work_id, run_id=run.id, session_id=run.session_id,
@@ -407,7 +406,7 @@ async def test_failed_agent_invocation_resumes_project_manager_instead_of_failin
             DurableRunner.work_item_id == caller_work.id,
         ).order_by(DurableRunner.execution_epoch)))
         assert invocation.status == "failed"
-        assert run.status == "active" and run.lifecycle == "running"
+        assert run.status == "active" and run.wait_reason is None
         assert caller_work.status == "queued" and caller_work.execution_epoch == 2
         assert runners[-1].status == "queued"
         assert "agent_invocation_failed" in runners[-1].input_snapshot["pending_results"][-1]["content"]

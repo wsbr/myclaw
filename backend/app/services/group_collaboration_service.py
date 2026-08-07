@@ -90,9 +90,9 @@ async def _resolve_group_members(
 def group_session_view(group: GroupSession) -> dict:
     return {
         "id": group.id,
-        "session_id": group.parent_session_id,
+        "session_id": group.session_id,
         "status": group.status,
-        "initiator_agent_id": group.initiator_agent_id or group.entry_agent_id,
+        "initiator_agent_id": group.initiator_agent_id,
         "membership_policy": group.membership_policy,
         "version": group.version,
     }
@@ -129,30 +129,22 @@ def group_run_member_view(row: GroupRunMember) -> dict:
 
 
 def _run_projection(run: Run) -> dict:
-    status = run.status or (
-        "completed" if run.lifecycle == "completed" else
-        "cancelled" if run.lifecycle == "cancelled" else
-        "active"
-    )
     return {
         "id": run.id,
         "session_id": run.session_id,
         "mode": run.mode,
-        "execution_kind": run.execution_kind,
-        "lifecycle": run.lifecycle,
-        "status": status,
+        "status": run.status,
         "wait_reason": run.wait_reason,
-        "outcome": run.outcome,
         "root_work_item_id": run.root_work_item_id,
         "permission_mode": run.permission_mode,
-        "terminal_reason": run.error_code,
-        "error_code": run.error_code,
+        "terminal_reason": run.terminal_reason,
+        "deadline_at": run.deadline_at.isoformat() if run.deadline_at else None,
         "version": run.version,
-        "result_summary": run.result_summary,
         "cancellation_requested_at": (
             run.cancellation_requested_at.isoformat()
             if run.cancellation_requested_at else None
         ),
+        "completed_at": run.completed_at.isoformat() if run.completed_at else None,
     }
 
 
@@ -207,7 +199,7 @@ def _member_runner(
             "user_id": session.user_id,
             "account_id": session.account_id,
             "session_id": session.id,
-            "entry_agent_id": group.initiator_agent_id or group.entry_agent_id,
+            "entry_agent_id": group.initiator_agent_id,
             "current_agent_id": snapshot.agent_id,
             "mode": "group",
             "permission_mode": work.mode == "group" and "direct" or session.permission_mode,
@@ -217,7 +209,7 @@ def _member_runner(
             "group_membership_id": membership.id,
             # V1 field name is retained in the RuntimeContext but now carries
             # a Membership id, not a role/formation node.
-            "group_node_id": membership.id,
+            "group_membership_id": membership.id,
             "delegation_chain": [],
         },
         assembly_snapshot={"agent_version_id": snapshot.agent_version_id},
@@ -226,7 +218,7 @@ def _member_runner(
             "group_session_id": group.id,
             "group_run_id": group_run.id,
             "group_membership_id": membership.id,
-            "group_node_id": membership.id,
+            "group_membership_id": membership.id,
             "goal": content,
             "purpose": purpose,
             "summary_epoch": summary_epoch,
@@ -253,7 +245,7 @@ async def _create_native_group_run_graph(
     default_budget = default_run_budget("group")
     run = Run(
         id=uuid7(), session_id=session.id, user_id=session.user_id, mode="group",
-        execution_kind="normal", lifecycle="running", status="active",
+        status="active",
         permission_mode="direct", hard_budget_snapshot=default_budget,
         entry_agent_id=recipient_id,
         deadline_at=deadline_from_budget(default_budget, mode="group"),
@@ -261,7 +253,7 @@ async def _create_native_group_run_graph(
     )
     group_run = GroupRun(
         id=uuid7(), run_id=run.id, group_session_id=group.id,
-        owner_node_id=None, reporter_agent_id=reporter_id, goal=content,
+        reporter_agent_id=reporter_id, goal=content,
         summary_epoch=0, delivered_summary_epoch=0,
         shared_context={"refs": list(shared_context_refs)},
         budget_snapshot=default_budget,
@@ -315,7 +307,7 @@ async def _create_native_group_run_graph(
         id=uuid7(), run_id=run.id, session_id=session.id, user_id=session.user_id,
         mode="group", owner_agent_id=recipient_id,
         agent_version_id=target_snapshot.agent_version_id,
-        group_run_id=group_run.id, group_node_id=target_membership.id,
+        group_run_id=group_run.id, group_membership_id=target_membership.id,
         goal=content, purpose="group_message", status="queued",
         execution_epoch=1, attempt_no=1,
     )
@@ -332,7 +324,7 @@ async def _create_native_group_run_graph(
         scope_type="group", group_session_id=group.id, group_run_id=group_run.id,
         sender_type="user", sender_user_id=session.user_id,
         recipient_type="agent", recipient_agent_id=recipient_id,
-        recipient_group_node_id=target_membership.id,
+        recipient_membership_id=target_membership.id,
         visibility="direct", role="user", content=content,
         content_format="markdown", status="committed", run_id=run.id,
         work_item_id=work.id,
@@ -356,7 +348,6 @@ async def _create_native_group_run_graph(
             "reporter_agent_id": reporter_id,
             "recipient_agent_id": recipient_id,
             "membership_policy": "fixed_for_run",
-            "formation_provider_called": False,
         },
         correlation_id=run.id,
     )
@@ -412,10 +403,10 @@ async def create_group_with_initial_run(
     if initiator_id not in {item.agent_id for item in members}:
         raise GroupPolicyError("reporter_unavailable", "Reporter must be a selected member")
     group = GroupSession(
-        id=uuid7(), parent_session_id=session.id, user_id=session.user_id,
-        entry_agent_id=initiator_id, initiator_agent_id=initiator_id,
+        id=uuid7(), session_id=session.id, user_id=session.user_id,
+        initiator_agent_id=initiator_id,
         status="open", goal=goal, bootstrap_context="",
-        membership_policy="fixed_for_run", confirmed_at=utcnow(),
+        membership_policy="fixed_for_run",
     )
     db.add(group)
     await db.flush()
@@ -507,7 +498,7 @@ async def create_user_group_message(
         UserSession.id == session.id,
     ).with_for_update())
     run = await db.scalar(select(Run).where(Run.id == group_run.run_id).with_for_update())
-    if run is None or run.status in {"completed", "cancelled", "failed"} or run.lifecycle in {"completed", "cancelled"}:
+    if run is None or run.status in {"completed", "cancelled", "failed"}:
         raise GroupPolicyError("group_run_not_accepting_messages", "GroupRun is terminal")
     target_id = recipient_agent_id or group_run.reporter_agent_id
     snapshot = await db.scalar(select(GroupRunMember).where(
@@ -522,7 +513,7 @@ async def create_user_group_message(
         id=uuid7(), run_id=run.id, session_id=session.id, user_id=session.user_id,
         mode="group", owner_agent_id=target_id,
         agent_version_id=snapshot.agent_version_id,
-        group_run_id=group_run.id, group_node_id=membership.id,
+        group_run_id=group_run.id, group_membership_id=membership.id,
         goal=content, purpose="group_message", status="queued",
         execution_epoch=1, attempt_no=1,
     )
@@ -536,7 +527,7 @@ async def create_user_group_message(
         scope_type="group", group_session_id=group.id, group_run_id=group_run.id,
         sender_type="user", sender_user_id=session.user_id,
         recipient_type="agent", recipient_agent_id=target_id,
-        recipient_group_node_id=membership.id, visibility="direct",
+        recipient_membership_id=membership.id, visibility="direct",
         role="user", content=content, content_format="markdown",
         status="committed", run_id=run.id, work_item_id=work.id,
         sequence_no=await _next_group_message_sequence(db, group.id),
@@ -549,7 +540,6 @@ async def create_user_group_message(
     for request in summary_requests:
         request.status = "superseded"
         request.version += 1
-    run.lifecycle = "running"
     run.status = "active"
     run.wait_reason = None
     run.version += 1
@@ -644,7 +634,7 @@ async def send_agent_group_message(
         sender_type="agent", sender_agent_id=context.agent_id,
         recipient_type="agent" if recipient_agent_id else "group",
         recipient_agent_id=recipient_agent_id,
-        recipient_group_node_id=target_membership.id if target_membership else None,
+        recipient_membership_id=target_membership.id if target_membership else None,
         visibility=visibility, role="assistant", content=content,
         content_format="markdown", status="committed", run_id=run.id,
         work_item_id=work.id, operation_key=operation_key,
@@ -679,7 +669,7 @@ async def send_agent_group_message(
         mode="group", owner_agent_id=recipient_agent_id,
         agent_version_id=target_snapshot.agent_version_id,
         parent_work_item_id=work.id, group_run_id=group_run.id,
-        group_node_id=target_membership.id, goal=content,
+        group_membership_id=target_membership.id, goal=content,
         purpose="group_message", status="queued", execution_epoch=1, attempt_no=1,
     )
     target_runner = _member_runner(

@@ -93,22 +93,14 @@ class RunResponse(BaseModel):
     id: str
     session_id: str
     mode: str
-    execution_kind: str
-    lifecycle: str
     status: str = "active"
     wait_reason: str | None
-    outcome: str | None
-    entry_agent_id: str
-    root_work_item_id: str | None = None
-    permission_mode: str = "direct"
-    result_summary: str | None
-    error_code: str | None
     terminal_reason: str | None = None
     deadline_at: datetime | None = None
+    root_work_item_id: str | None = None
+    permission_mode: str = "direct"
     cancellation_requested_at: datetime | None
     version: int
-    started_at: datetime
-    finished_at: datetime | None
     completed_at: datetime | None = None
 
     model_config = {"from_attributes": True}
@@ -195,7 +187,7 @@ class ClarificationResponse(BaseModel):
     run_id: str
     session_id: str
     group_session_id: str | None
-    group_node_id: str | None
+    group_membership_id: str | None
     asked_by_agent_id: str
     target_user_id: str
     question: str

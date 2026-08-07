@@ -8,7 +8,7 @@ from sqlalchemy import and_, exists, func, or_, select
 
 from app.core.tool_registry.base import BaseTool, RuntimeContext, ToolResult
 from app.models.foundation import ExecutionEvent, ExecutionEventRecipient
-from app.models.group_v1 import GroupAgentNode, GroupMembership, GroupSession
+from app.models.group_v1 import GroupMembership, GroupSession
 from app.models.runtime_v1 import Message
 from app.models.artifact_v1 import Artifact
 
@@ -51,32 +51,19 @@ class SearchGroupHistoryTool(BaseTool):
     async def execute(self, args: dict, context: RuntimeContext, db=None) -> ToolResult:
         if db is None:
             return ToolResult(success=False, error="database connection is required")
-        if not context.group_session_id or not context.group_node_id:
-            return ToolResult(success=False, error="search_group_history requires a current Group node")
-        node = await db.scalar(select(GroupAgentNode).join(
-            GroupSession, GroupSession.id == GroupAgentNode.group_session_id,
+        if not context.group_session_id or not context.group_membership_id:
+            return ToolResult(success=False, error="search_group_history requires a current Group membership")
+        membership = await db.scalar(select(GroupMembership).join(
+            GroupSession, GroupSession.id == GroupMembership.group_session_id,
         ).where(
-            GroupAgentNode.id == context.group_node_id,
-            GroupAgentNode.group_session_id == context.group_session_id,
-            GroupAgentNode.agent_id == context.agent_id,
-            GroupSession.parent_session_id == context.session_id,
+            GroupMembership.id == context.group_membership_id,
+            GroupMembership.group_session_id == context.group_session_id,
+            GroupMembership.agent_id == context.agent_id,
+            GroupMembership.status == "joined",
+            GroupSession.session_id == context.session_id,
             GroupSession.status.in_(("open", "closed")),
         ))
-        # Historical Formation-backed Groups remain readable while all newly
-        # created Groups use immutable GroupMembership principals.
-        membership = None
-        if node is None:
-            membership = await db.scalar(select(GroupMembership).join(
-                GroupSession, GroupSession.id == GroupMembership.group_session_id,
-            ).where(
-                GroupMembership.id == context.group_node_id,
-                GroupMembership.group_session_id == context.group_session_id,
-                GroupMembership.agent_id == context.agent_id,
-                GroupMembership.status == "joined",
-                GroupSession.parent_session_id == context.session_id,
-                GroupSession.status.in_(("open", "closed")),
-            ))
-        if membership is None and node is None:
+        if membership is None:
             return ToolResult(success=False, error="current Agent is not a member of this Group")
         query = args.get("query")
         if not isinstance(query, str) or not query.strip() or len(query) > 1000:
@@ -119,8 +106,8 @@ class SearchGroupHistoryTool(BaseTool):
                         ExecutionEventRecipient.recipient_id == context.agent_id,
                     ),
                     and_(
-                        ExecutionEventRecipient.recipient_type == "group_node",
-                        ExecutionEventRecipient.recipient_id == context.group_node_id,
+                        ExecutionEventRecipient.recipient_type == "group_membership",
+                        ExecutionEventRecipient.recipient_id == context.group_membership_id,
                     ),
                 ),
             )),

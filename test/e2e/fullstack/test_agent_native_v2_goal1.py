@@ -221,9 +221,8 @@ def test_agent_native_v2_goal1_fullstack_smoke(
         },
     ).json()
     run = api.wait_run(command["run"]["id"], timeout=90)
-    assert run["lifecycle"] == "completed", run
     assert run["status"] == "completed", run
-    assert run["outcome"] == "succeeded", run
+    assert run["terminal_reason"] == "completed", run
     assert run["result_summary"] == FINAL_MESSAGE
 
     messages = api.request(

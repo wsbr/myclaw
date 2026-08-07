@@ -8,7 +8,7 @@ from sqlalchemy import and_, exists, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.foundation import ExecutionEvent, ExecutionEventRecipient, UserSession
-from app.models.group_v1 import GroupAgentNode, GroupMembership, GroupSession
+from app.models.group_v1 import GroupMembership, GroupSession
 from app.models.runtime_v1 import Message
 
 
@@ -79,7 +79,7 @@ class VisibleEventProjection:
 
     async def list_direct_messages(
         self, *, user_id: str, session_id: str, mode: str,
-        group_node_id: str | None = None, delegated: bool = False,
+        group_membership_id: str | None = None, delegated: bool = False,
         hard_limit: int = 1000,
     ) -> list[Message]:
         """Return only the Message history directly visible to a Runner scope."""
@@ -88,34 +88,20 @@ class VisibleEventProjection:
             raise LookupError("session not found")
         hard_limit = max(1, min(hard_limit, 2000))
         if mode == "group":
-            if not group_node_id:
-                raise LookupError("group node is required")
-            node = await self.db.scalar(
-                select(GroupAgentNode).join(
-                    GroupSession, GroupSession.id == GroupAgentNode.group_session_id,
-                ).where(
-                    GroupAgentNode.id == group_node_id,
-                    GroupSession.parent_session_id == session_id,
-                    GroupSession.user_id == user_id,
-                )
-            )
-            membership = None
-            if node is None:
-                membership = await self.db.scalar(select(GroupMembership).join(
-                    GroupSession, GroupSession.id == GroupMembership.group_session_id,
-                ).where(
-                    GroupMembership.id == group_node_id,
-                    GroupMembership.status == "joined",
-                    GroupSession.parent_session_id == session_id,
-                    GroupSession.user_id == user_id,
-                ))
-            if membership is None and node is None:
-                raise LookupError("group node not found")
-            group_session_id = (
-                membership.group_session_id if membership is not None
-                else node.group_session_id
-            )
-            agent_id = membership.agent_id if membership is not None else node.agent_id
+            if not group_membership_id:
+                raise LookupError("group membership is required")
+            membership = await self.db.scalar(select(GroupMembership).join(
+                GroupSession, GroupSession.id == GroupMembership.group_session_id,
+            ).where(
+                GroupMembership.id == group_membership_id,
+                GroupMembership.status == "joined",
+                GroupSession.session_id == session_id,
+                GroupSession.user_id == user_id,
+            ))
+            if membership is None:
+                raise LookupError("group membership not found")
+            group_session_id = membership.group_session_id
+            agent_id = membership.agent_id
             return list(await self.db.scalars(
                 select(Message).where(
                     Message.session_id == session_id,
@@ -126,7 +112,7 @@ class VisibleEventProjection:
                         Message.visibility == "group",
                         Message.sender_agent_id == agent_id,
                         Message.recipient_agent_id == agent_id,
-                        Message.recipient_group_node_id == group_node_id,
+                        Message.recipient_membership_id == group_membership_id,
                     ),
                 ).order_by(Message.created_at.desc(), Message.id.desc()).limit(hard_limit)
             ))[::-1]

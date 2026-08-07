@@ -18,8 +18,8 @@ class HistorySummary(Base, TimestampMixin, VersionMixin):
         CheckConstraint("scope_type IN ('chat','group_agent')", name="ck_history_summary_scope"),
         CheckConstraint("status IN ('pending','ready','failed','superseded')", name="ck_history_summary_status"),
         CheckConstraint(
-            "(scope_type = 'chat' AND group_session_id IS NULL AND group_node_id IS NULL) OR "
-            "(scope_type = 'group_agent' AND group_session_id IS NOT NULL AND group_node_id IS NOT NULL)",
+            "(scope_type = 'chat' AND group_session_id IS NULL AND group_membership_id IS NULL) OR "
+            "(scope_type = 'group_agent' AND group_session_id IS NOT NULL AND group_membership_id IS NOT NULL)",
             name="ck_history_summary_scope_fields",
         ),
         UniqueConstraint(
@@ -33,13 +33,15 @@ class HistorySummary(Base, TimestampMixin, VersionMixin):
     session_id: Mapped[str] = mapped_column(String(36), ForeignKey("user_session.id"), nullable=False)
     scope_type: Mapped[str] = mapped_column(String(20), nullable=False)
     group_session_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("group_session.id"))
-    group_node_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("group_agent_node.id"))
+    group_membership_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("group_membership.id")
+    )
     scope_discriminator: Mapped[str] = mapped_column(
         String(191),
         Computed(
             case(
                 (column("scope_type") == literal("chat"), literal("chat")),
-                else_=literal("group_node:") + column("group_node_id"),
+                else_=literal("group_membership:") + column("group_membership_id"),
             ),
             persisted=True,
         ),

@@ -55,11 +55,11 @@ async def assemble_standard_context(
             "delegation_depth": len(runner.principal_snapshot.get("delegation_chain") or []),
         },
         "session": {"session_id": session.id, "origin_type": session.origin_type, "status": session.status},
-        "run": {"run_id": run.id, "mode": run.mode, "execution_kind": run.execution_kind},
+        "run": {"run_id": run.id, "mode": run.mode, "status": run.status},
         "work_item": {
             "work_item_id": work.id, "goal": work.goal, "status": work.status,
-            "plan_node_id": work.plan_node_id, "group_run_id": work.group_run_id,
-            "group_node_id": work.group_node_id,
+            "group_run_id": work.group_run_id,
+            "group_membership_id": work.group_membership_id,
         },
         "checkpoint": ({
             "checkpoint_id": checkpoint.id,

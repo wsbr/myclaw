@@ -16,7 +16,6 @@ from app.models.foundation import (
 )
 from app.models.runtime_v1 import Clarification, DurableRunner, Message, Run, WorkItem
 from app.schemas.runtime_v1 import ClarificationAnswerRequest
-from app.workers.runtime_worker_v1 import RuntimeWorker
 
 pytestmark = pytest.mark.unit
 
@@ -57,7 +56,7 @@ async def test_answer_clarification_resumes_same_work_item_and_replays():
             ),
             Run(
                 id=run_id, session_id=session_id, user_id="u1", mode="chat",
-                execution_kind="normal", lifecycle="waiting", wait_reason="clarification",
+                status="waiting_user", wait_reason="waiting_user",
                 entry_agent_id=agent_id, started_at=utcnow(),
             ),
             WorkItem(
@@ -104,7 +103,7 @@ async def test_answer_clarification_resumes_same_work_item_and_replays():
         assert await db.scalar(select(func.count()).select_from(Message)) == 2
     assert replay.version == first.version
     assert work.status == "queued" and work.execution_epoch == 2
-    assert run.lifecycle == "running" and run.wait_reason is None
+    assert run.status == "active" and run.wait_reason is None
     assert command.topic == "runtime.runner" and command.action == "execute"
 
     async with factory() as db:
@@ -116,17 +115,3 @@ async def test_answer_clarification_resumes_same_work_item_and_replays():
     assert error.value.status_code == 409
     assert error.value.detail["code"] == "action_already_resolved"
     await engine.dispose()
-
-
-def test_clarification_authority_by_mode():
-    run = Run(mode="chat", execution_kind="normal")
-    direct = DurableRunner(principal_snapshot={"delegation_chain": []}, input_snapshot={})
-    delegated = DurableRunner(
-        principal_snapshot={"delegation_chain": ["caller"]},
-        input_snapshot={"agent_invocation_id": "inv"},
-    )
-    assert RuntimeWorker._can_request_clarification(run, direct) is True
-    assert RuntimeWorker._can_request_clarification(run, direct, has_answered=True) is False
-    assert RuntimeWorker._can_request_clarification(run, delegated) is False
-    group = Run(mode="group", execution_kind="normal")
-    assert RuntimeWorker._can_request_clarification(group, delegated) is True

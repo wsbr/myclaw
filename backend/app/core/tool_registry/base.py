@@ -85,7 +85,7 @@ class RuntimeContext(BaseModel):
     tool_invocation_id: str | None = None
     group_session_id: str | None = None
     group_run_id: str | None = None
-    group_node_id: str | None = None
+    group_membership_id: str | None = None
 
     model_config = {"arbitrary_types_allowed": True}
 
