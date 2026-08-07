@@ -11,9 +11,11 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.core.model_hub.base import BaseLLM, LLMChunk, LLMResponse, TokenUsage, ToolCall
 from app.core.tool_registry.base import RuntimeContext, ToolResult
 from app.database import Base
-from app.models.foundation import UserSession
-from app.models.runtime_v1 import AgentTurn, Approval, ProviderAttempt, ToolInvocation
+from app.models.common import utcnow
+from app.models.foundation import ExecutionEvent, UserSession
+from app.models.runtime_v1 import AgentTurn, Approval, ProviderAttempt, Run, ToolInvocation
 from app.models.registry import ModelVersion
+from app.models.verification_v1 import RunProgressMark
 from app.runtime.action_dispatcher import ActionDispatcher
 from app.runtime.agent_loop_coordinator import AgentLoopCoordinator, AgentLoopError, LoopIdentity
 from app.runtime.context_assembler import ContextAssembler
@@ -284,6 +286,173 @@ async def test_transport_error_after_payload_is_not_retried():
 
 
 @pytest.mark.asyncio
+async def test_run_transport_retry_budget_bounds_zero_payload_replay():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    provider = ScriptedProvider([
+        RuntimeError("connection reset before payload"),
+        RuntimeError("connection reset before payload"),
+        [LLMChunk(type="text_delta", content="must not be reached"), _done("stop")],
+    ])
+    identity = LoopIdentity(
+        runner_id="runner-1", work_item_id="work-1", run_id="run-1",
+        agent_version_id="agent-version-1", model_version_id="model-version-1",
+        provider="scripted",
+    )
+    async with factory.begin() as db:
+        db.add(UserSession(
+            id="session-1", user_id="user-1", entry_agent_id="agent-1",
+            status="active", origin_type="web", next_event_sequence=1,
+        ))
+        db.add(Run(
+            id="run-1", session_id="session-1", user_id="user-1", mode="chat",
+            execution_kind="normal", lifecycle="running", status="active",
+            entry_agent_id="agent-1", started_at=utcnow(),
+            hard_budget_snapshot={
+                "max_agent_turns": 4, "max_provider_attempts": 4,
+                "max_transport_retries": 1, "max_tool_invocations": 4,
+                "max_agent_invocations": 4, "max_tokens": 100,
+                "max_active_seconds": 100, "no_progress_turns": 2,
+            },
+        ))
+        with pytest.raises(AgentLoopError, match="Provider call failed"):
+            await AgentLoopCoordinator(
+                ModelAdapter(provider, max_zero_payload_retries=5),
+                ActionDispatcher([]), reliability_enabled=True,
+            ).run(
+                context=_context(), tool_definitions=[],
+                capability_snapshot={"id": "cap-1", "effective_tool_keys": []},
+                runtime_context=_runtime_context(), model_parameters={}, db=db,
+                identity=identity,
+            )
+    async with factory() as db:
+        attempts = list(await db.scalars(select(ProviderAttempt).order_by(
+            ProviderAttempt.attempt_no,
+        )))
+        marks = list(await db.scalars(select(RunProgressMark)))
+        assert len(provider.requests) == 2
+        assert [item.status for item in attempts] == ["failed", "failed"]
+        assert len(marks) == 1 and marks[0].reason_code == "provider_error"
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_post_provider_token_overage_blocks_business_tool_dispatch():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    provider = ScriptedProvider([[
+        LLMChunk(type="tool_call_delta", tool_call=ToolCall(
+            id="over-budget-call", name="lookup", arguments={"key": "alpha"},
+        )),
+        _done("tool_calls", input_tokens=1, output_tokens=1),
+    ]])
+    executions = 0
+
+    async def execute(name, arguments, context, db):
+        nonlocal executions
+        executions += 1
+        return ToolResult(status="succeeded", summary="must not execute")
+
+    identity = LoopIdentity(
+        runner_id="runner-1", work_item_id="work-1", run_id="run-1",
+        agent_version_id="agent-version-1", model_version_id="model-version-1",
+        provider="scripted",
+    )
+    async with factory.begin() as db:
+        db.add(UserSession(
+            id="session-1", user_id="user-1", entry_agent_id="agent-1",
+            status="active", origin_type="web", next_event_sequence=1,
+        ))
+        db.add(Run(
+            id="run-1", session_id="session-1", user_id="user-1", mode="chat",
+            execution_kind="normal", lifecycle="running", status="active",
+            entry_agent_id="agent-1", started_at=utcnow(),
+            hard_budget_snapshot={
+                "max_agent_turns": 4, "max_provider_attempts": 4,
+                "max_transport_retries": 1, "max_tool_invocations": 4,
+                "max_agent_invocations": 4, "max_tokens": 1,
+                "max_active_seconds": 100, "no_progress_turns": 2,
+            },
+        ))
+        with pytest.raises(AgentLoopError, match="budget exhausted"):
+            await AgentLoopCoordinator(
+                ModelAdapter(provider),
+                ActionDispatcher([TOOL_DEFINITION], executor=execute),
+                reliability_enabled=True,
+            ).run(
+                context=_context(), tool_definitions=[TOOL_DEFINITION],
+                capability_snapshot={"id": "cap-1", "effective_tool_keys": ["lookup"]},
+                runtime_context=_runtime_context(), model_parameters={}, db=db,
+                identity=identity,
+            )
+    assert executions == 0
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_repeated_no_progress_turns_inject_persisted_runtime_diagnostic():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    provider = ScriptedProvider([
+        [LLMChunk(type="tool_call_delta", tool_call=ToolCall(
+            id="denied-1", name="lookup", arguments={"key": "alpha"},
+        )), _done("tool_calls")],
+        [LLMChunk(type="tool_call_delta", tool_call=ToolCall(
+            id="denied-2", name="lookup", arguments={"key": "alpha"},
+        )), _done("tool_calls")],
+        [LLMChunk(type="text_delta", content="Bounded factual stop."), _done("stop")],
+    ])
+    identity = LoopIdentity(
+        runner_id="runner-1", work_item_id="work-1", run_id="run-1",
+        agent_version_id="agent-version-1", model_version_id="model-version-1",
+        provider="scripted",
+    )
+    async with factory.begin() as db:
+        db.add(UserSession(
+            id="session-1", user_id="user-1", entry_agent_id="agent-1",
+            status="active", origin_type="web", next_event_sequence=1,
+        ))
+        db.add(Run(
+            id="run-1", session_id="session-1", user_id="user-1", mode="chat",
+            execution_kind="normal", lifecycle="running", status="active",
+            entry_agent_id="agent-1", started_at=utcnow(),
+            hard_budget_snapshot={
+                "max_agent_turns": 8, "max_provider_attempts": 8,
+                "max_transport_retries": 1, "max_tool_invocations": 8,
+                "max_agent_invocations": 4, "max_tokens": 100,
+                "max_active_seconds": 100, "no_progress_turns": 2,
+            },
+        ))
+        result = await AgentLoopCoordinator(
+            ModelAdapter(provider), ActionDispatcher([TOOL_DEFINITION]),
+            reliability_enabled=True,
+        ).run(
+            context=_context(), tool_definitions=[TOOL_DEFINITION],
+            capability_snapshot={"id": "cap-1", "effective_tool_keys": []},
+            runtime_context=_runtime_context(), model_parameters={}, db=db,
+            identity=identity,
+        )
+        assert result.final_message == "Bounded factual stop."
+    async with factory() as db:
+        marks = list(await db.scalars(select(RunProgressMark).order_by(
+            RunProgressMark.created_at, RunProgressMark.id,
+        )))
+        assert [item.consecutive_no_progress for item in marks] == [1, 2, 0]
+        assert any(
+            item.get("role") == "system"
+            and "recent Turns produced no new durable fact" in item.get("content", "")
+            for item in provider.requests[2]["messages"]
+        )
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_confirmation_policy_creates_durable_invocation_and_approval():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
@@ -311,6 +480,64 @@ async def test_confirmation_policy_creates_durable_invocation_and_approval():
         assert approval.status == "pending"
         assert approval.target_account_id == "account-1"
         assert approval.subject_hash == approval.request_hash
+        replay = await ActionDispatcher([definition]).dispatch(
+            ToolCallItem(
+                index=0, call_id="approval-call", name="lookup",
+                arguments={"key": "alpha"},
+            ),
+            capability_snapshot={"id": "cap-1", "effective_tool_keys": ["lookup"]},
+            runtime_context=_runtime_context(), db=db, run_id="run-1",
+            work_item_id="work-1", source_turn_id="turn-1",
+        )
+        assert replay.invocation_id == invocation.id
+        assert replay.durable_wait is True
+        conflict = await ActionDispatcher([definition]).dispatch(
+            ToolCallItem(
+                index=0, call_id="approval-call", name="lookup",
+                arguments={"key": "beta"},
+            ),
+            capability_snapshot={"id": "cap-1", "effective_tool_keys": ["lookup"]},
+            runtime_context=_runtime_context(), db=db, run_id="run-1",
+            work_item_id="work-1", source_turn_id="turn-1",
+        )
+        assert conflict.result.error.code == "idempotency_conflict"
+        assert await db.scalar(select(func.count()).select_from(ToolInvocation)) == 1
+        assert await db.scalar(select(func.count()).select_from(Approval)) == 1
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_plan_permission_rejection_is_visible_without_creating_tool_fact():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    definition = {**TOOL_DEFINITION, "side_effect": "idempotent"}
+    async with factory.begin() as db:
+        db.add(UserSession(
+            id="session-1", user_id="user-1", entry_agent_id="agent-1",
+            status="active", origin_type="web", next_event_sequence=1,
+        ))
+        denied = await ActionDispatcher([definition]).dispatch(
+            ToolCallItem(
+                index=0, call_id="denied-write", name="lookup",
+                arguments={"key": "alpha"},
+            ),
+            capability_snapshot={"id": "cap-1", "effective_tool_keys": ["lookup"]},
+            runtime_context=_runtime_context().model_copy(update={
+                "permission_mode": "plan_readonly",
+            }),
+            db=db, run_id="run-1", work_item_id="work-1",
+            source_turn_id="turn-1",
+        )
+        assert denied.result.error.code == "permission_mode_denied"
+        assert await db.scalar(select(func.count()).select_from(ToolInvocation)) == 0
+        event = await db.scalar(select(ExecutionEvent).where(
+            ExecutionEvent.event_type == "tool_invocation.rejected",
+        ))
+        assert event.visibility == "user"
+        assert event.payload["error_code"] == "permission_mode_denied"
+        assert event.payload["arguments_hash"]
     await engine.dispose()
 
 

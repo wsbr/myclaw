@@ -5,9 +5,11 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.config import settings
 from app.database import Base
 from app.models.common import utcnow, uuid7
+from app.core.tool_registry.base import ToolResult
 from app.models.foundation import OutboxCommand, UserSession
 from app.models.registry import PlatformTool
 from app.models.runtime_v1 import DurableRunner, Run, ToolAttempt, ToolInvocation, WorkItem, Workspace
+from app.models.verification_v1 import LateResultObservation
 from app.workers.sandbox_worker import SandboxWorker
 
 pytestmark = pytest.mark.unit
@@ -94,4 +96,28 @@ async def test_sandbox_worker_executes_attempt_and_resumes_work(tmp_path, monkey
         assert work.status == "queued"
         assert replacement.status == "queued"
         assert runner_command.status == "pending"
+
+    # A duplicated/late delivery is diagnostic only. It cannot overwrite the
+    # settled invocation or revive a Run that became terminal meanwhile.
+    async with factory.begin() as db:
+        run = await db.get(Run, run_id)
+        run.status = "cancelled"
+        run.lifecycle = "cancelled"
+        run.wait_reason = None
+        run.finished_at = utcnow()
+        run.completed_at = utcnow()
+        terminal_version = run.version = run.version + 1
+    await worker.settle(claim, ToolResult(
+        status="succeeded", summary="late duplicate",
+        data={"exit_code": 0, "stdout": "late\n", "stderr": ""},
+    ))
+    async with factory() as db:
+        invocation = await db.get(ToolInvocation, invocation_id)
+        run = await db.get(Run, run_id)
+        observations = list(await db.scalars(select(LateResultObservation).where(
+            LateResultObservation.source_id == claim.attempt_id,
+        )))
+        assert invocation.status == "succeeded"
+        assert run.status == "cancelled" and run.version == terminal_version
+        assert len(observations) == 1
     await engine.dispose()

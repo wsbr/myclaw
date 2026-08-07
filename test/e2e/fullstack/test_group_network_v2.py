@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import time
 import uuid
@@ -11,6 +12,7 @@ import pymysql
 import pytest
 
 from conftest import PhaseOneAPI
+from app.services.verification_service import CAPACITY_ARTIFACT_NAMES, CAPACITY_CASES
 
 
 pytestmark = pytest.mark.fullstack
@@ -48,6 +50,14 @@ def _database_evidence(group_id: str, run_id: str) -> dict:
                 ),
                 "tool_invocations": (
                     "SELECT tool_key,status,result_data FROM tool_invocation WHERE run_id=%s ORDER BY created_at",
+                    run_id,
+                ),
+                "tool_attempts": (
+                    "SELECT ti.tool_key,ta.status,ta.request_snapshot,ta.response_snapshot,"
+                    "ta.request_hash,ta.outcome_confirmed,ta.execution_epoch,ta.fencing_token,"
+                    "ta.started_at,ta.ended_at FROM tool_attempt ta "
+                    "JOIN tool_invocation ti ON ti.id=ta.tool_invocation_id "
+                    "WHERE ti.run_id=%s ORDER BY ta.created_at,ta.id",
                     run_id,
                 ),
                 "agent_invocations": (
@@ -112,6 +122,18 @@ def _wait_group_run(api: PhaseOneAPI, session_id: str, run_id: str, timeout: flo
 
 def _json(value):
     return json.loads(value) if isinstance(value, str) else value
+
+
+def _wait_verification(api: PhaseOneAPI, run_id: str, timeout: float = 60) -> dict:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        items = api.request(
+            "GET", f"/api/v1/runs/{run_id}/verification-results",
+        ).json()["items"]
+        if items:
+            return items[0]
+        time.sleep(0.2)
+    raise AssertionError("capacity_risk.v1 VerificationResult was not produced")
 
 
 @pytest.mark.timeout(900)
@@ -215,17 +237,66 @@ def test_agent_network_group_vertical_uat(
     assert _json(rejected_invites[0]["payload"])["reason_code"] == "membership_policy_fixed_for_run"
     tool_rows = evidence["tool_invocations"]
     executions = [item for item in tool_rows if item["tool_key"] == "execute"]
-    assert len(executions) == 2 and all(item["status"] == "succeeded" for item in executions)
-    assert all("CAPACITY-SELF-TESTS-PASSED" in json.dumps(_json(item["result_data"])) for item in executions)
+    assert len(executions) == 9 and all(item["status"] == "succeeded" for item in executions)
+    attempts = [item for item in evidence["tool_attempts"] if item["tool_key"] == "execute"]
+    assert len(attempts) == 9
+    for attempt, case in zip(attempts, CAPACITY_CASES, strict=True):
+        request = _json(attempt["request_snapshot"])
+        response = _json(attempt["response_snapshot"])["data"]
+        assert request["argv"] == list(case.argv)
+        assert attempt["request_hash"] == hashlib.sha256(json.dumps(
+            request, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode()).hexdigest()
+        assert response["exit_code"] == case.exit_code
+        assert response["stdout"] == case.stdout
+        assert response["stderr"] == ""
+        assert bool(attempt["outcome_confirmed"]) is True
+        assert attempt["execution_epoch"] >= 1 and attempt["fencing_token"] >= 1
+        assert attempt["started_at"] and attempt["ended_at"] >= attempt["started_at"]
 
     artifacts = api.request(
         "GET", f"/api/v1/sessions/{session['id']}/artifacts",
         params={"status": "published", "limit": 100},
     ).json()["items"]
-    artifact = next(item for item in artifacts if item["name"] == "capacity_risk_calculator.py")
-    downloaded = api.request("GET", f"/api/v1/artifacts/{artifact['id']}/download").text
-    assert "def capacity_risk" in downloaded
-    assert "class CapacityRiskTests" in downloaded
+    capacity_artifacts = [item for item in artifacts if item["name"] in CAPACITY_ARTIFACT_NAMES]
+    assert {item["name"] for item in capacity_artifacts} == set(CAPACITY_ARTIFACT_NAMES)
+    assert len(capacity_artifacts) == 4
+    downloaded = {}
+    for artifact in capacity_artifacts:
+        content = api.request(
+            "GET", f"/api/v1/artifacts/{artifact['id']}/download",
+        ).content
+        assert len(content) == artifact["size_bytes"]
+        assert hashlib.sha256(content).hexdigest() == artifact["checksum"]
+        downloaded[artifact["name"]] = content.decode()
+    assert "utilization_percent" in downloaded["capacity_risk.py"]
+    assert "T09" in downloaded["requirements.md"]
+    assert "9/9" in downloaded["test_report.md"]
+    assert "capacity_risk.v1" in downloaded["acceptance_report.md"]
+
+    verification = _wait_verification(api, capacity["run"]["id"])
+    assert verification["rule_key"] == "capacity_risk.v1"
+    assert verification["status"] == "passed", verification
+    assert len(verification["source_refs"]) == 13
+    assert len([item for item in verification["observed_facts"] if "case_id" in item]) == 9
+    assert len([item for item in verification["observed_facts"] if "artifact_id" in item]) == 4
+    runners = api.request(
+        "GET", f"/api/v1/runs/{capacity['run']['id']}/runners",
+    ).json()["items"]
+    traces = [
+        api.request("GET", f"/api/v1/runners/{runner['id']}/trace").json()
+        for runner in runners
+    ]
+    assert {item["tool_attempt_id"] for item in verification["observed_facts"] if "case_id" in item} <= {
+        attempt_id
+        for trace in traces
+        for attempt_id in trace["ledger_refs"]["tool_attempt_ids"]
+    }
+    assert any(
+        verification["id"] in trace["ledger_refs"]["verification_result_ids"]
+        for trace in traces
+    )
+    record_testsuite_property("capacity_risk_verification", "9/9 + 4/4 passed")
 
     # Search the same durable Group history on two independent GroupRuns.
     history_runs = []

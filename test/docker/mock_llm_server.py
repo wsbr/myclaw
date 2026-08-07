@@ -285,49 +285,77 @@ def _current_group_member(snapshot: dict) -> dict:
     return next((item for item in snapshot.get("members") or [] if item.get("is_current")), {})
 
 
-CAPACITY_PROGRAM = '''"""Capacity risk calculator with executable boundary tests."""
+CAPACITY_PROGRAM = '''"""Deterministic capacity risk calculator."""
 from __future__ import annotations
 
 import argparse
-import unittest
+import json
 
 
-def capacity_risk(capacity: float, demand: float) -> dict:
-    if capacity <= 0:
-        raise ValueError("capacity must be positive")
-    if demand < 0:
-        raise ValueError("demand cannot be negative")
-    utilization = demand / capacity
-    level = "critical" if utilization >= 1 else "high" if utilization >= 0.85 else "normal"
-    return {"utilization": round(utilization, 4), "level": level, "headroom": capacity - demand}
-
-
-class CapacityRiskTests(unittest.TestCase):
-    def test_normal_boundary(self):
-        self.assertEqual(capacity_risk(100, 84)["level"], "normal")
-
-    def test_high_boundary(self):
-        self.assertEqual(capacity_risk(100, 85)["level"], "high")
-
-    def test_critical_boundary(self):
-        self.assertEqual(capacity_risk(100, 100)["level"], "critical")
-
-    def test_invalid_capacity(self):
-        with self.assertRaises(ValueError):
-            capacity_risk(0, 1)
+def emit(value, code=0):
+    print(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
+    raise SystemExit(code)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--self-test", action="store_true")
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--capacity", type=float)
+    parser.add_argument("--committed", type=float)
     args = parser.parse_args()
-    if args.self_test:
-        suite = unittest.defaultTestLoader.loadTestsFromTestCase(CapacityRiskTests)
-        result = unittest.TextTestRunner(verbosity=2).run(suite)
-        if not result.wasSuccessful():
-            raise SystemExit(1)
-        print("CAPACITY-SELF-TESTS-PASSED")
+    if args.committed is None:
+        emit({"error": {"code": "missing_committed", "message": "--committed is required"}}, 2)
+    if args.capacity is None or args.capacity <= 0:
+        emit({"error": {"code": "invalid_capacity", "message": "total_capacity_hours must be greater than 0"}}, 2)
+    if args.committed < 0:
+        emit({"error": {"code": "invalid_committed", "message": "committed_hours must be greater than or equal to 0"}}, 2)
+    capacity = int(args.capacity) if args.capacity.is_integer() else args.capacity
+    committed = int(args.committed) if args.committed.is_integer() else args.committed
+    utilization = round(committed / capacity * 100, 2)
+    risk = "low" if utilization < 75 else "medium" if utilization <= 90 else "high"
+    emit({
+        "committed_hours": committed,
+        "over_capacity_hours": max(committed - capacity, 0),
+        "risk": risk,
+        "total_capacity_hours": capacity,
+        "utilization_percent": utilization,
+    })
 '''
+
+CAPACITY_REQUIREMENTS = '''# Capacity risk requirements
+
+utilization_percent = committed_hours / total_capacity_hours * 100
+low: utilization < 75
+medium: 75 <= utilization <= 90
+high: utilization > 90
+over_capacity_hours = max(committed_hours - total_capacity_hours, 0)
+total_capacity_hours > 0
+committed_hours >= 0
+Cases: T01 T02 T03 T04 T05 T06 T07 T08 T09
+'''
+
+CAPACITY_TEST_REPORT = '''# Test report
+
+Result: 9/9. For T01 T02 T03 T04 T05 T06 T07 T08 T09 the exact argv,
+stdout, stderr, and exit code are recorded by the nine authoritative ToolAttempt rows.
+'''
+
+CAPACITY_ACCEPTANCE_REPORT = '''# Acceptance report
+
+capacity_risk.v1: accepted, 9/9.
+Artifacts: requirements.md, capacity_risk.py, test_report.md, acceptance_report.md.
+'''
+
+CAPACITY_CASE_CALLS = (
+    (["python3", "capacity_risk.py", "--capacity", "120", "--committed", "138"], 'utilization_percent\\\":115.0'),
+    (["python3", "capacity_risk.py", "--capacity", "100", "--committed", "74"], 'utilization_percent\\\":74.0'),
+    (["python3", "capacity_risk.py", "--capacity", "100", "--committed", "75"], 'utilization_percent\\\":75.0'),
+    (["python3", "capacity_risk.py", "--capacity", "100", "--committed", "90"], 'utilization_percent\\\":90.0'),
+    (["python3", "capacity_risk.py", "--capacity", "100", "--committed", "91"], 'utilization_percent\\\":91.0'),
+    (["python3", "capacity_risk.py", "--capacity", "100", "--committed", "0"], 'committed_hours\\\":0'),
+    (["python3", "capacity_risk.py", "--capacity", "0", "--committed", "10"], "invalid_capacity"),
+    (["python3", "capacity_risk.py", "--capacity", "100", "--committed", "-1"], "invalid_committed"),
+    (["python3", "capacity_risk.py", "--capacity", "100"], "missing_committed"),
+)
 
 
 def _capacity_group_tool(
@@ -369,9 +397,10 @@ def _capacity_group_tool(
         ):
             return "send_group_message", {
                 "content": (
-                    "CAPACITY-RISK-NETWORK-V2 CAPACITY-IMPLEMENT: implement one real Python "
-                    "capacity risk calculator containing boundary tests, execute the self-tests, "
-                    "publish the program as a Group Artifact, then request Test review."
+                    "CAPACITY-RISK-NETWORK-V2 CAPACITY-IMPLEMENT: write requirements.md and "
+                    "capacity_risk.py, execute the exact T01-T09 contract, then write "
+                    "test_report.md and acceptance_report.md, publish all four Group Artifacts, "
+                    "and request Test review."
                 ),
                 "visibility": "direct",
                 "recipient_agent_id": developer_id,
@@ -416,37 +445,68 @@ def _capacity_group_tool(
             return None
         if '"message_id"' in tool_results:
             return None
-        if "send_group_message" in names and test_id and "published" in tool_results:
+        compact_results = tool_results.replace(" ", "")
+        if (
+            "send_group_message" in names and test_id
+            and '"name":"acceptance_report.md"' in compact_results
+        ):
             return "send_group_message", {
                 "content": (
-                    "CAPACITY-RISK-NETWORK-V2 TEST-REQUEST: independently read and execute "
-                    "capacity_risk_calculator.py --self-test, then send findings back for rework/review."
+                    "CAPACITY-RISK-NETWORK-V2 TEST-REQUEST: independently read test_report.md; "
+                    "the Runtime will verify nine ToolAttempt records and four Artifact checksums."
                 ),
                 "visibility": "direct",
                 "recipient_agent_id": test_id,
             }
-        if (
-            "publish_artifact" in names
-            and '"exit_code":0' in tool_results
-            and "CAPACITY-SELF-TESTS-PASSED" in tool_results
-        ):
-            return "publish_artifact", {
-                "path": "capacity_risk_calculator.py",
-                "name": "capacity_risk_calculator.py",
-                "mime_type": "text/x-python",
-                "publish_to_group": True,
-            }
-        if "execute" in names and "capacity_risk_calculator.py" in tool_results:
-            return "execute", {
-                "argv": ["python", "capacity_risk_calculator.py", "--self-test"],
-                "timeout_seconds": 20,
-            }
-        if "write_file" in names:
+        if not tool_results and "write_file" in names:
             return "write_file", {
-                "path": "capacity_risk_calculator.py",
-                "content": CAPACITY_PROGRAM,
+                "path": "requirements.md", "content": CAPACITY_REQUIREMENTS,
                 "mode": "create",
             }
+        if '"path":"requirements.md"' in compact_results and "write_file" in names:
+            return "write_file", {
+                "path": "capacity_risk.py", "content": CAPACITY_PROGRAM,
+                "mode": "create",
+            }
+        if '"path":"capacity_risk.py"' in compact_results and "execute" in names:
+            return "execute", {
+                "argv": CAPACITY_CASE_CALLS[0][0], "cwd": ".", "timeout_seconds": 20,
+            }
+        for index, (_argv, marker) in enumerate(CAPACITY_CASE_CALLS):
+            if marker not in tool_results:
+                continue
+            if index + 1 < len(CAPACITY_CASE_CALLS) and "execute" in names:
+                return "execute", {
+                    "argv": CAPACITY_CASE_CALLS[index + 1][0],
+                    "cwd": ".", "timeout_seconds": 20,
+                }
+            if "write_file" in names:
+                return "write_file", {
+                    "path": "test_report.md", "content": CAPACITY_TEST_REPORT,
+                    "mode": "create",
+                }
+        if '"path":"test_report.md"' in compact_results and "write_file" in names:
+            return "write_file", {
+                "path": "acceptance_report.md", "content": CAPACITY_ACCEPTANCE_REPORT,
+                "mode": "create",
+            }
+        publish_transition = (
+            ('"path":"acceptance_report.md"', "requirements.md"),
+            ('"name":"requirements.md"', "capacity_risk.py"),
+            ('"name":"capacity_risk.py"', "test_report.md"),
+            ('"name":"test_report.md"', "acceptance_report.md"),
+        )
+        if "publish_artifact" in names:
+            for prior_marker, artifact_name in publish_transition:
+                if prior_marker in compact_results:
+                    return "publish_artifact", {
+                        "path": artifact_name, "name": artifact_name,
+                        "mime_type": (
+                            "text/x-python" if artifact_name.endswith(".py")
+                            else "text/markdown"
+                        ),
+                        "publish_to_group": True,
+                    }
         return None
 
     if current_id == test_id and "TEST-REQUEST" in current_request:
@@ -454,24 +514,18 @@ def _capacity_group_tool(
             return None
         if (
             "send_group_message" in names and developer_id
-            and '"exit_code":0' in tool_results
-            and "CAPACITY-SELF-TESTS-PASSED" in tool_results
+            and "9/9" in tool_results
         ):
             return "send_group_message", {
                 "content": (
-                    "CAPACITY-RISK-NETWORK-V2 TEST-VERIFIED: independent boundary test rerun passed; "
-                    "normal/high/critical thresholds and invalid capacity behavior are verified."
+                    "CAPACITY-RISK-NETWORK-V2 TEST-VERIFIED: test_report.md was read; "
+                    "deterministic Runtime Verification remains the acceptance authority."
                 ),
                 "visibility": "direct",
                 "recipient_agent_id": developer_id,
             }
-        if "execute" in names and "CapacityRiskTests" in tool_results:
-            return "execute", {
-                "argv": ["python", "capacity_risk_calculator.py", "--self-test"],
-                "timeout_seconds": 20,
-            }
         if "read_file" in names:
-            return "read_file", {"path": "capacity_risk_calculator.py", "offset": 0, "limit": 65536}
+            return "read_file", {"path": "test_report.md", "offset": 0, "limit": 65536}
     return None
 
 
@@ -779,8 +833,8 @@ def _build_content(messages: list[ChatMessage]) -> str:
         if "idempotent Reporter summary Turn" in all_text:
             return (
                 "Capacity risk calculator delivered: Product acceptance completed, Development "
-                "published capacity_risk_calculator.py, and Test independently reran four boundary "
-                "tests successfully. The fixed_for_run external invitation was rejected and audited."
+                "published four immutable Artifacts after nine exact executions, and Test reviewed "
+                "the report. The fixed_for_run external invitation was rejected and audited."
             )
         if "DELIVERY-READY" in current:
             return "Product accepted the tested capacity risk calculator and its published Artifact."

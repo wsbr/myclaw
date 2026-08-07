@@ -40,6 +40,14 @@ def test_runtime_heartbeat_must_be_shorter_than_runner_lease():
         _production_settings(runtime_runner_lease_seconds=10, runtime_runner_heartbeat_seconds=10)
 
 
+def test_sandbox_heartbeat_must_be_shorter_than_attempt_lease():
+    with pytest.raises(ValidationError, match="SANDBOX_ATTEMPT_HEARTBEAT_SECONDS"):
+        _production_settings(
+            sandbox_attempt_lease_seconds=10,
+            sandbox_attempt_heartbeat_seconds=10,
+        )
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -52,6 +60,10 @@ def test_runtime_heartbeat_must_be_shorter_than_runner_lease():
         ("sandbox_worker_poll_seconds", 0),
         ("sandbox_outbox_claim_lease_seconds", 0),
         ("sandbox_attempt_stale_seconds", 0),
+        ("sandbox_attempt_lease_seconds", 0),
+        ("sandbox_attempt_heartbeat_seconds", 0),
+        ("sandbox_tool_max_attempts", 0),
+        ("outbox_max_delivery_attempts", 0),
         ("rate_limit_requests", 0),
         ("rate_limit_unauthenticated_requests", 0),
         ("rate_limit_window_seconds", 0),

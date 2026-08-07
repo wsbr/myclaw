@@ -14,6 +14,9 @@ from app.models.foundation import (
     ExecutionEvent, ExecutionEventRecipient, IdempotencyRecord, OutboxCommand, PlatformAccount,
     UserIdentity, UserSession,
 )
+from app.models.group_v1 import (
+    GroupMembership, GroupRun, GroupRunMember, GroupSession, GroupSummaryRequest,
+)
 from app.models.observability_v1 import ObservabilitySpan, ObservabilitySpanLink, RunnerTrace
 from app.models.registry import (
     PlatformTool, PolicyDefinition, RegisteredModel, RegisteredSkill, SkillVersion,
@@ -45,6 +48,8 @@ async def create_runtime_world(*, content: str = "hello") -> RuntimeWorld:
         UserSession.__table__, ExecutionEvent.__table__, ExecutionEventRecipient.__table__,
         IdempotencyRecord.__table__,
         Message.__table__, Run.__table__, WorkItem.__table__, DurableRunner.__table__,
+        GroupSession.__table__, GroupMembership.__table__, GroupRun.__table__,
+        GroupRunMember.__table__, GroupSummaryRequest.__table__,
         RunnerCheckpoint.__table__, ToolInvocation.__table__, ToolAttempt.__table__,
         ToolConfirmation.__table__, AgentInvocation.__table__, Clarification.__table__,
         Approval.__table__, WorkingPlan.__table__, PlanUpdate.__table__,

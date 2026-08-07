@@ -589,6 +589,13 @@ def test_phase_one_acceptance(
         link["link_type"] == "agent_invocation" and link["linked_span_id"]
         for trace in peer_traces for link in trace["links"]
     )
+    assert all(
+        trace["ledger_refs"]["runner_id"] == runner["id"]
+        and trace["ledger_refs"]["run_id"] == peer_run["run"]["id"]
+        and trace["ledger_refs"]["agent_turn_ids"]
+        and trace["ledger_refs"]["provider_attempt_ids"]
+        for trace, runner in zip(peer_traces, peer_runners, strict=True)
+    )
     assert any(
         "invoke_agent" in trace["harness"]["completion_contract"]["required_tool_keys"]
         and "invoke_agent" in trace["harness"]["completion_contract"]["satisfied_tool_keys"]
@@ -705,6 +712,33 @@ def test_phase_one_acceptance(
         time.sleep(1)
     else:
         raise AssertionError("OTel Collector did not receive Runtime generation and AgentInvocation link spans")
+
+    # Restart the Collector itself while the Runtime workers stay alive.  A
+    # fresh business Run must export a new model span after the receiver is
+    # back; matching the unique Run id prevents an earlier span from making
+    # this recovery assertion pass.
+    _restart("otel-collector-test")
+    collector_restart_chat = _chat(
+        api, chat_session["id"],
+        "Collector 重启验收：请只用一句话确认已收到，不要执行工具或发起协作。",
+    )
+    collector_restart_result = api.wait_run(
+        collector_restart_chat["run"]["id"], timeout=90,
+    )
+    assert collector_restart_result["outcome"] == "succeeded"
+    deadline = time.monotonic() + 20
+    while time.monotonic() < deadline:
+        otel_logs = _collector_logs()
+        if (
+            "model_generation" in otel_logs
+            and collector_restart_chat["run"]["id"] in otel_logs
+        ):
+            break
+        time.sleep(1)
+    else:
+        raise AssertionError(
+            "OTel Collector did not resume export for the post-restart Run"
+        )
     record_property("scene_7_worker_recovery_and_otel", "passed")
 
 

@@ -10,6 +10,9 @@ from sqlalchemy.exc import OperationalError
 
 from app.models.common import utcnow, uuid7
 from app.models.foundation import OutboxCommand, UserSession
+from app.models.group_v1 import (
+    GroupMembership, GroupRun, GroupRunMember, GroupSession, GroupSummaryRequest,
+)
 from app.models.runtime_v1 import (
     AgentInvocation, Approval, DurableRunner, PlanUpdate, Run, RunnerCheckpoint,
     WorkItem, WorkingPlan,
@@ -71,6 +74,91 @@ async def test_claim_is_exclusive_and_runner_acquire_acknowledges_outbox(monkeyp
         assert runner.status == "running"
         assert runner.lease_token == fence.lease_token
         assert runner.fencing_token == fence.execution_epoch
+    await world.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_runner_outbox_delivery_budget_fails_once_without_execution(monkeypatch):
+    world = await create_runtime_world()
+    await _patch_factory(monkeypatch, world.factory)
+    from app.config import settings
+
+    async with world.factory.begin() as db:
+        command = await db.scalar(select(OutboxCommand).where(
+            OutboxCommand.aggregate_id == world.runner_id,
+        ))
+        command.attempt_count = settings.outbox_max_delivery_attempts
+
+    worker = RuntimeWorker("delivery-budget-worker")
+    assert await worker.claim_one() is None
+    assert await worker.claim_one() is None
+    async with world.factory() as db:
+        command = await db.scalar(select(OutboxCommand).where(
+            OutboxCommand.aggregate_id == world.runner_id,
+        ))
+        runner = await db.get(DurableRunner, world.runner_id)
+        work = await db.get(WorkItem, world.work_id)
+        run = await db.get(Run, world.run_id)
+        assert command.status == "dead"
+        assert command.last_error == "outbox_delivery_budget_exhausted"
+        assert runner.status == "failed" and work.status == "failed"
+        assert run.status == "failed"
+        assert run.terminal_reason == "outbox_delivery_budget_exhausted"
+    await world.engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_reporter_delivery_budget_projects_durable_replacement_action(monkeypatch):
+    world = await create_runtime_world()
+    await _patch_factory(monkeypatch, world.factory)
+    from app.config import settings
+
+    group_session_id, group_run_id, membership_id = uuid7(), uuid7(), uuid7()
+    async with world.factory.begin() as db:
+        command = await db.scalar(select(OutboxCommand).where(
+            OutboxCommand.aggregate_id == world.runner_id,
+        ))
+        run = await db.get(Run, world.run_id)
+        work = await db.get(WorkItem, world.work_id)
+        runner = await db.get(DurableRunner, world.runner_id)
+        command.attempt_count = settings.outbox_max_delivery_attempts
+        db.add(GroupSession(
+            id=group_session_id, parent_session_id=run.session_id, user_id=run.user_id,
+            entry_agent_id=runner.agent_id, initiator_agent_id=runner.agent_id,
+            status="open", goal="test", membership_policy="fixed_for_run",
+        ))
+        db.add(GroupMembership(
+            id=membership_id, group_session_id=group_session_id,
+            agent_id=runner.agent_id, status="joined", joined_at=utcnow(),
+        ))
+        db.add(GroupRun(
+            id=group_run_id, run_id=run.id, group_session_id=group_session_id,
+            goal="test", reporter_agent_id=runner.agent_id, summary_epoch=1,
+        ))
+        await db.flush()
+        db.add(GroupRunMember(
+            group_run_id=group_run_id, agent_id=runner.agent_id,
+            membership_id=membership_id, agent_version_id=runner.agent_version_id,
+            participation_status="available",
+        ))
+        db.add(GroupSummaryRequest(
+            group_run_id=group_run_id, summary_epoch=1,
+            reporter_work_item_id=work.id, status="queued",
+        ))
+        work.group_run_id = group_run_id
+        work.purpose = "group_summary"
+        runner.input_snapshot = {"summary_epoch": 1}
+
+    assert await RuntimeWorker("reporter-delivery-budget-worker").claim_one() is None
+    async with world.factory() as db:
+        run = await db.get(Run, world.run_id)
+        member = await db.get(GroupRunMember, (group_run_id, runner.agent_id))
+        request = await db.scalar(select(GroupSummaryRequest).where(
+            GroupSummaryRequest.group_run_id == group_run_id,
+        ))
+        assert run.status == "waiting_user" and run.wait_reason == "waiting_user"
+        assert member.participation_status == "unavailable" and member.version == 2
+        assert request.status == "failed" and request.version == 2
     await world.engine.dispose()
 
 
