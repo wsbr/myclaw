@@ -29,6 +29,7 @@ from app.persistence.reliable_writes import ExecutionEventWriter, OutboxWriter
 from app.services.runtime_resume_service import (
     has_pending_actions, queue_work_item_resume, tool_continuation,
 )
+from app.services.observability_service import record_runner_fact_spans
 from app.services.artifact_service import reconcile_one_publishing_artifact
 from app.services.workspace_lock_service import (
     WorkspaceLockConflict, WorkspaceLockGrant, acquire_workspace_lock,
@@ -286,6 +287,9 @@ class SandboxWorker:
         finally:
             stop.set()
             await heartbeat
+            await record_runner_fact_spans(
+                claim.source_runner_id, session_factory=AsyncSessionLocal,
+            )
 
     async def _mark_attempt_started(
         self, claim: SandboxClaim, *, side_effect_started: bool,
@@ -556,6 +560,9 @@ class SandboxWorker:
             status="failed", error="Sandbox worker stopped after process execution may have started",
             error_code="sandbox_attempt_abandoned", error_category="outcome_unknown",
         ))
+        await record_runner_fact_spans(
+            claim.source_runner_id, session_factory=AsyncSessionLocal,
+        )
         return True
 
     async def _resume_work(self, db, invocation: ToolInvocation, work: WorkItem, run: Run, cause_id: str) -> None:

@@ -270,6 +270,7 @@ def main() -> int:
         "trace_counts": {
             "runner_traces": 0,
             "spans": 0,
+            "span_links": 0,
         },
         "trace_index": {"runners": [], "spans": [], "links": []},
         "openapi_sha256": hashlib.sha256(openapi.read_bytes()).hexdigest(),
@@ -293,6 +294,8 @@ def main() -> int:
                 "SELECT COUNT(*) FROM runner_trace"))
             payload["trace_counts"]["spans"] = int(scalar(cursor,
                 "SELECT COUNT(*) FROM observability_span"))
+            payload["trace_counts"]["span_links"] = int(scalar(cursor,
+                "SELECT COUNT(*) FROM observability_span_link"))
             payload["trace_index"]["runners"] = rows(cursor, """
                 SELECT id,trace_id,root_span_id,runner_id,run_id,work_item_id,
                        agent_id,status,sampled,error_code,started_at,ended_at
@@ -330,6 +333,30 @@ def main() -> int:
         raise RuntimeError("real Provider returned no token usage")
     if not payload["trace_counts"]["runner_traces"] or not payload["trace_counts"]["spans"]:
         raise RuntimeError("Runner trace evidence is missing")
+    required_span_names = {
+        "runner", "runner_execution", "context.assemble", "agent.turn",
+        "provider.attempt", "model_generation", "tool.invocation", "tool.attempt",
+        "agent.invocation", "approval.wait", "plan.update", "group.message",
+        "verification",
+    }
+    observed_span_names = {
+        item["name"] for item in payload["trace_index"]["spans"]
+    }
+    missing_span_names = sorted(required_span_names - observed_span_names)
+    if missing_span_names:
+        raise RuntimeError(
+            f"required Runner span coverage is missing: {missing_span_names}"
+        )
+    if payload["trace_counts"]["span_links"] < 1:
+        raise RuntimeError("cross-Agent Runner span-link evidence is missing")
+    unfinished_traces = [
+        item["runner_id"] for item in payload["trace_index"]["runners"]
+        if item["status"] == "running" or item["ended_at"] is None
+    ]
+    if unfinished_traces:
+        raise RuntimeError(
+            f"terminal UAT left unfinished Runner traces: {unfinished_traces}"
+        )
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2, default=str) + "\n",

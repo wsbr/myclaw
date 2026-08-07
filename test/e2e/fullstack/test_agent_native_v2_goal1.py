@@ -72,6 +72,24 @@ def _mysql_rows(run_id: str) -> dict:
                     "SELECT id,role,sender_type,content,status FROM message "
                     "WHERE run_id=%s ORDER BY created_at,id"
                 ),
+                "traces": (
+                    "SELECT id,trace_id,runner_id,status,error_code,started_at,ended_at "
+                    "FROM runner_trace WHERE run_id=%s ORDER BY created_at,id"
+                ),
+                "spans": (
+                    "SELECT t.runner_id,s.name,s.span_kind,s.status,s.attributes,"
+                    "s.input_tokens,s.output_tokens,s.error_code "
+                    "FROM observability_span s JOIN runner_trace t "
+                    "ON t.id=s.runner_trace_id WHERE t.run_id=%s "
+                    "ORDER BY s.started_at,s.id"
+                ),
+                "links": (
+                    "SELECT t.runner_id,l.link_type,l.entity_type,l.entity_id,"
+                    "l.linked_trace_id,l.linked_span_id FROM observability_span_link l "
+                    "JOIN observability_span s ON s.id=l.span_id "
+                    "JOIN runner_trace t ON t.id=s.runner_trace_id "
+                    "WHERE t.run_id=%s ORDER BY l.created_at,l.id"
+                ),
             }
             result = {}
             for name, query in queries.items():
@@ -84,6 +102,58 @@ def _mysql_rows(run_id: str) -> dict:
 
 def _json_value(value):
     return json.loads(value) if isinstance(value, str) else value
+
+
+def _wait_mysql_rows(run_id: str, *, timeout: float = 15) -> dict:
+    deadline = time.monotonic() + timeout
+    database = {}
+    while time.monotonic() < deadline:
+        database = _mysql_rows(run_id)
+        trace_runner_ids = {item["runner_id"] for item in database["traces"]}
+        runner_ids = {item["id"] for item in database["runner"]}
+        span_names = {}
+        for span in database["spans"]:
+            span_names.setdefault(span["runner_id"], set()).add(span["name"])
+        all_span_names = {
+            name for names in span_names.values() for name in names
+        }
+        tool_trace_ready = (
+            not database["invocations"]
+            or {"tool.invocation", "tool.attempt"} <= all_span_names
+        )
+        if (
+            runner_ids
+            and trace_runner_ids == runner_ids
+            and all(item["status"] == "completed" for item in database["traces"])
+            and all({"context.assemble", "runner", "runner_execution"} <= span_names.get(
+                runner_id, set(),
+            ) for runner_id in runner_ids)
+            and tool_trace_ready
+        ):
+            return database
+        time.sleep(0.2)
+    return database
+
+
+def _assert_runtime_trace(database: dict) -> None:
+    assert len(database["traces"]) == len(database["runner"])
+    assert all(
+        item["status"] == "completed" and item["ended_at"] is not None
+        for item in database["traces"]
+    )
+    names = {span["name"] for span in database["spans"]}
+    assert {
+        "runner",
+        "runner_execution",
+        "context.assemble",
+        "agent.turn",
+        "provider.attempt",
+        "model_generation",
+    } <= names
+    assert all(
+        "prompt" not in str(_json_value(span["attributes"])).lower()
+        for span in database["spans"]
+    )
 
 
 def _write_evidence(payload: dict) -> None:
@@ -137,7 +207,7 @@ def test_agent_native_v2_goal1_fullstack_smoke(
             "GET", f"/api/v1/sessions/{session['id']}/messages",
         ).json()["items"]
         assert messages[-1]["role"] == "assistant" and messages[-1]["content"].strip()
-        database = _mysql_rows(run["id"])
+        database = _wait_mysql_rows(run["id"])
         assert database["runner"] and all(
             item["status"] == "succeeded" for item in database["runner"]
         )
@@ -147,6 +217,7 @@ def test_agent_native_v2_goal1_fullstack_smoke(
             _json_value(item["usage"]).get("input_tokens", 0) > 0
             for item in database["attempts"]
         )
+        _assert_runtime_trace(database)
         assert "run.completed" in [item["event_type"] for item in database["events"]]
         _write_evidence({
             "schema": "myclaw.agent_native_v2.goal1_smoke.v1",
@@ -294,13 +365,7 @@ def test_agent_native_v2_goal1_fullstack_smoke(
     assert messages[-1]["role"] == "assistant"
     assert messages[-1]["content"] == FINAL_MESSAGE
 
-    deadline = time.monotonic() + 10
-    database = {}
-    while time.monotonic() < deadline:
-        database = _mysql_rows(run["id"])
-        if database.get("attempts") and database.get("events"):
-            break
-        time.sleep(0.2)
+    database = _wait_mysql_rows(run["id"])
 
     assert len(database["runner"]) == 2
     assert all(runner["status"] == "succeeded" for runner in database["runner"])
@@ -332,6 +397,10 @@ def test_agent_native_v2_goal1_fullstack_smoke(
     assert "turn_completed" in checkpoint_types
     assert "run.completed" in [item["event_type"] for item in database["events"]]
     assert database["messages"][-1]["content"] == FINAL_MESSAGE
+    _assert_runtime_trace(database)
+    assert {"tool.invocation", "tool.attempt"} <= {
+        span["name"] for span in database["spans"]
+    }
 
     evidence = {
         "schema": "myclaw.agent_native_v2.goal1_smoke.v1",

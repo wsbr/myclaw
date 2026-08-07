@@ -304,6 +304,25 @@ def test_plan_dynamic_agent_invocation_rejection_and_cancel_paths(
     assert len(invocations) == 1 and invocations[0]["status"] == "succeeded"
     assert invocations[0]["target_agent_version_id"]
     assert len(invocations[0]["request_hash"]) == 64
+    trace_deadline = time.monotonic() + 15
+    traces = []
+    while time.monotonic() < trace_deadline:
+        runners = api.request(
+            "GET", f"/api/v1/runs/{run_id}/runners",
+        ).json()["items"]
+        traces = [
+            api.request("GET", f"/api/v1/runners/{runner['id']}/trace").json()
+            for runner in runners
+        ]
+        if any(trace["links"] for trace in traces):
+            break
+        time.sleep(0.2)
+    assert traces and all(trace["status"] == "available" for trace in traces)
+    assert any(
+        link["link_type"] == "agent_invocation"
+        and link["entity_id"] == invocations[0]["id"]
+        for trace in traces for link in trace["links"]
+    )
     assert _db_row(
         "SELECT COUNT(*) FROM tool_invocation WHERE run_id=%s AND status='succeeded'",
         (run_id,),

@@ -13,11 +13,13 @@ from app.models.foundation import OutboxCommand, UserSession
 from app.models.group_v1 import (
     GroupMembership, GroupRun, GroupRunMember, GroupSession, GroupSummaryRequest,
 )
+from app.models.observability_v1 import ObservabilitySpan, RunnerTrace
 from app.models.runtime_v1 import (
     AgentInvocation, Approval, DurableRunner, PlanUpdate, Run, RunnerCheckpoint,
     WorkItem, WorkingPlan,
 )
 from app.services.plan_mode_service import PlanSubjectChanged, assert_current_plan_subject
+from app.services.observability_service import ensure_runner_trace
 from app.services.runtime_resume_service import queue_work_item_resume
 from app.services.working_plan_service import update_working_plan
 from app.workers.runtime_worker import RunnerFenced, RuntimeWorker
@@ -171,6 +173,7 @@ async def test_expired_lease_recovery_increments_epoch_and_fences_late_writer(mo
     claim = await original.claim_one()
     fence = await original.acquire_runner(claim)
     assert fence is not None
+    await ensure_runner_trace(world.runner_id, session_factory=world.factory)
     async with world.factory.begin() as db:
         runner = await db.get(DurableRunner, world.runner_id)
         runner.lease_expires_at = utcnow() - timedelta(seconds=1)
@@ -198,6 +201,15 @@ async def test_expired_lease_recovery_increments_epoch_and_fences_late_writer(mo
             OutboxCommand.status == "pending",
         ))
         assert pending is not None and pending.aggregate_id == runners[1].id
+        trace = await db.scalar(select(RunnerTrace).where(
+            RunnerTrace.runner_id == runners[0].id,
+        ))
+        trace_spans = list(await db.scalars(select(ObservabilitySpan).where(
+            ObservabilitySpan.runner_trace_id == trace.id,
+        )))
+        assert trace.status == "failed"
+        assert trace.error_code == "runner_lease_expired"
+        assert {span.name for span in trace_spans} == {"runner", "runner_execution"}
     await world.engine.dispose()
 
 

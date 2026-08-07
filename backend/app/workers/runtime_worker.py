@@ -32,6 +32,7 @@ from app.models.group_v1 import (
     GroupSummaryRequest,
     SharedTask,
 )
+from app.models.observability_v1 import RunnerTrace
 from app.models.runtime_v1 import (
     AgentInvocation,
     Approval,
@@ -59,6 +60,12 @@ from app.runtime import (
     SnapshotResolver,
 )
 from app.services.provider_conformance import resolve_credential
+from app.services.observability_service import (
+    ensure_runner_trace,
+    finish_runner_trace,
+    record_runner_fact_spans,
+    record_runner_span,
+)
 from app.services.plan_mode_service import create_plan_approval
 from app.services.runtime_resume_service import queue_work_item_resume
 from app.services.working_plan_service import current_working_plan, working_plan_view
@@ -408,7 +415,13 @@ class RuntimeWorker:
     async def execute(self, fence: RunnerFence) -> None:
         stop = asyncio.Event()
         heartbeat = asyncio.create_task(self._heartbeat_loop(fence, stop))
+        execution_started_at = utcnow()
+        execution_error_code = None
+        await ensure_runner_trace(
+            fence.runner_id, session_factory=AsyncSessionLocal,
+        )
         try:
+            context_started_at = utcnow()
             async with AsyncSessionLocal.begin() as db:
                 runner = await self._load_fenced_runner(db, fence)
                 work = await db.get(WorkItem, fence.work_item_id)
@@ -579,6 +592,21 @@ class RuntimeWorker:
                         working_plan.revision if working_plan is not None else None
                     ),
                 }
+            context_ended_at = utcnow()
+            await record_runner_span(
+                fence.runner_id,
+                name="context.assemble",
+                span_kind="context",
+                started_at=context_started_at,
+                ended_at=context_ended_at,
+                attributes={
+                    "mode": run.mode,
+                    "permission_mode": resolved.capability.permission_mode,
+                    "manifest_section_count": len(context.manifest),
+                    "estimated_tokens": context.estimated_tokens,
+                },
+                session_factory=AsyncSessionLocal,
+            )
 
             provider = ModelHub.get(
                 {}, model_version.provider, resolve_credential(model_version.credential_ref),
@@ -651,6 +679,9 @@ class RuntimeWorker:
                     self._settle_waiting, fence, wait_reason, context, result,
                 )
         except Exception as error:
+            execution_error_code = str(
+                getattr(error, "code", type(error).__name__)
+            )[:100]
             if self._is_transient_settlement_conflict(error):
                 # The provider/tool dispatch transaction rolled back. Leave
                 # the durable Runner fenced as running; its lease recovery
@@ -664,6 +695,41 @@ class RuntimeWorker:
         finally:
             stop.set()
             await heartbeat
+            execution_ended_at = utcnow()
+            await record_runner_fact_spans(
+                fence.runner_id, session_factory=AsyncSessionLocal,
+            )
+            await record_runner_span(
+                fence.runner_id,
+                name="runner",
+                span_kind="runner",
+                started_at=execution_started_at,
+                ended_at=execution_ended_at,
+                status="error" if execution_error_code else "ok",
+                attributes={
+                    "execution_epoch": fence.execution_epoch,
+                    "worker_id": self.worker_id,
+                },
+                error_code=execution_error_code,
+                session_factory=AsyncSessionLocal,
+            )
+            await record_runner_span(
+                fence.runner_id,
+                name="runner_execution",
+                span_kind="runner",
+                started_at=execution_started_at,
+                ended_at=execution_ended_at,
+                status="error" if execution_error_code else "ok",
+                attributes={
+                    "execution_epoch": fence.execution_epoch,
+                    "worker_id": self.worker_id,
+                },
+                error_code=execution_error_code,
+                session_factory=AsyncSessionLocal,
+            )
+            await finish_runner_trace(
+                fence.runner_id, session_factory=AsyncSessionLocal,
+            )
 
     async def _load_fenced_runner(self, db, fence: RunnerFence) -> DurableRunner:
         runner = await db.scalar(select(DurableRunner).where(
@@ -1517,6 +1583,42 @@ class RuntimeWorker:
                 )
 
     async def recover_one_expired_runner(self) -> bool:
+        runner_id = await self._recover_one_expired_runner()
+        if runner_id is None:
+            return False
+        await record_runner_fact_spans(
+            runner_id, session_factory=AsyncSessionLocal,
+        )
+        async with AsyncSessionLocal() as db:
+            trace = await db.scalar(select(RunnerTrace).where(
+                RunnerTrace.runner_id == runner_id,
+            ))
+            runner = await db.get(DurableRunner, runner_id)
+            started_at = trace.started_at if trace is not None else None
+            ended_at = runner.ended_at if runner is not None else None
+            error_code = (
+                (runner.error_code or runner.failure_code)
+                if runner is not None else "runner_lease_expired"
+            )
+        if started_at is not None and ended_at is not None:
+            for name in ("runner", "runner_execution"):
+                await record_runner_span(
+                    runner_id,
+                    name=name,
+                    span_kind="runner",
+                    started_at=started_at,
+                    ended_at=ended_at,
+                    status="error",
+                    attributes={"recovered_after_lease_expiry": True},
+                    error_code=error_code,
+                    session_factory=AsyncSessionLocal,
+                )
+        await finish_runner_trace(
+            runner_id, session_factory=AsyncSessionLocal,
+        )
+        return True
+
+    async def _recover_one_expired_runner(self) -> str | None:
         async with AsyncSessionLocal.begin() as db:
             now = utcnow()
             runner = await db.scalar(select(DurableRunner).where(
@@ -1524,7 +1626,7 @@ class RuntimeWorker:
                 DurableRunner.lease_expires_at < now,
             ).order_by(DurableRunner.lease_expires_at).with_for_update(skip_locked=True).limit(1))
             if runner is None:
-                return False
+                return None
             await self._lock_event_session(db, runner.session_id)
             work = await db.scalar(select(WorkItem).where(
                 WorkItem.id == runner.work_item_id,
@@ -1539,7 +1641,7 @@ class RuntimeWorker:
                 RunnerCheckpoint.safe_to_resume.is_(True),
             ).order_by(RunnerCheckpoint.sequence_no.desc()).limit(1))
             if work is None or run is None or work.active_runner_id != runner.id:
-                return True
+                return runner.id
             work.active_runner_id = None
             pending_clarification = await db.scalar(select(Clarification).where(
                 Clarification.work_item_id == work.id,
@@ -1595,7 +1697,7 @@ class RuntimeWorker:
                         dedupe_key=f"event:{waiting.id}:tool:{invocation.id}",
                         payload_ref={"tool_invocation_id": invocation.id},
                     )
-                return True
+                return runner.id
             settled_agent = await db.scalar(select(AgentInvocation.id).where(
                 AgentInvocation.caller_work_item_id == work.id,
                 AgentInvocation.batch_key == runner.id,
@@ -1625,7 +1727,7 @@ class RuntimeWorker:
                     db, run=run, caller_work=work, caller_runner=runner,
                     batch_key=runner.id, caused_by_event_id=recovered.id,
                 )
-                return True
+                return runner.id
             if checkpoint is None or run.status in {"completed", "cancelled", "failed"}:
                 work.status = "failed"
                 work.error_code = "runner_lost_without_safe_checkpoint"
@@ -1695,12 +1797,12 @@ class RuntimeWorker:
                             db, group_run=group_run, run=run,
                             cause_event_id=recovered.id,
                         )
-                    return True
+                    return runner.id
                 run.status = "failed"
                 run.terminal_reason = "runner_lost_without_safe_checkpoint"
                 run.completed_at = now
                 run.version += 1
-                return True
+                return runner.id
             work.execution_epoch += 1
             work.attempt_no += 1
             work.status = "queued"
@@ -1736,7 +1838,7 @@ class RuntimeWorker:
                 dedupe_key=f"event:{event.id}:execute",
                 payload_ref={"runner_id": replacement.id, "event_id": event.id},
             )
-            return True
+            return runner.id
 
     async def _evaluate_group_quiescence(
         self, db, *, group_run_id: str, trigger_event_id: str | None,

@@ -447,10 +447,37 @@ def test_agent_network_group_vertical_uat(
     runners = api.request(
         "GET", f"/api/v1/runs/{capacity['run']['id']}/runners",
     ).json()["items"]
-    traces = [
-        api.request("GET", f"/api/v1/runners/{runner['id']}/trace").json()
-        for runner in runners
-    ]
+    required_trace_spans = {
+        "runner", "runner_execution", "context.assemble", "agent.turn",
+        "provider.attempt", "model_generation", "tool.invocation", "tool.attempt",
+        "group.message", "verification",
+    }
+    trace_deadline = time.monotonic() + 15
+    traces = []
+    trace_span_names = set()
+    while time.monotonic() < trace_deadline:
+        traces = [
+            api.request("GET", f"/api/v1/runners/{runner['id']}/trace").json()
+            for runner in runners
+        ]
+        trace_span_names = {
+            span["name"] for trace in traces for span in trace["spans"]
+        }
+        if all(
+            trace["status"] == "available"
+            and trace["trace"]["status"] in {"completed", "failed", "cancelled"}
+            and trace["spans"]
+            for trace in traces
+        ) and required_trace_spans <= trace_span_names:
+            break
+        time.sleep(0.2)
+    assert traces and all(
+        trace["status"] == "available"
+        and trace["trace"]["status"] in {"completed", "failed", "cancelled"}
+        and trace["spans"]
+        for trace in traces
+    )
+    assert required_trace_spans <= trace_span_names
     assert {item["tool_attempt_id"] for item in verification["observed_facts"] if "case_id" in item} <= {
         attempt_id
         for trace in traces

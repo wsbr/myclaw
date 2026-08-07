@@ -22,10 +22,12 @@ from app.models.registry import (
     PlatformTool, PolicyDefinition, RegisteredModel, RegisteredSkill, SkillVersion,
 )
 from app.models.runtime_v1 import (
-    AgentInvocation, Approval, Clarification, DurableRunner, Message, Run, RunnerCheckpoint,
+    AgentInvocation, AgentTurn, Approval, Clarification, DurableRunner, Message,
+    ProviderAttempt, Run, RunnerCheckpoint,
     RunnerPolicySnapshot, RunnerSkillSnapshot, RunnerToolSnapshot,
     PlanUpdate, ToolAttempt, ToolConfirmation, ToolInvocation, WorkItem, WorkingPlan,
 )
+from app.models.verification_v1 import VerificationResult
 from app.services.chat_service import create_user_session, enqueue_chat_message
 
 
@@ -48,6 +50,7 @@ async def create_runtime_world(*, content: str = "hello") -> RuntimeWorld:
         UserSession.__table__, ExecutionEvent.__table__, ExecutionEventRecipient.__table__,
         IdempotencyRecord.__table__,
         Message.__table__, Run.__table__, WorkItem.__table__, DurableRunner.__table__,
+        AgentTurn.__table__, ProviderAttempt.__table__,
         GroupSession.__table__, GroupMembership.__table__, GroupRun.__table__,
         GroupRunMember.__table__, GroupSummaryRequest.__table__,
         RunnerCheckpoint.__table__, ToolInvocation.__table__, ToolAttempt.__table__,
@@ -57,6 +60,7 @@ async def create_runtime_world(*, content: str = "hello") -> RuntimeWorld:
         RunnerToolSnapshot.__table__, RunnerPolicySnapshot.__table__, OutboxCommand.__table__,
         Artifact.__table__, MessageArtifact.__table__, RunnerTrace.__table__,
         ObservabilitySpan.__table__, ObservabilitySpanLink.__table__,
+        VerificationResult.__table__,
     ]
     async with engine.begin() as connection:
         await connection.run_sync(lambda sync: Base.metadata.create_all(sync, tables=tables))

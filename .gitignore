@@ -45,5 +45,6 @@ mysql_data/
 redis_data/
 
 # Generated acceptance evidence (CI uploads the same report set as artifacts)
+test/results/
 test/test-results/
 test/playwright-results/
