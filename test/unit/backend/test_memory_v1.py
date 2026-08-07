@@ -61,7 +61,6 @@ async def test_user_edit_wins_over_stale_model_candidate_and_delete_stops_recall
                 status="active", origin_type="web", next_event_sequence=1),
             Run(id=run_id, session_id=session_id, user_id="u1", mode="chat",
                 status="completed", terminal_reason="completed",
-                entry_agent_id=agent_id, started_at=utcnow(), finished_at=utcnow(),
                 completed_at=utcnow()),
             WorkItem(id=work_id, run_id=run_id, session_id=session_id, user_id="u1",
                 mode="chat", owner_agent_id=agent_id, agent_version_id=version_id,

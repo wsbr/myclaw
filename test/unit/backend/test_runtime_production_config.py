@@ -87,25 +87,37 @@ def test_safe_production_settings_are_accepted():
     assert settings.runtime_runner_lease_seconds == 45
 
 
-def test_uat_compose_uses_protected_persistent_volumes_and_secret_injection():
+def test_uat_single_node_uses_isolated_persistent_volumes_and_sha_bound_operations():
     repository = Path(__file__).resolve().parents[3]
-    compose = (repository / "deploy/docker-compose.uat.yml").read_text()
+    uat = repository / "deploy/uat_single_node"
+    compose = (uat / "docker-compose.yml").read_text()
     collector = (repository / "deploy/otel-collector.yaml").read_text()
-    example = (repository / "deploy/uat/.env.example").read_text()
+    example = (uat / ".env.example").read_text()
+    init_env = (uat / "init-env.sh").read_text()
+    acceptance = (uat / "run-acceptance.sh").read_text()
+    observation = (uat / "observe.sh").read_text()
 
     assert "tmpfs:" not in compose
     for volume_name in (
-        "myclaw-uat-mysql-data",
-        "myclaw-uat-redis-data",
-        "myclaw-uat-app-data",
+        "myclaw-uat-single-node-mysql-data",
+        "myclaw-uat-single-node-redis-data",
+        "myclaw-uat-single-node-app-data",
     ):
         assert f"name: {volume_name}" in compose
     assert compose.count("external: true") == 3
-    assert "MYCLAW_REAL_LLM_API_KEY: ${MYCLAW_REAL_LLM_API_KEY}" in compose
-    assert compose.count("MYCLAW_REAL_LLM_API_KEY: ${MYCLAW_REAL_LLM_API_KEY}") == 2
-    assert "--no-tablespaces" in (repository / "deploy/uat/backup.sh").read_text()
+    assert "MYCLAW_REAL_LLM_API_KEY: ${MYCLAW_REAL_LLM_API_KEY:?real model key is required}" in compose
+    assert sum(
+        line.lstrip().startswith("MYCLAW_REAL_LLM_API_KEY:")
+        for line in compose.splitlines()
+    ) == 2
+    assert "deploy:\n      replicas: 2" in compose
+    assert "--no-tablespaces" in (uat / "backup.sh").read_text()
     assert "MYCLAW_REAL_LLM_API_KEY=\n" in example
-    assert "env://MYCLAW_REAL_LLM_API_KEY" in example
+    assert "MYCLAW_PRICING_TIER_MAX_INPUT_TOKENS=128000" in example
+    assert "Refusing to reuse existing UAT volume" in init_env
+    assert "Refusing to accept a dirty workspace" in acceptance
+    assert "MYCLAW_OBSERVE_SECONDS:-1800" in observation
+    assert "MYCLAW_OBSERVE_INTERVAL_SECONDS:-30" in observation
     assert "install -d -m 0750 -o 10001 -g 10001 /var/lib/myclaw/otel" in compose
     assert "condition: service_completed_successfully" in compose
     assert "cap_drop: [ALL]" in compose

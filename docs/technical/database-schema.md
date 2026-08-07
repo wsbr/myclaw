@@ -237,8 +237,8 @@ Agent API 来源的 `asserted_user_id_snapshot` 是调用方断言，不代表�
 
 ### `agent_turn`、`provider_attempt`
 
-- `agent_turn`：`id PK`、`runner_id FK`、`turn_no`、`input_manifest_json`、`provider_stop_reason NULL`、`usage_json`、`status started|waiting_actions|completed|failed`、`final_message_id FK NULL`；唯一 `(runner_id,turn_no)`；
-- `provider_attempt`：`id PK`、`agent_turn_id FK`、`attempt_no`、`provider_request_id NULL`、`request_hash`、`continuation_ref NULL`、`status queued|running|succeeded|failed|timed_out|outcome_unknown`、`error_code NULL`、`usage_json`；唯一 `(agent_turn_id,attempt_no)`。
+- `agent_turn`：`id PK`、`runner_id FK`、`turn_no`、`input_manifest_json`、`provider_stop_reason NULL`、`schema_repair_count`、`usage_json`、`status started|waiting_actions|completed|failed`、`final_message_id FK NULL`；唯一 `(runner_id,turn_no)`；
+- `provider_attempt`：`id PK`、`agent_turn_id FK`、`attempt_no`、`provider_request_id NULL`、`request_hash`、`continuation_ref NULL`、`status queued|running|succeeded|failed|timed_out|outcome_unknown`、`received_payload`、`first_payload_at NULL`、`error_code NULL`、`usage_json`、`started_at NULL`、`ended_at NULL`；唯一 `(agent_turn_id,attempt_no)`。
 
 Provider 原始秘密、完整授权头和不允许持久化的 reasoning 不进入数据库。
 

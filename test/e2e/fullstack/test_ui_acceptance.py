@@ -26,8 +26,12 @@ def test_browser_chat_plan_and_admin_surfaces(
     page.goto(ui_url, wait_until="domcontentloaded")
     expect(page.get_by_role("heading", name="MyClaw", exact=True)).to_be_visible()
     expect(page.get_by_role("button", name="企业身份登录", exact=True)).to_be_visible()
-    page.get_by_role("textbox", name="邮箱", exact=True).fill("admin@test.myclaw.local")
-    page.get_by_role("textbox", name="密码", exact=True).fill("testpassword123")
+    page.get_by_role("textbox", name="邮箱", exact=True).fill(
+        os.getenv("MYCLAW_TEST_ADMIN_EMAIL", "admin@test.myclaw.local")
+    )
+    page.get_by_role("textbox", name="密码", exact=True).fill(
+        os.getenv("MYCLAW_TEST_ADMIN_PASSWORD", "testpassword123")
+    )
     page.get_by_role("button", name="登录", exact=True).click()
     expect(page.get_by_role("heading", name="Agents", exact=True)).to_be_visible(timeout=10_000)
     page.reload(wait_until="domcontentloaded")
@@ -47,7 +51,7 @@ def test_browser_chat_plan_and_admin_surfaces(
         expect(page.get_by_role("heading", name=heading, exact=True)).to_be_visible(timeout=10_000)
 
     page.get_by_role("button", name="Agents", exact=True).click()
-    agent_name = f"退款审计负责人 {assembled_world['suffix']}"
+    agent_name = f"个人助理 {assembled_world['suffix']}"
     agent_card = page.locator("div.bg-card").filter(has_text=agent_name)
     expect(agent_card).to_have_count(1)
     agent_card.get_by_role("button", name="对话", exact=True).click()
@@ -94,10 +98,17 @@ def test_browser_chat_plan_and_admin_surfaces(
     )
     for section in ("WorkingPlan", "Required Action", "协作者", "Artifacts"):
         expect(page.get_by_text(section, exact=True)).to_be_visible()
-    expect(page.get_by_text(
-        "Perform a bounded read-only specialist review of the proposed rollout.",
-        exact=True,
-    )).to_be_visible(timeout=int(phase_api.run_timeout * 1000))
+    plan_runs = phase_api.request(
+        "GET", f"/api/v1/sessions/{session_id}/runs", params={"mode": "plan"},
+    ).json()["items"]
+    assert plan_runs
+    plan = phase_api.request(
+        "GET", f"/api/v1/runs/{plan_runs[0]['id']}/working-plans",
+    ).json()["items"][0]
+    assert plan["summary"].strip() and len(plan["items"]) >= 2
+    expect(page.get_by_text(plan["items"][0]["title"], exact=True)).to_be_visible(
+        timeout=int(phase_api.run_timeout * 1000),
+    )
     direction = page.get_by_placeholder(
         "继续讨论或修改方向，例如：先验证迁移回滚，再实现 UI", exact=True,
     )

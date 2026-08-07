@@ -332,6 +332,74 @@ CAPACITY_CASE_CALLS = (
 )
 
 
+def _capacity_plan_tool(
+    messages: list[ChatMessage], tools: list[dict] | None,
+) -> tuple[str, dict] | None:
+    """Exercise the same real Tool/Artifact path after Plan approval."""
+    all_text = " ".join(message.content or "" for message in messages)
+    if "CAPACITY-RISK-PLAN-V2" not in all_text or '"mode": "direct"' not in all_text:
+        return None
+    names = _tool_names(tools)
+    tool_results = " ".join(
+        message.content or "" for message in messages if message.role == "tool"
+    )
+    compact_results = tool_results.replace(" ", "")
+    if '"name":"acceptance_report.md"' in compact_results:
+        return None
+    for prior_name, artifact_name in (
+        ("test_report.md", "acceptance_report.md"),
+        ("capacity_risk.py", "test_report.md"),
+        ("requirements.md", "capacity_risk.py"),
+    ):
+        if f'"name":"{prior_name}"' in compact_results and "publish_artifact" in names:
+            return "publish_artifact", {
+                "path": artifact_name, "name": artifact_name,
+                "mime_type": (
+                    "text/x-python" if artifact_name.endswith(".py")
+                    else "text/markdown"
+                ),
+                "publish_to_group": False,
+            }
+    if '"path":"acceptance_report.md"' in compact_results and "publish_artifact" in names:
+        return "publish_artifact", {
+            "path": "requirements.md", "name": "requirements.md",
+            "mime_type": "text/markdown", "publish_to_group": False,
+        }
+    if '"path":"test_report.md"' in compact_results and "write_file" in names:
+        return "write_file", {
+            "path": "acceptance_report.md", "content": CAPACITY_ACCEPTANCE_REPORT,
+            "mode": "create",
+        }
+    for index in range(len(CAPACITY_CASE_CALLS) - 1, -1, -1):
+        if CAPACITY_CASE_CALLS[index][1] not in tool_results:
+            continue
+        if index + 1 < len(CAPACITY_CASE_CALLS) and "execute" in names:
+            return "execute", {
+                "argv": CAPACITY_CASE_CALLS[index + 1][0],
+                "cwd": ".", "timeout_seconds": 20,
+            }
+        if "write_file" in names:
+            return "write_file", {
+                "path": "test_report.md", "content": CAPACITY_TEST_REPORT,
+                "mode": "create",
+            }
+    if '"path":"capacity_risk.py"' in compact_results and "execute" in names:
+        return "execute", {
+            "argv": CAPACITY_CASE_CALLS[0][0], "cwd": ".", "timeout_seconds": 20,
+        }
+    if '"path":"requirements.md"' in compact_results and "write_file" in names:
+        return "write_file", {
+            "path": "capacity_risk.py", "content": CAPACITY_PROGRAM,
+            "mode": "create",
+        }
+    if "write_file" in names:
+        return "write_file", {
+            "path": "requirements.md", "content": CAPACITY_REQUIREMENTS,
+            "mode": "create",
+        }
+    return None
+
+
 def _capacity_group_tool(
     messages: list[ChatMessage], tools: list[dict] | None,
 ) -> tuple[str, dict] | None:
@@ -349,8 +417,8 @@ def _capacity_group_tool(
     tool_results = " ".join(
         message.content or "" for message in messages if message.role == "tool"
     )
-    developer_id = _group_member_id_with_tool(snapshot, "publish_artifact")
-    test_id = _group_member_id_with_tool(snapshot, "read_file")
+    developer_id = _group_member_id(snapshot, "开发工程师")
+    test_id = _group_member_id(snapshot, "测试工程师")
     product_id = str(snapshot.get("reporter_agent_id") or "") or None
     current_id = current.get("agent_id")
 
@@ -765,7 +833,8 @@ async def chat_completions(body: ChatCompletionRequest):
     ):
         await asyncio.sleep(5)
     control_tool = (
-        _capacity_group_tool(body.messages, body.tools)
+        _capacity_plan_tool(body.messages, body.tools)
+        or _capacity_group_tool(body.messages, body.tools)
         or _requested_working_plan_tool(body.messages, body.tools)
         or _requested_artifact_tool(body.messages, body.tools)
         or _requested_control_tool(body.messages, body.tools)

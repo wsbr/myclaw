@@ -18,6 +18,17 @@ if ! git -C "${root}" diff --quiet || ! git -C "${root}" diff --cached --quiet; 
   echo "Refusing to bind UAT to a dirty workspace" >&2
   exit 2
 fi
+uat_volumes=(
+  myclaw-uat-single-node-mysql-data
+  myclaw-uat-single-node-redis-data
+  myclaw-uat-single-node-app-data
+)
+for volume in "${uat_volumes[@]}"; do
+  if docker volume inspect "${volume}" >/dev/null 2>&1; then
+    echo "Refusing to reuse existing UAT volume: ${volume}" >&2
+    exit 2
+  fi
+done
 
 read_value() {
   local key="$1"
@@ -29,6 +40,10 @@ model_endpoint="$(read_value MYCLAW_REAL_LLM_ENDPOINT)"
 model_name="$(read_value MYCLAW_REAL_LLM_MODEL)"
 if [[ -z "${model_api_key}" || -z "${model_endpoint}" || -z "${model_name}" ]]; then
   echo "Source environment is missing real-model key, endpoint, or model" >&2
+  exit 2
+fi
+if [[ "${model_name}" != "qwen3.5-plus" ]]; then
+  echo "The frozen UAT pricing profile is valid only for qwen3.5-plus" >&2
   exit 2
 fi
 
@@ -83,17 +98,20 @@ trap 'rm -f -- "${temporary_file}"' EXIT
     'RATE_LIMIT_WINDOW_SECONDS=60' \
     "MYCLAW_REAL_LLM_API_KEY=${model_api_key}" \
     "MYCLAW_REAL_LLM_ENDPOINT=${model_endpoint}" \
-    "MYCLAW_REAL_LLM_MODEL=${model_name}"
+    "MYCLAW_REAL_LLM_MODEL=${model_name}" \
+    'MYCLAW_COST_CURRENCY=CNY' \
+    'MYCLAW_INPUT_PRICE_PER_MILLION=0.8' \
+    'MYCLAW_OUTPUT_PRICE_PER_MILLION=4.8' \
+    'MYCLAW_PRICING_TIER_MAX_INPUT_TOKENS=128000' \
+    'MYCLAW_PRICING_EFFECTIVE_DATE=2026-08-07' \
+    'MYCLAW_PRICING_SOURCE_URL=https://help.aliyun.com/zh/model-studio/qwen3-5-plus'
 } > "${temporary_file}"
 chmod 600 "${temporary_file}"
 mv "${temporary_file}" "${env_file}"
 trap - EXIT
 
-for volume in \
-  myclaw-uat-single-node-mysql-data \
-  myclaw-uat-single-node-redis-data \
-  myclaw-uat-single-node-app-data; do
-  docker volume inspect "${volume}" >/dev/null 2>&1 || docker volume create "${volume}" >/dev/null
+for volume in "${uat_volumes[@]}"; do
+  docker volume create "${volume}" >/dev/null
 done
 mkdir -p "${script_dir}/backups" "${script_dir}/evidence/${commit_sha}"
 echo "uat_single_node initialized and bound to ${commit_sha}; credentials were not printed."

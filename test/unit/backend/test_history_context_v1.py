@@ -48,7 +48,7 @@ async def test_group_history_is_membership_scoped_and_summary_is_namespaced():
                             reason="selected", authorization_source="user_selected", joined_at=utcnow()),
         ])
         run = Run(id=run_id, session_id=session_id, user_id="u1", mode="group",
-                  status="active", entry_agent_id=agent_1, started_at=utcnow())
+                  status="active")
         work = WorkItem(id=work_id, run_id=run_id, session_id=session_id, user_id="u1", mode="group",
                         owner_agent_id=agent_1, agent_version_id=uuid7(), group_run_id=uuid7(),
                         group_membership_id=node_1, goal="g", status="running", execution_epoch=1, attempt_no=1)
@@ -112,7 +112,7 @@ async def test_delegated_agent_does_not_receive_ambient_chat_history():
         db.add(UserIdentity(user_id="u1", status="active"))
         db.add(UserSession(id="s1", user_id="u1", entry_agent_id="a1", status="active"))
         run = Run(id="r1", session_id="s1", user_id="u1", mode="chat",
-                  status="active", entry_agent_id="a1", started_at=utcnow())
+                  status="active")
         work = WorkItem(id="w1", run_id="r1", session_id="s1", user_id="u1", mode="chat",
                         owner_agent_id="a2", agent_version_id="v2", goal="delegated", status="running",
                         execution_epoch=1, attempt_no=1)

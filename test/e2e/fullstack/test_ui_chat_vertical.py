@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 
 import pytest
@@ -29,13 +30,20 @@ def test_browser_chat_reconnect_clarification_approval_artifact_and_working_plan
 
     browser_errors: list[str] = []
     page.on("pageerror", lambda error: browser_errors.append(str(error)))
-    page.goto("http://localhost:8081", wait_until="domcontentloaded")
-    page.get_by_role("textbox", name="邮箱", exact=True).fill("admin@test.myclaw.local")
-    page.get_by_role("textbox", name="密码", exact=True).fill("testpassword123")
+    page.goto(
+        os.getenv("MYCLAW_FULLSTACK_UI_URL", "http://localhost:8081").rstrip("/"),
+        wait_until="domcontentloaded",
+    )
+    page.get_by_role("textbox", name="邮箱", exact=True).fill(
+        os.getenv("MYCLAW_TEST_ADMIN_EMAIL", "admin@test.myclaw.local")
+    )
+    page.get_by_role("textbox", name="密码", exact=True).fill(
+        os.getenv("MYCLAW_TEST_ADMIN_PASSWORD", "testpassword123")
+    )
     page.get_by_role("button", name="登录", exact=True).click()
     expect(page.get_by_role("heading", name="Agents", exact=True)).to_be_visible(timeout=15_000)
 
-    agent_name = f"退款审计负责人 {assembled_world['suffix']}"
+    agent_name = f"个人助理 {assembled_world['suffix']}"
     card = page.locator("div.bg-card").filter(has_text=agent_name)
     expect(card).to_have_count(1)
     card.get_by_role("button", name="对话", exact=True).click()
@@ -51,10 +59,23 @@ def test_browser_chat_reconnect_clarification_approval_artifact_and_working_plan
     page.reload(wait_until="domcontentloaded")
     answer = page.get_by_placeholder("输入回答；只会恢复提出该问题的 Work Item", exact=True)
     expect(answer).to_be_visible(timeout=15_000)
+    clarification_action = api.wait_action(session_id, "clarification")
     answer.fill("采用 2026 年第二季度口径。")
     page.get_by_role("button", name="提交回答", exact=True).click()
-    expect(page.get_by_text("Sandbox Tool result processed successfully.", exact=True)).to_be_visible(
-        timeout=20_000,
+    assert api.wait_run(clarification_action["run_id"])["status"] == "completed"
+    messages = api.request(
+        "GET", f"/api/v1/sessions/{session_id}/messages",
+    ).json()["items"]
+    clarification_message = next((
+        item for item in reversed(messages)
+        if item["sender_type"] == "agent"
+        and item["run_id"] == clarification_action["run_id"]
+        and item["content"].strip()
+    ), None)
+    assert clarification_message is not None
+    excerpt = clarification_message["content"].strip().replace("`", "")[:40]
+    expect(page.get_by_text(re.compile(re.escape(excerpt))).last).to_be_visible(
+        timeout=int(api.run_timeout * 1000),
     )
     cursor = page.evaluate(
         "sessionId => localStorage.getItem(`myclaw:session-event-cursor:${sessionId}`)",
@@ -73,9 +94,19 @@ def test_browser_chat_reconnect_clarification_approval_artifact_and_working_plan
     expect(page.get_by_text("验收报告 2026.txt", exact=True)).to_be_visible(timeout=25_000)
     expect(page.get_by_text("published", exact=True)).to_be_visible()
 
-    composer.fill("这是复杂任务，请分步骤完成退款分析并交付结论。")
+    complex_goal = "这是复杂任务，请分步骤完成退款分析并交付结论。"
+    composer.fill(complex_goal)
     page.get_by_role("button", name=re.compile("发送$")).click()
     expect(page.get_by_text("WorkingPlan", exact=True)).to_be_visible(timeout=15_000)
     expect(page.get_by_text("revision 1", exact=True)).to_be_visible()
-    expect(page.get_by_text("确认目标与输入", exact=True)).to_be_visible()
+    messages = api.request("GET", f"/api/v1/sessions/{session_id}/messages").json()["items"]
+    complex_message = next(
+        item for item in reversed(messages)
+        if item["sender_type"] == "user" and item["content"] == complex_goal
+    )
+    plans = api.request(
+        "GET", f"/api/v1/runs/{complex_message['run_id']}/working-plans",
+    ).json()["items"]
+    assert len(plans) == 1 and len(plans[0]["items"]) >= 2
+    expect(page.get_by_text(plans[0]["items"][0]["title"], exact=True)).to_be_visible()
     assert not browser_errors

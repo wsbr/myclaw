@@ -46,11 +46,21 @@ def _approve(api: PhaseOneAPI, action: dict, reason: str = "Chat UAT approval") 
 
 def _compose(*args: str) -> None:
     test_root = Path(__file__).resolve().parents[2]
+    compose_file = Path(os.getenv(
+        "MYCLAW_COMPOSE_FILE", str(test_root / "docker-compose.test.yml"),
+    ))
+    aliases = {
+        "runtime-worker-test": os.getenv("MYCLAW_RUNTIME_WORKER_SERVICE", "runtime-worker-test"),
+        "sandbox-worker-test": os.getenv("MYCLAW_SANDBOX_WORKER_SERVICE", "sandbox-worker-test"),
+    }
     command = ["docker", "compose"]
+    compose_env = os.getenv("MYCLAW_COMPOSE_ENV_FILE")
+    if compose_env:
+        command.extend(["--env-file", compose_env])
     project = os.getenv("MYCLAW_COMPOSE_PROJECT") or os.getenv("COMPOSE_PROJECT_NAME")
     if project:
         command.extend(["-p", project])
-    command.extend(["-f", str(test_root / "docker-compose.test.yml"), *args])
+    command.extend(["-f", str(compose_file), *(aliases.get(arg, arg) for arg in args)])
     subprocess.run(command, cwd=test_root, check=True, timeout=120)
 
 
@@ -69,6 +79,8 @@ def _database_counts(run_id: str) -> dict[str, int]:
                 "work_items": "SELECT COUNT(*) FROM work_item WHERE run_id=%s",
                 "runners": "SELECT COUNT(*) FROM runner_v1 WHERE run_id=%s",
                 "tools": "SELECT COUNT(*) FROM tool_invocation WHERE run_id=%s",
+                "execute_tools": "SELECT COUNT(*) FROM tool_invocation WHERE run_id=%s AND tool_key='execute'",
+                "agent_invocations": "SELECT COUNT(*) FROM agent_invocation WHERE run_id=%s",
                 "artifacts": "SELECT COUNT(*) FROM artifact WHERE work_item_id IN (SELECT id FROM work_item WHERE run_id=%s)",
             }.items():
                 cursor.execute(query, (run_id,))
@@ -127,7 +139,7 @@ def _capture_sse(
     return frames
 
 
-@pytest.mark.timeout(600)
+@pytest.mark.timeout(2400)
 def test_chat_clarification_working_plan_artifact_restart_and_ten_of_ten(
     phase_api: PhaseOneAPI, assembled_world: dict, record_testsuite_property,
 ):
@@ -203,7 +215,7 @@ def test_chat_clarification_working_plan_artifact_restart_and_ten_of_ten(
             f"/api/v1/runs/{artifact_run['id']}",
             lambda item: item["status"] == "waiting_tool",
         )
-        assert waiting["status"] == "waiting_user"
+        assert waiting["status"] == "waiting_tool"
         _compose("restart", "runtime-worker-test")
     finally:
         _compose("start", "sandbox-worker-test")
@@ -221,19 +233,51 @@ def test_chat_clarification_working_plan_artifact_restart_and_ten_of_ten(
     counts = _database_counts(artifact_run["id"])
     assert counts["work_items"] == 1
     assert counts["tools"] == 2
+    assert counts["execute_tools"] == 0
+    assert counts["agent_invocations"] == 0
     assert counts["artifacts"] == 1
 
-    # The explicit UAT criterion: ten consecutive natural Chat turns, all 10/10.
-    statuses = []
-    for index in range(10):
-        run = _chat(
-            api, simple_session["id"],
-            f"第 {index + 1} 次连续验收：请只回复已收到，不需要计划或外部操作。",
+    # Count the first complete action-checklist flow above, then repeat it nine
+    # times in isolated Sessions so every sample must clarify, resume, obtain a
+    # fresh session grant, write, publish, download, and avoid execute/delegation.
+    statuses = ["completed"]
+    for index in range(2, 11):
+        repeated_session = _session(api, agent_id)
+        clarification_run = _chat(
+            api, repeated_session["id"],
+            f"第 {index} 次行动清单：缺失测试负责人、验收时间和优先级；"
+            "请先确认统计口径：本轮应该采用哪个周期，然后再给出结论。",
         )["run"]
-        statuses.append(api.wait_run(run["id"])["status"])
-        assert api.request(
-            "GET", f"/api/v1/runs/{run['id']}/working-plans",
-        ).json()["items"] == []
+        clarification = api.wait_action(repeated_session["id"], "clarification")
+        api.request(
+            "POST", f"/api/v1/clarifications/{clarification['id']}/answer", idem=True,
+            headers={"If-Match": f'"{clarification["version"]}"'},
+            json={"answer": "测试负责人为 QA，验收时间为本周五，优先级 P1，采用 2026 年第二季度口径。"},
+        )
+        assert api.wait_run(clarification_run["id"], timeout=180)["status"] == "completed"
+        repeated_run = _chat(
+            api, repeated_session["id"],
+            "请把结论整理成可下载的《验收报告 2026.txt》，正文只写 artifact-e2e，"
+            "完成文件创建和正式发布后再回复。",
+        )["run"]
+        approval = api.wait_action(repeated_session["id"], "session_grant")
+        assert approval["tool_key"] == "write_file"
+        _approve(api, approval, reason=f"Chat UAT full-flow sample {index}")
+        statuses.append(api.wait_run(repeated_run["id"], timeout=180)["status"])
+        artifacts = api.request(
+            "GET", f"/api/v1/sessions/{repeated_session['id']}/artifacts",
+            params={"status": "published"},
+        ).json()["items"]
+        matches = [item for item in artifacts if item["name"] == "验收报告 2026.txt"]
+        assert len(matches) == 1
+        content = api.request(
+            "GET", f"/api/v1/artifacts/{matches[0]['id']}/download",
+        ).content
+        assert content == b"artifact-e2e"
+        assert hashlib.sha256(content).hexdigest() == matches[0]["checksum"]
+        counts = _database_counts(repeated_run["id"])
+        assert counts["tools"] == 2 and counts["artifacts"] == 1
+        assert counts["execute_tools"] == counts["agent_invocations"] == 0
     assert statuses == ["completed"] * 10
     record_testsuite_property("chat_uat", "10/10")
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -13,6 +15,7 @@ import pymysql
 import pytest
 
 from conftest import PhaseOneAPI
+from app.services.verification_service import CAPACITY_ARTIFACT_NAMES, CAPACITY_CASES
 
 
 pytestmark = pytest.mark.fullstack
@@ -34,11 +37,20 @@ def _enter(api: PhaseOneAPI, session: dict, goal: str) -> dict:
 
 def _compose(*args: str) -> None:
     test_root = Path(__file__).resolve().parents[2]
+    compose_file = Path(os.getenv(
+        "MYCLAW_COMPOSE_FILE", str(test_root / "docker-compose.test.yml"),
+    ))
     project = os.getenv("MYCLAW_COMPOSE_PROJECT") or os.getenv("COMPOSE_PROJECT_NAME")
     command = ["docker", "compose"]
+    compose_env = os.getenv("MYCLAW_COMPOSE_ENV_FILE")
+    if compose_env:
+        command.extend(["--env-file", compose_env])
     if project:
         command.extend(["-p", project])
-    command.extend(["-f", str(test_root / "docker-compose.test.yml"), *args])
+    aliases = {
+        "runtime-worker-test": os.getenv("MYCLAW_RUNTIME_WORKER_SERVICE", "runtime-worker-test"),
+    }
+    command.extend(["-f", str(compose_file), *(aliases.get(arg, arg) for arg in args)])
     subprocess.run(command, cwd=test_root, check=True, timeout=120)
 
 
@@ -58,6 +70,46 @@ def _db_row(query: str, params: tuple = ()) -> tuple:
         connection.close()
 
 
+def _capacity_attempts(run_id: str) -> list[dict]:
+    connection = pymysql.connect(
+        host=os.getenv("MYCLAW_GOAL1_MYSQL_HOST", "127.0.0.1"),
+        port=int(os.getenv("MYCLAW_GOAL1_MYSQL_PORT", "3307")),
+        user=os.getenv("MYCLAW_GOAL1_MYSQL_USER", "myclaw"),
+        password=os.getenv("MYCLAW_GOAL1_MYSQL_PASSWORD", "mypassword"),
+        database=os.getenv("MYCLAW_GOAL1_MYSQL_DATABASE", "myclaw_test"),
+        cursorclass=pymysql.cursors.DictCursor,
+    )
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT ta.status,ta.request_snapshot,ta.response_snapshot,"
+                "ta.request_hash,ta.outcome_confirmed FROM tool_attempt ta "
+                "JOIN tool_invocation ti ON ti.id=ta.tool_invocation_id "
+                "WHERE ti.run_id=%s AND ti.tool_key='execute' "
+                "ORDER BY ta.created_at,ta.id",
+                (run_id,),
+            )
+            return list(cursor.fetchall())
+    finally:
+        connection.close()
+
+
+def _json(value):
+    return json.loads(value) if isinstance(value, str) else value
+
+
+def _wait_verification(api: PhaseOneAPI, run_id: str, timeout: float = 60) -> dict:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        items = api.request(
+            "GET", f"/api/v1/runs/{run_id}/verification-results",
+        ).json()["items"]
+        if items:
+            return items[0]
+        time.sleep(0.2)
+    raise AssertionError("capacity_risk.v1 VerificationResult was not produced")
+
+
 def _wait_plan(api: PhaseOneAPI, run_id: str) -> dict:
     return api.wait_resource(
         f"/api/v1/runs/{run_id}",
@@ -70,7 +122,7 @@ def _wait_plan(api: PhaseOneAPI, run_id: str) -> dict:
 def _approve_tool_actions_until_terminal(
     api: PhaseOneAPI, session_id: str, run_id: str,
 ) -> dict:
-    deadline = time.monotonic() + 90
+    deadline = time.monotonic() + 300
     while time.monotonic() < deadline:
         run = api.request("GET", f"/api/v1/runs/{run_id}").json()
         if run["status"] in {"completed", "cancelled", "failed"}:
@@ -80,16 +132,26 @@ def _approve_tool_actions_until_terminal(
             params={"status": "pending"},
         ).json()["items"]
         for action in actions:
-            if action["type"] not in {"tool", "session_grant"}:
+            if action.get("run_id") != run_id:
                 continue
-            api.request(
-                "POST", f"/api/v1/approvals/{action['id']}/approve", idem=True,
-                headers={"If-Match": f'"{action["version"]}"'},
-                json={
-                    "subject_hash": action["subject_hash"],
-                    "reason": "Plan vertical acceptance Tool approval",
-                },
-            )
+            if action["type"] == "tool_confirmation":
+                api.request(
+                    "POST", f"/api/v1/tool-confirmations/{action['id']}/approve",
+                    idem=True, headers={"If-Match": f'W/"{action["version"]}"'},
+                    json={
+                        "arguments_hash": action["arguments_hash"],
+                        "reason": "Plan vertical acceptance Tool approval",
+                    },
+                )
+            elif action["type"] in {"tool", "session_grant"}:
+                api.request(
+                    "POST", f"/api/v1/approvals/{action['id']}/approve", idem=True,
+                    headers={"If-Match": f'"{action["version"]}"'},
+                    json={
+                        "subject_hash": action["subject_hash"],
+                        "reason": "Plan vertical acceptance Tool approval",
+                    },
+                )
         time.sleep(0.2)
     raise AssertionError("Plan implementation did not reach a terminal Run")
 
@@ -99,7 +161,7 @@ def test_plan_revision_cas_restart_approval_and_same_session_implementation(
     phase_api: PhaseOneAPI, assembled_world: dict, record_testsuite_property,
 ):
     api = phase_api
-    session = _session(api, assembled_world["audit_lead"]["id"])
+    session = _session(api, assembled_world["project_manager"]["id"])
     entered = _enter(
         api, session,
         "复杂任务：先只读调查并分步骤规划，然后把结论写入可下载的《验收报告 2026.txt》，"
@@ -213,7 +275,7 @@ def test_plan_dynamic_agent_invocation_rejection_and_cancel_paths(
     api = phase_api
     cards = api.request("GET", "/api/v1/agent-network/cards").json()["items"]
     assert len(cards) >= 3
-    session = _session(api, assembled_world["audit_lead"]["id"])
+    session = _session(api, assembled_world["project_manager"]["id"])
     entered = _enter(
         api, session,
         "复杂任务 plan-agent-network ask clarification：先形成计划，澄清统计周期，"
@@ -269,7 +331,7 @@ def test_plan_dynamic_agent_invocation_rejection_and_cancel_paths(
         ("plan-agent-network-development", "开发工程师"),
         ("plan-agent-network-test", "测试工程师"),
     ):
-        role_session = _session(api, assembled_world["audit_lead"]["id"])
+        role_session = _session(api, assembled_world["project_manager"]["id"])
         role_run = _enter(
             api, role_session,
             f"复杂任务 {marker}：按需查询并调用对应专业候选进行只读复核。",
@@ -292,7 +354,7 @@ def test_plan_dynamic_agent_invocation_rejection_and_cancel_paths(
         )
 
 
-@pytest.mark.timeout(600)
+@pytest.mark.timeout(2400)
 def test_plan_proposals_are_readable_30_of_30_and_adapt_5_of_5(
     phase_api: PhaseOneAPI, assembled_world: dict, record_testsuite_property,
 ):
@@ -300,7 +362,7 @@ def test_plan_proposals_are_readable_30_of_30_and_adapt_5_of_5(
     readable = 0
     adapted = 0
     for index in range(30):
-        session = _session(api, assembled_world["audit_lead"]["id"])
+        session = _session(api, assembled_world["project_manager"]["id"])
         entered = _enter(
             api, session,
             f"复杂任务：第 {index + 1} 个 proposal 可读性样本，请分步骤规划退款审计交付。",
@@ -334,3 +396,79 @@ def test_plan_proposals_are_readable_30_of_30_and_adapt_5_of_5(
     assert adapted == 5
     record_testsuite_property("proposal_readability", "30/30")
     record_testsuite_property("plan_adaptability", "5/5")
+
+    completed = 0
+    for index in range(5):
+        session = _session(api, assembled_world["project_manager"]["id"])
+        entered = _enter(
+            api, session,
+            f"复杂任务 CAPACITY-RISK-PLAN-V2：Plan 全流程样本 {index + 1}。先形成可读计划；"
+            "批准后在同一 Session 创建 requirements.md、capacity_risk.py、test_report.md、"
+            "acceptance_report.md，真实执行 T01-T09 九个容量边界样本并正式发布四个 Artifact。"
+            "规则：utilization=committed/capacity*100，<75 low，75..90 medium，>90 high；"
+            "capacity<=0、committed<0 或缺失 committed 均退出 2。JSON 必须 sort_keys 且紧凑。"
+            "精确 argv：(120,138),(100,74),(100,75),(100,90),(100,91),(100,0),"
+            "(0,10),(100,-1),(100,缺失)，均用 python3 capacity_risk.py --capacity N"
+            " [--committed N]；错误 code 依次 invalid_capacity/invalid_committed/"
+            "missing_committed，message 依次为 total_capacity_hours must be greater than 0、"
+            "committed_hours must be greater than or equal to 0、--committed is required。",
+        )
+        run_id = entered["run"]["id"]
+        assert _wait_plan(api, run_id)["status"] == "waiting_approval"
+        action = api.wait_action(session["id"], "plan_implementation")
+        plan = api.request(
+            "GET", f"/api/v1/runs/{run_id}/working-plans",
+        ).json()["items"][0]
+        approved = api.request(
+            "POST", f"/api/v1/working-plans/{plan['id']}/approve-implementation",
+            idem=True, headers={"If-Match": f'"{plan["version"]}"'},
+            json={
+                "expected_revision": plan["revision"],
+                "subject_hash": action["subject_hash"],
+            },
+        ).json()
+        assert approved["run"]["id"] == run_id
+        assert approved["session"]["id"] == session["id"]
+        terminal = _approve_tool_actions_until_terminal(api, session["id"], run_id)
+        assert terminal["status"] == "completed"
+        assert terminal["terminal_reason"] == "completed"
+        attempts = _capacity_attempts(run_id)
+        assert len(attempts) == 9
+        for attempt, case in zip(attempts, CAPACITY_CASES, strict=True):
+            request = _json(attempt["request_snapshot"])
+            response = _json(attempt["response_snapshot"])["data"]
+            assert request["argv"] == list(case.argv)
+            assert response["exit_code"] == case.exit_code
+            assert response["stdout"] == case.stdout
+            assert response["stderr"] == ""
+            assert bool(attempt["outcome_confirmed"]) is True
+            assert attempt["request_hash"] == hashlib.sha256(json.dumps(
+                request, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            ).encode()).hexdigest()
+        work_items = {
+            item["id"] for item in api.request(
+                "GET", f"/api/v1/runs/{run_id}/work-items",
+            ).json()["items"]
+        }
+        artifacts = [
+            item for item in api.request(
+                "GET", f"/api/v1/sessions/{session['id']}/artifacts",
+                params={"status": "published", "limit": 100},
+            ).json()["items"]
+            if item["work_item_id"] in work_items
+            and item["name"] in CAPACITY_ARTIFACT_NAMES
+        ]
+        assert {item["name"] for item in artifacts} == set(CAPACITY_ARTIFACT_NAMES)
+        for artifact in artifacts:
+            content = api.request(
+                "GET", f"/api/v1/artifacts/{artifact['id']}/download",
+            ).content
+            assert len(content) == artifact["size_bytes"]
+            assert hashlib.sha256(content).hexdigest() == artifact["checksum"]
+        verification = _wait_verification(api, run_id)
+        assert verification["rule_key"] == "capacity_risk.v1"
+        assert verification["status"] == "passed", verification
+        assert len(verification["source_refs"]) == 13
+        completed += 1
+    assert completed == 5
+    record_testsuite_property("plan_full_flow", "5/5")

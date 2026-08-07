@@ -137,7 +137,7 @@ async def test_run_deadline_fences_actions_and_preserves_unknown_tool_outcome():
         db.add(Run(
             id=run_id, session_id=session_id, user_id="deadline-user", mode="chat",
             status="waiting_tool",
-            wait_reason="waiting_tool", entry_agent_id=uuid7(), started_at=utcnow(),
+            wait_reason="waiting_tool",
             deadline_at=utcnow() - timedelta(seconds=1),
         ))
         db.add(WorkItem(

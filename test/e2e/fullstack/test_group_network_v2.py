@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+from pathlib import Path
+import subprocess
 import time
 import uuid
 
@@ -16,6 +18,25 @@ from app.services.verification_service import CAPACITY_ARTIFACT_NAMES, CAPACITY_
 
 
 pytestmark = pytest.mark.fullstack
+
+
+def _compose(*args: str) -> None:
+    test_root = Path(__file__).resolve().parents[2]
+    compose_file = Path(os.getenv(
+        "MYCLAW_COMPOSE_FILE", str(test_root / "docker-compose.test.yml"),
+    ))
+    command = ["docker", "compose"]
+    compose_env = os.getenv("MYCLAW_COMPOSE_ENV_FILE")
+    if compose_env:
+        command.extend(["--env-file", compose_env])
+    project = os.getenv("MYCLAW_COMPOSE_PROJECT") or os.getenv("COMPOSE_PROJECT_NAME")
+    if project:
+        command.extend(["-p", project])
+    aliases = {
+        "sandbox-worker-test": os.getenv("MYCLAW_SANDBOX_WORKER_SERVICE", "sandbox-worker-test"),
+    }
+    command.extend(["-f", str(compose_file), *(aliases.get(arg, arg) for arg in args)])
+    subprocess.run(command, cwd=test_root, check=True, timeout=120)
 
 
 def _database_evidence(group_id: str, run_id: str) -> dict:
@@ -83,7 +104,36 @@ def _approve_tool(api: PhaseOneAPI, action: dict) -> None:
     )
 
 
-def _wait_group_run(api: PhaseOneAPI, session_id: str, run_id: str, timeout: float = 180) -> dict:
+def _approve_action(api: PhaseOneAPI, action: dict) -> None:
+    if action["type"] == "tool_confirmation":
+        _approve_tool(api, action)
+        return
+    if action["type"] not in {"tool", "session_grant"}:
+        raise AssertionError(f"Unexpected Group action during Sandbox restart: {action}")
+    api.request(
+        "POST", f"/api/v1/approvals/{action['id']}/approve", idem=True,
+        headers={"If-Match": f'W/"{action["version"]}"'},
+        json={"subject_hash": action["subject_hash"], "reason": "Group UAT execution"},
+    )
+
+
+def _wait_run_action(
+    api: PhaseOneAPI, session_id: str, run_id: str, timeout: float = 180,
+) -> dict:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        actions = api.request(
+            "GET", f"/api/v1/sessions/{session_id}/required-actions",
+            params={"status": "pending"},
+        ).json()["items"]
+        action = next((item for item in actions if item.get("run_id") == run_id), None)
+        if action is not None:
+            return action
+        time.sleep(0.2)
+    raise AssertionError(f"No pending Tool action for Group Run {run_id}")
+
+
+def _wait_group_run(api: PhaseOneAPI, session_id: str, run_id: str, timeout: float = 600) -> dict:
     deadline = time.monotonic() + timeout
     handled: set[str] = set()
     last = None
@@ -132,7 +182,7 @@ def _wait_verification(api: PhaseOneAPI, run_id: str, timeout: float = 60) -> di
     raise AssertionError("capacity_risk.v1 VerificationResult was not produced")
 
 
-@pytest.mark.timeout(900)
+@pytest.mark.timeout(2400)
 def test_agent_network_group_vertical_uat(
     phase_api: PhaseOneAPI, assembled_world: dict, record_testsuite_property,
 ):
@@ -140,7 +190,7 @@ def test_agent_network_group_vertical_uat(
     product = world["product_manager"]
     development = world["developer"]
     test = world["test_engineer"]
-    external = world["external_supplier"]
+    external = world["project_manager"]
     selected = [product["id"], development["id"], test["id"]]
 
     # The directory is a projection of the exact current published versions.
@@ -163,36 +213,57 @@ def test_agent_network_group_vertical_uat(
 
     # API + database creation gate: ten consecutive direct selections succeed.
     creations = []
+    settled_runs: dict[str, dict] = {}
     for attempt in range(10):
         goal = (
             "CAPACITY-RISK-NETWORK-V2 Build a real capacity risk calculator with executable "
             f"boundary tests and an Artifact. EXTERNAL-AGENT:{external['id']}"
-            if attempt == 0 else f"GROUP-CREATE-ONLY-{attempt}: verify direct three-member creation"
+            if attempt < 5 else f"GROUP-CREATE-ONLY-{attempt}: verify direct three-member creation"
         )
-        group = api.request(
-            "POST", f"/api/v1/sessions/{session['id']}/groups", idem=True,
-            json={
-                "member_agent_ids": selected,
-                "reporter_agent_id": product["id"],
-                "goal": goal,
-                "shared_context_refs": [],
-            },
-        ).json()
-        assert group["membership_policy"] == "fixed_for_run"
-        assert group["initiator_agent_id"] == product["id"]
-        runs = api.request("GET", f"/api/v1/groups/{group['id']}/runs").json()["items"]
-        assert len(runs) == 1 and len(runs[0]["members"]) == 3
-        creations.append((group, runs[0]))
+        if attempt == 0:
+            _compose("stop", "sandbox-worker-test")
+        try:
+            group = api.request(
+                "POST", f"/api/v1/sessions/{session['id']}/groups", idem=True,
+                json={
+                    "member_agent_ids": selected,
+                    "reporter_agent_id": product["id"],
+                    "goal": goal,
+                    "shared_context_refs": [],
+                },
+            ).json()
+            assert group["membership_policy"] == "fixed_for_run"
+            assert group["initiator_agent_id"] == product["id"]
+            runs = api.request("GET", f"/api/v1/groups/{group['id']}/runs").json()["items"]
+            assert len(runs) == 1 and len(runs[0]["members"]) == 3
+            creations.append((group, runs[0]))
+            run_id = runs[0]["run"]["id"]
+            if attempt == 0:
+                first_action = _wait_run_action(api, session["id"], run_id)
+                _approve_action(api, first_action)
+                api.wait_resource(
+                    f"/api/v1/runs/{run_id}",
+                    lambda item: item["status"] == "waiting_tool",
+                )
+        finally:
+            if attempt == 0:
+                _compose("start", "sandbox-worker-test")
+        if attempt == 0:
+            settled_runs[run_id] = _wait_group_run(api, session["id"], run_id)
+        elif attempt < 5:
+            settled_runs[run_id] = _wait_group_run(api, session["id"], run_id)
     assert len({group["id"] for group, _run in creations}) == 10
     record_testsuite_property("group_creation_10_of_10", "passed")
 
     capacity_group, capacity = creations[0]
-    result = _wait_group_run(api, session["id"], capacity["run"]["id"])
+    result = settled_runs[capacity["run"]["id"]]
     assert result["status"] == "completed" and result["terminal_reason"] == "completed", result
 
-    # Drain the nine simple groups as an HTTP/runtime recovery sanity gate.
+    # Drain four more complete Group flows and the five creation-only flows.
     for _group, group_run in creations[1:]:
-        settled = _wait_group_run(api, session["id"], group_run["run"]["id"])
+        settled = settled_runs.get(group_run["run"]["id"])
+        if settled is None:
+            settled = _wait_group_run(api, session["id"], group_run["run"]["id"])
         assert settled["status"] == "completed" and settled["terminal_reason"] == "completed"
 
     messages = api.request(
@@ -253,7 +324,16 @@ def test_agent_network_group_vertical_uat(
         "GET", f"/api/v1/sessions/{session['id']}/artifacts",
         params={"status": "published", "limit": 100},
     ).json()["items"]
-    capacity_artifacts = [item for item in artifacts if item["name"] in CAPACITY_ARTIFACT_NAMES]
+    capacity_work_items = {
+        item["id"] for item in api.request(
+            "GET", f"/api/v1/runs/{capacity['run']['id']}/work-items",
+        ).json()["items"]
+    }
+    capacity_artifacts = [
+        item for item in artifacts
+        if item["name"] in CAPACITY_ARTIFACT_NAMES
+        and item["work_item_id"] in capacity_work_items
+    ]
     assert {item["name"] for item in capacity_artifacts} == set(CAPACITY_ARTIFACT_NAMES)
     assert len(capacity_artifacts) == 4
     downloaded = {}
@@ -293,6 +373,43 @@ def test_agent_network_group_vertical_uat(
     )
     record_testsuite_property("capacity_risk_verification", "9/9 + 4/4 passed")
 
+    full_flows = 1
+    for group, group_run in creations[1:5]:
+        run_id = group_run["run"]["id"]
+        group_messages = api.request(
+            "GET", f"/api/v1/groups/{group['id']}/messages",
+        ).json()["items"]
+        assert set(selected) <= {
+            item["sender_agent_id"] for item in group_messages if item["sender_agent_id"]
+        }
+        run_evidence = _database_evidence(group["id"], run_id)
+        run_attempts = [
+            item for item in run_evidence["tool_attempts"] if item["tool_key"] == "execute"
+        ]
+        assert len(run_attempts) == 9
+        assert all(item["status"] == "succeeded" for item in run_attempts)
+        run_work_items = {
+            item["id"] for item in api.request(
+                "GET", f"/api/v1/runs/{run_id}/work-items",
+            ).json()["items"]
+        }
+        run_artifacts = [
+            item for item in artifacts
+            if item["name"] in CAPACITY_ARTIFACT_NAMES
+            and item["work_item_id"] in run_work_items
+        ]
+        assert {item["name"] for item in run_artifacts} == set(CAPACITY_ARTIFACT_NAMES)
+        for artifact in run_artifacts:
+            content = api.request(
+                "GET", f"/api/v1/artifacts/{artifact['id']}/download",
+            ).content
+            assert len(content) == artifact["size_bytes"]
+            assert hashlib.sha256(content).hexdigest() == artifact["checksum"]
+        assert _wait_verification(api, run_id)["status"] == "passed"
+        full_flows += 1
+    assert full_flows == 5
+    record_testsuite_property("group_full_flow", "5/5")
+
     # Search the same durable Group history on two independent GroupRuns.
     history_runs = []
     for attempt in (1, 2):
@@ -319,5 +436,5 @@ def test_agent_network_group_vertical_uat(
         "GET", f"/api/v1/group-runs/{capacity['id']}",
     ).json()
     assert final_group_run["summary_epoch"] == final_group_run["delivered_summary_epoch"] == 1
-    assert "Capacity risk calculator delivered" in final_group_run["run"]["result_summary"]
+    assert any("Capacity risk calculator delivered" in item["content"] for item in messages)
     record_testsuite_property("agent_network_group_vertical", "passed")

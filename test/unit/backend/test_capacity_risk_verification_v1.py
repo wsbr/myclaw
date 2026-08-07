@@ -141,8 +141,7 @@ async def _seed_world(factory, tmp_path):
             Run(
                 id=ids["run"], session_id=ids["session"], user_id="capacity-user",
                 mode="chat", status="completed", terminal_reason="completed",
-                entry_agent_id=ids["agent"],
-                started_at=utcnow(), finished_at=utcnow(), completed_at=utcnow(),
+                completed_at=utcnow(),
             ),
             WorkItem(
                 id=ids["work"], run_id=ids["run"], session_id=ids["session"],

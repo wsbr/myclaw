@@ -8,6 +8,7 @@ MODE="${1:-standard}"
 PYTEST_BIN="${MYCLAW_TEST_PYTEST:-$TEST_ROOT/.venv/bin/pytest}"
 COMMIT_SHA="${MYCLAW_ACCEPTANCE_COMMIT_SHA:-$(git -C "$ROOT" rev-parse HEAD)}"
 COMPOSE_PROJECT_NAME="myclaw-ci-${COMMIT_SHA:0:10}"
+STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 export COMPOSE_PROJECT_NAME
 
 compose() {
@@ -126,15 +127,36 @@ run_migration_gate() {
     SELECT CONCAT('legacy_run_columns=', COUNT(*))
       FROM information_schema.COLUMNS
      WHERE TABLE_SCHEMA='myclaw_test' AND TABLE_NAME='run'
-       AND COLUMN_NAME IN ('lifecycle','outcome','execution_kind');
+       AND COLUMN_NAME IN (
+         'lifecycle','outcome','execution_kind','entry_agent_id','source_run_id',
+         'result_summary','error_code','started_at','finished_at'
+       );
     SELECT CONCAT('archive_seal_triggers=', COUNT(*))
       FROM information_schema.TRIGGERS
      WHERE TRIGGER_SCHEMA='myclaw_test'
        AND EVENT_OBJECT_TABLE='legacy_uat_fact_archive';
+    SELECT CONCAT('first_payload_columns=', COUNT(*))
+      FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA='myclaw_test' AND TABLE_NAME='provider_attempt'
+       AND COLUMN_NAME='first_payload_at';
+    SELECT CONCAT('schema_repair_columns=', COUNT(*))
+      FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA='myclaw_test' AND TABLE_NAME='agent_turn'
+       AND COLUMN_NAME='schema_repair_count';
   " | tee "$RESULTS_ROOT/schema-contract.txt"
   grep -qx 'legacy_tables=0' "$RESULTS_ROOT/schema-contract.txt"
   grep -qx 'legacy_run_columns=0' "$RESULTS_ROOT/schema-contract.txt"
   grep -qx 'archive_seal_triggers=3' "$RESULTS_ROOT/schema-contract.txt"
+  grep -qx 'first_payload_columns=1' "$RESULTS_ROOT/schema-contract.txt"
+  grep -qx 'schema_repair_columns=1' "$RESULTS_ROOT/schema-contract.txt"
+  echo "==> MySQL Agent-native integration round trip"
+  (
+    cd "$TEST_ROOT"
+    PYTHONPATH="$ROOT/backend" \
+      MYCLAW_V2_ACCEPTANCE_DATABASE_URL="mysql+aiomysql://myclaw:mypassword@127.0.0.1:3307/myclaw_test" \
+      "$PYTEST_BIN" integration/test_agent_native_v2_mysql.py -m integration -v --tb=short \
+      --junitxml="$RESULTS_ROOT/mysql-integration.xml"
+  )
   cleanup_stack
 }
 
@@ -182,4 +204,7 @@ case "$MODE" in
     ;;
 esac
 
+printf '%s\n' \
+  "{\"schema\":\"myclaw.ci_gate.v1\",\"mode\":\"${MODE}\",\"status\":\"passed\",\"commit_sha\":\"${COMMIT_SHA}\",\"started_at\":\"${STARTED_AT}\",\"completed_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" \
+  > "${RESULTS_ROOT}/${MODE}-gates.json"
 echo "All $MODE CI gates passed for $COMMIT_SHA."

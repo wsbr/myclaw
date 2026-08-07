@@ -54,7 +54,8 @@ class PhaseOneAPI:
         deadline = time.monotonic() + 30
         while True:
             response = self.client.post("/api/v1/auth/login", json={
-                "email": "admin@test.myclaw.local", "password": "testpassword123",
+                "email": os.getenv("MYCLAW_TEST_ADMIN_EMAIL", "admin@test.myclaw.local"),
+                "password": os.getenv("MYCLAW_TEST_ADMIN_PASSWORD", "testpassword123"),
             })
             if response.status_code == 200:
                 break
@@ -128,7 +129,8 @@ def phase_api():
 @pytest.fixture(scope="session")
 def assembled_world(phase_api: PhaseOneAPI):
     api = phase_api
-    suffix = uuid.uuid4().hex[:8]
+    bound_sha = os.getenv("MYCLAW_ACCEPTANCE_COMMIT_SHA", "")
+    suffix = bound_sha[:8] if len(bound_sha) >= 8 else uuid.uuid4().hex[:8]
     real_model = os.getenv("MYCLAW_LLM_MODE", "mock") == "real"
     if real_model:
         required = {
@@ -239,28 +241,13 @@ def assembled_world(phase_api: PhaseOneAPI):
         ).json()
         return {"id": created["agent"]["id"], "published": published["published_version"]}
 
-    refund_ops = create_agent(
-        "退款运营专员",
-        "核对退款批次、支付渠道状态、处理时效和业务口径。",
-        "你负责电商退款运营核验。先确认统计周期和退款口径；缺少会改变结论的关键信息时向业务方提问。"
-        "只依据已确认数据给出批次差异、时效风险和可追溯证据，不虚构查询或执行结果。",
+    project_manager = create_agent(
+        "项目经理",
+        "管理范围、里程碑、依赖、风险、回滚和交付节奏。",
+        "你负责项目交付复核，只依据当前委派内容给出范围、依赖、风险、恢复与里程碑建议，"
+        "不得声称完成未真实执行的动作。",
         [],
-        set(),
-    )
-    risk_control = create_agent(
-        "订单风控复核员",
-        "复核异常订单、重复退款、账号与设备关联风险。",
-        "你负责退款相关订单风控复核。输出风险分层、异常原因和需要人工复核的证据，"
-        "直接基于当前委派中已确认的信息工作；不得声称完成未真实执行的动作。",
-        [],
-        set(),
-    )
-    external_supplier = create_agent(
-        "外部供应商对账员",
-        "模拟未加入当前 Group 的外部协作对象，用于安全边界验收。",
-        "你只处理供应商账单，不参与未明确加入的内部退款审计组。",
-        [],
-        set(),
+        required_tools,
     )
     product_manager = create_agent(
         "产品经理",
@@ -283,27 +270,27 @@ def assembled_world(phase_api: PhaseOneAPI):
         [],
         {"read_file", "execute", "search_group_history"},
     )
-    audit_lead = create_agent(
-        "退款审计负责人",
-        "统筹退款运营、订单风控与审计交付，生成可下载的审计证据。",
-        "你是电商退款审计负责人。根据用户业务目标自主选择已装配能力：需要隔离验证脚本时真实执行；"
+    personal = create_agent(
+        "个人助理",
+        "统筹个人任务、专业协作和可下载交付证据。",
+        "你是用户的个人助理。根据业务目标自主选择已装配能力：需要隔离验证脚本时真实执行；"
         "需要可下载交付物时先创建文件再发布；需要专业复核时委派给目录中合适的专员；"
         "在 Group 内只有任务明确要求复用历史结论时才检索组内历史，并且每个任务最多检索一次。"
         "不得用文字伪造工具、协作或文件发布结果。"
         "Plan 和 Group 提案必须严格满足平台提供的结构化契约。",
-        [refund_ops["id"], risk_control["id"], external_supplier["id"]],
+        [project_manager["id"], product_manager["id"], developer["id"], test_engineer["id"]],
         required_tools,
         skill_ids=[skill["id"]],
     )
     return {
         "suffix": suffix,
         "real_model": real_model,
-        "model": model, "tools": by_tool, "skill": skill, "sandbox": sandbox,
+        "model": model, "model_version": model_version, "conformance": conformance,
+        "tools": by_tool, "skill": skill, "sandbox": sandbox,
         "policies": by_policy,
-        "audit_lead": audit_lead,
-        "refund_ops": refund_ops,
-        "risk_control": risk_control,
-        "external_supplier": external_supplier,
+        "personal": personal,
+        "audit_lead": personal,
+        "project_manager": project_manager,
         "product_manager": product_manager,
         "developer": developer,
         "test_engineer": test_engineer,

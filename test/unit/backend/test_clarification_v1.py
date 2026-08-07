@@ -57,7 +57,6 @@ async def test_answer_clarification_resumes_same_work_item_and_replays():
             Run(
                 id=run_id, session_id=session_id, user_id="u1", mode="chat",
                 status="waiting_user", wait_reason="waiting_user",
-                entry_agent_id=agent_id, started_at=utcnow(),
             ),
             WorkItem(
                 id=work_id, run_id=run_id, session_id=session_id, user_id="u1", mode="chat",

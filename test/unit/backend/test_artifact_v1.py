@@ -86,7 +86,7 @@ async def test_publish_artifact_copies_to_immutable_namespace_and_replays(tmp_pa
             UserSession(id=ids["session"], user_id="u1", entry_agent_id=ids["agent"],
                 status="active", origin_type="web", next_event_sequence=1),
             Run(id=ids["run"], session_id=ids["session"], user_id="u1", mode="chat",
-                status="active", entry_agent_id=ids["agent"], started_at=utcnow()),
+                status="active"),
             WorkItem(id=ids["work"], run_id=ids["run"], session_id=ids["session"], user_id="u1",
                 mode="chat", owner_agent_id=ids["agent"], agent_version_id=ids["version"], goal="G",
                 status="running", execution_epoch=1, attempt_no=1, active_runner_id=ids["runner"]),

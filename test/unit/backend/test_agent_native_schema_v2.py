@@ -21,7 +21,13 @@ def test_agent_native_schema_has_one_run_lifecycle_and_no_v1_graph_tables():
 
     run_columns = set(Base.metadata.tables["run"].columns.keys())
     assert {"status", "wait_reason", "terminal_reason", "completed_at"} <= run_columns
-    assert {"lifecycle", "outcome", "execution_kind"}.isdisjoint(run_columns)
+    assert {
+        "lifecycle", "outcome", "execution_kind", "entry_agent_id",
+        "source_run_id", "result_summary", "error_code", "started_at",
+        "finished_at",
+    }.isdisjoint(run_columns)
+    assert "first_payload_at" in Base.metadata.tables["provider_attempt"].columns
+    assert "schema_repair_count" in Base.metadata.tables["agent_turn"].columns
 
     group_columns = set(Base.metadata.tables["group_session"].columns.keys())
     assert {"session_id", "initiator_agent_id", "membership_policy"} <= group_columns

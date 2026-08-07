@@ -267,6 +267,8 @@ async def test_zero_payload_retry_creates_two_provider_attempts_but_one_agent_tu
         attempts = list(await db.scalars(select(ProviderAttempt).order_by(ProviderAttempt.attempt_no)))
         assert [attempt.status for attempt in attempts] == ["failed", "succeeded"]
         assert [attempt.received_payload for attempt in attempts] == [False, True]
+        assert attempts[0].first_payload_at is None
+        assert attempts[1].first_payload_at is not None
     await engine.dispose()
 
 
@@ -309,7 +311,6 @@ async def test_run_transport_retry_budget_bounds_zero_payload_replay():
         db.add(Run(
             id="run-1", session_id="session-1", user_id="user-1", mode="chat",
             status="active",
-            entry_agent_id="agent-1", started_at=utcnow(),
             hard_budget_snapshot={
                 "max_agent_turns": 4, "max_provider_attempts": 4,
                 "max_transport_retries": 1, "max_tool_invocations": 4,
@@ -370,7 +371,6 @@ async def test_post_provider_token_overage_blocks_business_tool_dispatch():
         db.add(Run(
             id="run-1", session_id="session-1", user_id="user-1", mode="chat",
             status="active",
-            entry_agent_id="agent-1", started_at=utcnow(),
             hard_budget_snapshot={
                 "max_agent_turns": 4, "max_provider_attempts": 4,
                 "max_transport_retries": 1, "max_tool_invocations": 4,
@@ -421,7 +421,6 @@ async def test_repeated_no_progress_turns_inject_persisted_runtime_diagnostic():
         db.add(Run(
             id="run-1", session_id="session-1", user_id="user-1", mode="chat",
             status="active",
-            entry_agent_id="agent-1", started_at=utcnow(),
             hard_budget_snapshot={
                 "max_agent_turns": 8, "max_provider_attempts": 8,
                 "max_transport_retries": 1, "max_tool_invocations": 8,

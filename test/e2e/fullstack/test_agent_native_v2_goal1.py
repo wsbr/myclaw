@@ -99,14 +99,78 @@ def _write_evidence(payload: dict) -> None:
 
 
 def test_agent_native_v2_goal1_fullstack_smoke(
-    phase_api: PhaseOneAPI, record_property,
+    phase_api: PhaseOneAPI, assembled_world: dict, record_property,
 ):
     api = phase_api
     sha = os.getenv("MYCLAW_ACCEPTANCE_COMMIT_SHA", "unbound")
     suffix = sha[:12] if sha != "unbound" else uuid.uuid4().hex[:12]
     record_property("commit_sha", sha)
     record_property("suite_version", "agent-native-v2.2")
-    record_property("flow", "api-outbox-v2-worker-mock-tool-result-plain-final")
+    real_model = assembled_world["real_model"]
+    record_property(
+        "flow",
+        "api-outbox-v2-worker-real-model-plain-final" if real_model
+        else "api-outbox-v2-worker-mock-tool-result-plain-final",
+    )
+
+    if real_model:
+        agent = assembled_world["personal"]
+        version = assembled_world["model_version"]
+        conformance = assembled_world["conformance"]
+        session = api.request(
+            "POST", "/api/v1/sessions", idem=True,
+            json={"entry_agent_id": agent["id"]},
+        ).json()
+        command = api.request(
+            "POST", f"/api/v1/sessions/{session['id']}/messages", idem=True,
+            json={
+                "content": (
+                    "Agent-native v2 UAT smoke: use the shared coordinator and reply with one "
+                    "short acknowledgement. Do not call a tool for this request."
+                ),
+            },
+        ).json()
+        run = api.wait_run(command["run"]["id"], timeout=180)
+        assert run["status"] == "completed", run
+        assert run["terminal_reason"] == "completed", run
+        messages = api.request(
+            "GET", f"/api/v1/sessions/{session['id']}/messages",
+        ).json()["items"]
+        assert messages[-1]["role"] == "assistant" and messages[-1]["content"].strip()
+        database = _mysql_rows(run["id"])
+        assert database["runner"] and all(
+            item["status"] == "succeeded" for item in database["runner"]
+        )
+        assert database["turns"] and database["attempts"]
+        assert all(item["status"] == "succeeded" for item in database["attempts"])
+        assert all(
+            _json_value(item["usage"]).get("input_tokens", 0) > 0
+            for item in database["attempts"]
+        )
+        assert "run.completed" in [item["event_type"] for item in database["events"]]
+        _write_evidence({
+            "schema": "myclaw.agent_native_v2.goal1_smoke.v1",
+            "commit_sha": sha,
+            "suite_version": conformance["suite_version"],
+            "model": {
+                "logical_model_id": assembled_world["model"]["id"],
+                "model_version_id": version["id"],
+                "model_version_content_hash": version["content_hash"],
+                "conformance_run_id": conformance["id"],
+            },
+            "agent": {
+                "agent_id": agent["id"],
+                "agent_version_id": agent["published"]["id"],
+                "agent_version_content_hash": agent["published"]["content_hash"],
+            },
+            "execution": {
+                "session_id": session["id"],
+                "run_id": run["id"],
+                "final_message": messages[-1]["content"],
+                "database": database,
+            },
+        })
+        return
 
     logical = api.request(
         "POST", "/api/v1/admin/models", idem=True,
@@ -223,7 +287,6 @@ def test_agent_native_v2_goal1_fullstack_smoke(
     run = api.wait_run(command["run"]["id"], timeout=90)
     assert run["status"] == "completed", run
     assert run["terminal_reason"] == "completed", run
-    assert run["result_summary"] == FINAL_MESSAGE
 
     messages = api.request(
         "GET", f"/api/v1/sessions/{session['id']}/messages",

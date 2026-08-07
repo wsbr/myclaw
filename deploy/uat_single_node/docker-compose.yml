@@ -84,6 +84,8 @@ services:
   runtime-worker:
     <<: *backend-common
     command: python -m app.workers.runtime_worker
+    deploy:
+      replicas: 2
     environment:
       <<: *app-environment
       OTEL_SERVICE_NAME: myclaw-uat-single-node-runtime-worker

@@ -1,6 +1,6 @@
 # 第一阶段 Agent-native 交付技术方案
 
-> 状态：目标设计，尚未表示代码完成。本文是 `vibe_2` 第一阶段架构、迁移、测试和 UAT 门禁总纲；详细数据、状态与 API 权威见本文链接。
+> 状态：第一阶段交付基线。是否完成只由同一 clean SHA 下 `uat_single_node` 的 JUnit、Trace、Artifact、恢复/回滚和环境证据判定；缺少任一证据或存在 P0/P1 时仍视为未完成。本文是 `vibe_2` 第一期架构、迁移、测试和 UAT 门禁总纲；详细数据、状态与 API 权威见本文链接。
 
 ## 1. 文档目标
 
@@ -1187,31 +1187,24 @@ Trace 属性使用 ID、状态、耗时、Token、Tool key 和 reason code；不
 - rejected、unknown 和 duplicate incident。
 
 必须先通过单次完整功能流，再开始统计批量样本。
+成本以 SHA 绑定 UAT 配置中的币种、输入/输出单价、单次输入上限、价格日期和权威来源计算；任何请求越过冻结价格档位则统计门禁失败，不静默套用低价。该数值是基于 Provider 返回 Token 的公开表价估算，不伪装为账单实扣金额。
 
 ## 23. 部署与回滚
 
 ### 23.1 UAT 部署
 
 - 单机 Docker Compose；
-- 使用独立 `myclaw-uat` Project、端口和 Volume；
+- 使用独立 `myclaw-uat-single-node` Project、端口和 Volume；
 - 部署前备份 MySQL 和 Workspace/Artifact；
 - 镜像记录 clean SHA 和 build metadata；
 - Provider 配置和 AgentVersion 不在测试中热修改；
 - Collector 持久目录权限真实烟测。
 
-### 23.2 Feature Flags
+### 23.2 切换状态
 
-迁移期仅使用最少开关：
-
-```text
-agent_loop_v2
-working_plan_v2
-plan_permission_mode_v2
-group_network_membership_v2
-verification_v1
-```
-
-不保留 `finalize_response` 的双写或双跑路径。旧 Session 只读查看，新的 UAT Session 只走 v2。
+第一阶段最终交付不保留运行时 Feature Flag、双写或双跑路径。旧 Session 与旧 UAT
+失败事实只读保留；新 `uat_single_node` Session 只进入 Agent-native v2 主链。若必须回看
+旧事实，应读取隔离旧环境或 `legacy_uat_fact_archive`，不得将其重新接回执行入口。
 
 ### 23.3 回滚
 
