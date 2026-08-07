@@ -337,7 +337,10 @@ def _capacity_plan_tool(
 ) -> tuple[str, dict] | None:
     """Exercise the same real Tool/Artifact path after Plan approval."""
     all_text = " ".join(message.content or "" for message in messages)
-    if "CAPACITY-RISK-PLAN-V2" not in all_text or '"mode": "direct"' not in all_text:
+    user_text = " ".join(
+        message.content or "" for message in messages if message.role == "user"
+    )
+    if "CAPACITY-RISK-PLAN-V2" not in user_text or '"mode": "direct"' not in all_text:
         return None
     names = _tool_names(tools)
     tool_results = " ".join(
@@ -404,7 +407,10 @@ def _capacity_group_tool(
     messages: list[ChatMessage], tools: list[dict] | None,
 ) -> tuple[str, dict] | None:
     all_text = " ".join(message.content or "" for message in messages)
-    if "CAPACITY-RISK-NETWORK-V2" not in all_text:
+    user_text = " ".join(
+        message.content or "" for message in messages if message.role == "user"
+    )
+    if "CAPACITY-RISK-NETWORK-V2" not in user_text:
         return None
     if "idempotent Reporter summary Turn" in all_text:
         return None
@@ -656,7 +662,10 @@ def _is_memory_extraction(messages: list[ChatMessage]) -> bool:
 
 def _build_content(messages: list[ChatMessage]) -> str:
     all_text = " ".join(message.content or "" for message in messages)
-    if "CAPACITY-RISK-NETWORK-V2" in all_text:
+    user_text = " ".join(
+        message.content or "" for message in messages if message.role == "user"
+    )
+    if "CAPACITY-RISK-NETWORK-V2" in user_text:
         current = _current_request_text(messages)
         if "idempotent Reporter summary Turn" in all_text:
             return (
