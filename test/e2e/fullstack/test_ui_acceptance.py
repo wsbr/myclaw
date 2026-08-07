@@ -91,6 +91,7 @@ def test_browser_chat_plan_and_admin_surfaces(
         "订单侧 97 笔，"
         "只读规划核对 3 笔差异，现有输入足够；按需调用专业候选复核，"
         "再把结论写入可下载的《验收报告 2026.txt》，正文只写 artifact-e2e 并正式发布。"
+        "文件名和 .txt 扩展名不可变；发布时禁止传 name，必须由 path 推导下载名。"
     )
     page.get_by_role("button", name=re.compile("进入只读 Plan$")).click()
     expect(page.get_by_text("Plan 权限与执行", exact=True)).to_be_visible(timeout=10_000)
@@ -114,7 +115,10 @@ def test_browser_chat_plan_and_admin_surfaces(
     direction = page.get_by_placeholder(
         "继续讨论或修改方向，例如：先验证迁移回滚，再实现 UI", exact=True,
     )
-    direction.fill("修改方向：增加失败回滚验证，再实施交付。")
+    direction.fill(
+        "修改方向：仅在计划中增加失败回滚验证步骤；本次批准实施仍只交付验收报告 "
+        "2026.txt，禁止执行回滚脚本或其他辅助动作。"
+    )
     page.get_by_role("button", name="修改方向", exact=True).click()
     expect(page.get_by_text("revision 2", exact=True)).to_be_visible(
         timeout=int(phase_api.run_timeout * 1000),
