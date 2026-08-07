@@ -13,6 +13,7 @@ from app.core.model_hub.registry import ModelHub
 from app.models.registry import ModelVersion
 from app.services.provider_conformance import (
     ProviderConformanceSuite,
+    _base_probe_parameters,
     _forced_tool_parameters,
 )
 
@@ -31,6 +32,16 @@ def test_forced_tool_probe_uses_compatible_variant_without_mutating_runtime_defa
         "tool_choice": "required",
     }
     assert frozen["extra_body"]["enable_thinking"] is True
+
+
+def test_reasoning_conformance_keeps_frozen_runtime_output_budget():
+    version = _version("openai_compatible")
+    version.default_parameters = {
+        "temperature": 0,
+        "max_tokens": 4096,
+        "extra_body": {"enable_thinking": True},
+    }
+    assert _base_probe_parameters(version)["max_tokens"] == 4096
 
 
 def _version(provider: str) -> ModelVersion:

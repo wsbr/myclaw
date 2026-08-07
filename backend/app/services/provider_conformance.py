@@ -133,6 +133,19 @@ def _forced_tool_parameters(
     return parameters
 
 
+def _base_probe_parameters(version: ModelVersion) -> dict[str, Any]:
+    defaults = dict(version.default_parameters or {})
+    return {
+        **defaults,
+        "model_id": version.model_name,
+        "temperature": 0,
+        # Keep the frozen runtime output budget up to the bounded UAT ceiling.
+        # Reasoning tokens count against this Provider field, so a legacy 512
+        # probe cap can suppress the visible continuation despite a valid call.
+        "max_tokens": min(4096, int(defaults.get("max_tokens", 512))),
+    }
+
+
 def resolve_credential(reference: str | None) -> str:
     if not reference:
         return "local-development-key"
@@ -170,12 +183,7 @@ class ProviderConformanceSuite:
         if missing:
             return ConformanceReport(False, tuple(probes))
 
-        base_parameters = {
-            **dict(version.default_parameters or {}),
-            "model_id": version.model_name,
-            "temperature": 0,
-            "max_tokens": min(512, int((version.default_parameters or {}).get("max_tokens", 512))),
-        }
+        base_parameters = _base_probe_parameters(version)
         zero_payload_proxy = _ZeroPayloadOnce(self.provider)
         plain = await ModelAdapter(zero_payload_proxy).invoke(ProviderRequest(
             messages=({
