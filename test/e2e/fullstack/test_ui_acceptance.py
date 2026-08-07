@@ -87,9 +87,11 @@ def test_browser_chat_plan_and_admin_surfaces(
 
     page.get_by_role("button", name="Plan", exact=True).click()
     page.get_by_placeholder("描述需要只读调查与规划的长任务目标", exact=True).fill(
-        "UI-PLAN-UAT-V2：复杂任务 plan-agent-network，已确认第二季度支付侧退款 100 笔、"
+        "UI-PLAN-UAT-V2：复杂任务，已确认第二季度支付侧退款 100 笔、"
         "订单侧 97 笔，"
-        "只读规划核对 3 笔差异，现有输入足够；按需调用专业候选复核，"
+        "只读规划核对 3 笔差异，现有输入足够且这些事实已经专业复核；不需要目录查询、委派或"
+        "补充输入。首次只提交一次恰好三项且全部 completed 的 WorkingPlan revision 1，然后用"
+        "普通消息给出提案，禁止调用其他 Tool。"
         "再把结论写入可下载的《验收报告 2026.txt》，正文只写 artifact-e2e 并正式发布。"
         "文件名和 .txt 扩展名不可变；发布时禁止传 name，必须由 path 推导下载名。"
     )

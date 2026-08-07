@@ -506,10 +506,11 @@ def test_agent_network_group_vertical_uat(
             "POST", f"/api/v1/groups/{capacity_group['id']}/runs", idem=True,
             json={
                 "content": (
-                    f"CAPACITY-RISK-NETWORK-V2 HISTORY-CHECK {attempt} "
+                    f"GROUP-HISTORY-CHECK-V2 {attempt} "
                     "HISTORY-SEARCH-REQUIRED：这是新的独立 GroupRun；无论之前的 Group 摘要或"
                     "引用 Run 是否已有结果，当前 Run 都必须独立调用 search_group_history 恰好"
-                    "一次后再回复，之前 Run 的检索不满足本 Run。"
+                    "一次，query 精确为 Capacity risk calculator delivered，然后立即用普通消息"
+                    "回复；之前 Run 的检索不满足本 Run。"
                 ),
                 "recipient_agent_id": product["id"],
                 "reporter_agent_id": product["id"],
