@@ -280,7 +280,8 @@ def assembled_world(phase_api: PhaseOneAPI):
         "WorkingPlan。若目标包含 plan-agent-network ask clarification，遵守开头的无过滤目录规则，"
         "完成一次产品经理 invoke_agent 后提交可审批计划。"
         "若目标要求《验收报告 2026.txt》正文 artifact-e2e，先 write_file 写入精确字节后再 "
-        "publish_artifact。若目标包含 CAPACITY-RISK-PLAN-V2，严格按目标顺序完成四个文件、"
+        "publish_artifact；publish_artifact 的 name 必须精确为‘验收报告 2026.txt’，不得省略扩展名。"
+        "若目标包含 CAPACITY-RISK-PLAN-V2，严格按目标顺序完成四个文件、"
         "T01-T09 九次 execute 和四次发布；每次只调用一个 Tool，全部完成前不得结束。",
         [],
         required_tools,
@@ -288,6 +289,8 @@ def assembled_world(phase_api: PhaseOneAPI):
     product_manager = create_agent(
         "产品经理",
         "澄清产品目标、用户价值、范围边界和验收优先级。",
+        "若当前委派文字包含 plan-agent-network-product，此规则优先于所有其他规则：直接用普通"
+        "消息返回产品范围、用户价值和验收风险复核，禁止调用任何 Tool，也禁止 ask_user。"
         "若当前 WorkItem 目标包含 CAPACITY-RISK-NETWORK-V2 HISTORY-CHECK，此规则优先于后面"
         "所有规则：只调用 search_group_history 恰好一次；该成功 ToolResult 返回后立即用普通消息"
         "总结命中的持久历史并结束，严禁第二次检索，也禁止 ask_user、write_file、execute、"
@@ -297,7 +300,8 @@ def assembled_world(phase_api: PhaseOneAPI):
         "初始 WorkItem 依次完成一次 send_group_message 给开发工程师、一次受控 invite_agent 和一次"
         "包含 CAPACITY-INVOKED-REVIEW 的测试工程师 invoke_agent；这些调用结果返回后立即用普通"
         "消息结束当前 WorkItem，不轮询或等待 DELIVERY-READY。以后收到 DELIVERY-READY 的新 "
-        "WorkItem 时直接给出产品验收结论并结束。"
+        "WorkItem 时直接给出产品验收结论并结束。所有 CAPACITY-RISK-NETWORK-V2 最终产品验收"
+        "和幂等 Reporter summary 都必须包含精确英文句子 ‘Capacity risk calculator delivered’。"
         "你负责产品目标和验收。在普通委派中只依据当前内容指出范围、用户价值和验收缺口。"
         "在 CAPACITY-RISK-NETWORK-V2 Group 中你是 Reporter：立即把完整容量计算器契约用 "
         "send_group_message 直接交给开发工程师实施；随后对目标给出的 EXTERNAL-AGENT 发起一次 "
@@ -312,6 +316,8 @@ def assembled_world(phase_api: PhaseOneAPI):
     developer = create_agent(
         "开发工程师",
         "评估实现方案、技术边界、迁移风险和可恢复性。",
+        "若当前委派文字包含 plan-agent-network-development，此规则优先于所有其他规则：直接用"
+        "普通消息返回开发实现、迁移和恢复风险复核，禁止调用任何 Tool，也禁止 ask_user。"
         "若当前目标包含 CAPACITY-RISK-NETWORK-V2，此规则优先：绝不调用 search_group_history。"
         "严格按目标的九条完整 argv 原样执行，--capacity 后的值绝不能与 --committed 后的值互换。"
         "完成四个发布后向测试工程师发送 TEST-REQUEST；该发送成功后立即用普通消息结束当前 "
@@ -334,6 +340,8 @@ def assembled_world(phase_api: PhaseOneAPI):
     test_engineer = create_agent(
         "测试工程师",
         "设计验收、失败注入、并发与恢复测试。",
+        "若当前委派文字包含 plan-agent-network-test，此规则优先于所有其他规则：直接用普通消息"
+        "返回测试、故障注入和恢复检查复核，禁止调用任何 Tool，也禁止 ask_user。"
         "若当前目标包含 CAPACITY-INVOKED-REVIEW，此规则优先于所有其他规则：直接用普通消息返回"
         "边界复核结论，禁止调用 read_file、execute、search_group_history 或任何其他 Tool。"
         "你负责测试方案复核，返回验收样本、失败路径和恢复检查建议。收到 "
