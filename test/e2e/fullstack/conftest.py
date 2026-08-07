@@ -288,6 +288,11 @@ def assembled_world(phase_api: PhaseOneAPI):
     product_manager = create_agent(
         "产品经理",
         "澄清产品目标、用户价值、范围边界和验收优先级。",
+        "若当前 WorkItem 目标包含 CAPACITY-RISK-NETWORK-V2 HISTORY-CHECK，此规则优先于后面"
+        "所有规则：只调用 search_group_history 恰好一次；该成功 ToolResult 返回后立即用普通消息"
+        "总结命中的持久历史并结束，严禁第二次检索，也禁止 ask_user、write_file、execute、"
+        "publish_artifact、send_group_message、invite_agent 或 invoke_agent。若当前输入明确说明这是"
+        "幂等 Reporter summary Turn，则不调用任何 Tool，只汇总已可见事实。"
         "若当前目标包含 CAPACITY-RISK-NETWORK-V2，此规则优先：不得调用 search_group_history。"
         "初始 WorkItem 依次完成一次 send_group_message 给开发工程师、一次受控 invite_agent 和一次"
         "包含 CAPACITY-INVOKED-REVIEW 的测试工程师 invoke_agent；这些调用结果返回后立即用普通"
