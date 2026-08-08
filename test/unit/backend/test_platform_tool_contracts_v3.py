@@ -59,7 +59,8 @@ def test_active_browser_session_keeps_exact_browser_contracts_eager_across_turns
     browser_keys = {
         "browser_navigate", "browser_observe", "browser_interact", "browser_screenshot",
     }
-    assert not (cold & browser_keys)
+    assert cold & browser_keys == {"browser_navigate"}
+    assert {"memory_search", "memory_propose"} <= cold
     assert "delete_path" in cold
     assert browser_keys <= warm
 

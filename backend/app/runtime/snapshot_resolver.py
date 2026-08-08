@@ -46,7 +46,8 @@ def _eager_platform_tool_keys(*, browser_session_active: bool) -> set[str]:
     keys = {
         "list_files", "search_files", "read_file", "write_file",
         "apply_patch", "delete_path", "execute", "publish_artifact",
-        "web_search", "web_fetch",
+        "web_search", "web_fetch", "browser_navigate",
+        "memory_search", "memory_propose",
     }
     # A Browser session is durable across user Turns. Once one exists, keep
     # its control surface visible so a confirmation or follow-up can continue
