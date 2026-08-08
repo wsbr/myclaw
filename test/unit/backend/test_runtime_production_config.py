@@ -123,10 +123,11 @@ def test_uat_single_node_uses_isolated_persistent_volumes_and_sha_bound_operatio
     assert "Refusing to accept a dirty workspace" in acceptance
     assert "MYCLAW_OBSERVE_SECONDS:-1800" in observation
     assert "MYCLAW_OBSERVE_INTERVAL_SECONDS:-30" in observation
-    assert "install -d -m 0750 -o 10001 -g 10001 /var/lib/myclaw/otel" in compose
+    assert "user: \"10001:10001\"" in compose
+    assert "install -d -m 0750 /var/lib/myclaw/otel" in compose
     assert "condition: service_completed_successfully" in compose
     assert "cap_drop: [ALL]" in compose
-    assert "cap_add: [CHOWN, FOWNER]" in compose
+    assert "cap_add:" not in compose
     assert "no-new-privileges:true" in compose
     assert "chown -R" not in compose
     assert "path: /var/lib/myclaw/otel/uat-otel-traces.jsonl" in collector

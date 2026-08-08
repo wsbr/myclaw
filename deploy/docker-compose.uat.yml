@@ -188,16 +188,15 @@ services:
 
   otel-volume-init:
     image: alpine:3.20
-    user: "0:0"
+    user: "10001:10001"
     read_only: true
     cap_drop: [ALL]
-    cap_add: [CHOWN, FOWNER]
     security_opt:
       - no-new-privileges:true
     command:
       - sh
       - -c
-      - install -d -m 0750 -o 10001 -g 10001 /var/lib/myclaw/otel
+      - install -d -m 0750 /var/lib/myclaw/otel
     volumes:
       - myclaw_data:/var/lib/myclaw
     restart: "no"

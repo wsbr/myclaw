@@ -38,8 +38,8 @@ deploy/uat/backup.sh
 
 OTLP Trace 同时写入平台数据库的 Runner Trace/Span 模型与外部应用卷中的
 `otel/uat-otel-traces.jsonl`。启动时的一次性 `otel-volume-init` 服务仅创建该专用目录，
-并赋予 Collector 固定的 `10001:10001` 身份写权限；该容器使用只读根文件系统、
-`no-new-privileges` 且只保留 `CHOWN/FOWNER`，不会递归修改应用卷内其他文件。
+并由与 Collector 相同的固定 `10001:10001` 身份创建；该容器使用只读根文件系统、
+`no-new-privileges` 且不保留任何 Linux capability，不会递归修改应用卷内其他文件。
 Collector 文件按 32 MiB 轮转，保留 30 天、最多 10 个备份；容器重建不会删除该文件。
 Collector 健康端口默认为 `http://127.0.0.1:13135/`。
 
