@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Alert, Button, Descriptions, Form, Input, Modal, Select, Space, Switch, Table, Tabs, Tag, message } from 'antd'
 import { ApiOutlined, EditOutlined, PlusOutlined, SyncOutlined } from '@ant-design/icons'
 import { useState } from 'react'
+import type { AxiosResponse } from 'axios'
 import client from '../../api/client'
 
 type ToolDefinition = {
@@ -27,6 +28,8 @@ type ToolConnection = {
   health: { status: string; checked_at: string | null; latency_ms: number | null; error_code: string | null }
 }
 
+type ToolPage = { items: ToolDefinition[]; next_cursor: string | null }
+
 const commandHeaders = (version?: number) => ({
   'Idempotency-Key': crypto.randomUUID(),
   ...(version === undefined ? {} : { 'If-Match': `"${version}"` }),
@@ -42,7 +45,21 @@ export default function ToolsTab() {
 
   const tools = useQuery({
     queryKey: ['platform-tools'],
-    queryFn: () => client.get('/platform-tools', { params: { limit: 500 } }).then(response => response.data.items as ToolDefinition[]),
+    queryFn: async () => {
+      const items: ToolDefinition[] = []
+      const seenCursors = new Set<string>()
+      let cursor: string | null = null
+      do {
+        const response: AxiosResponse<ToolPage> = await client.get<ToolPage>('/platform-tools', {
+          params: { limit: 100, ...(cursor ? { cursor } : {}) },
+        })
+        items.push(...response.data.items)
+        cursor = response.data.next_cursor || null
+        if (cursor && seenCursors.has(cursor)) throw new Error('platform_tools_cursor_cycle')
+        if (cursor) seenCursors.add(cursor)
+      } while (cursor)
+      return items
+    },
   })
   const connections = useQuery({
     queryKey: ['tool-connections'],

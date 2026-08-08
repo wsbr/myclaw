@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import mimetypes
 import re
 
 from sqlalchemy import select
 
 from app.models.artifact_v1 import Artifact, GroupArtifact
-from app.models.common import uuid7
 from app.models.group_v1 import GroupMembership, GroupRun
 from app.models.runtime_v1 import DurableRunner, ToolInvocation, WorkItem, Workspace
 from app.persistence.reliable_writes import ExecutionEventWriter
@@ -30,6 +31,7 @@ def artifact_view(artifact: Artifact) -> dict:
     return {
         "id": artifact.id, "user_id": artifact.user_id, "session_id": artifact.session_id,
         "workspace_id": artifact.workspace_id, "relative_path": artifact.relative_path,
+        "source_relative_path": artifact.source_relative_path,
         "name": artifact.name, "mime_type": artifact.mime_type,
         "size_bytes": artifact.size_bytes, "checksum": artifact.checksum,
         "created_by_agent_id": artifact.created_by_agent_id,
@@ -41,6 +43,27 @@ def artifact_view(artifact: Artifact) -> dict:
         "created_at": artifact.created_at.isoformat() if artifact.created_at else None,
         "updated_at": artifact.updated_at.isoformat() if artifact.updated_at else None,
     }
+
+
+def artifact_publication_key(
+    *, session_id: str, user_id: str, agent_id: str,
+    source_relative_path: str, checksum: str, name: str, mime_type: str,
+    parent_artifact_id: str | None, group_session_id: str | None,
+) -> str:
+    payload = {
+        "session_id": session_id,
+        "user_id": user_id,
+        "agent_id": agent_id,
+        "source_relative_path": source_relative_path,
+        "checksum": checksum,
+        "name": name,
+        "mime_type": mime_type,
+        "parent_artifact_id": parent_artifact_id,
+        "group_session_id": group_session_id,
+    }
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 async def publish_artifact(db, *, context, args: dict) -> Artifact:
@@ -86,6 +109,7 @@ async def publish_artifact(db, *, context, args: dict) -> Artifact:
     name = args.get("name") or source.name
     if not isinstance(name, str) or not SAFE_NAME.fullmatch(name):
         raise ArtifactPublishError("Artifact name must be a safe filename")
+    mime_type = args.get("mime_type") or mimetypes.guess_type(name)[0] or "application/octet-stream"
     parent = None
     if args.get("parent_artifact_id"):
         parent = await db.scalar(select(Artifact).where(
@@ -128,19 +152,37 @@ async def publish_artifact(db, *, context, args: dict) -> Artifact:
 
     content = source.read_bytes()
     source_checksum = sha256_file(source)
-    artifact_id = replay.id if replay is not None else uuid7()
+    publication_key = artifact_publication_key(
+        session_id=context.session_id, user_id=context.user_id,
+        agent_id=context.agent_id, source_relative_path=source_relative,
+        checksum=source_checksum, name=name, mime_type=mime_type,
+        parent_artifact_id=parent.id if parent else None,
+        group_session_id=group_session_id if membership else None,
+    )
+    equivalent = await db.scalar(select(Artifact).where(
+        Artifact.publication_key == publication_key,
+    ).with_for_update())
+    if equivalent is not None and equivalent.status == "published":
+        return equivalent
+    if equivalent is not None and equivalent.status == "unavailable":
+        raise ArtifactPublishError("equivalent Artifact publication is unavailable")
+    artifact_id = (
+        replay.id if replay is not None
+        else equivalent.id if equivalent is not None
+        else context.tool_invocation_id
+    )
     root = await workspace_root(
         db, workspace_id=context.workspace_id, session_id=context.session_id,
     )
     internal_relative = f".myclaw/artifacts/{artifact_id}/{name}"
     target = root.joinpath(*internal_relative.split("/"))
-    mime_type = args.get("mime_type") or mimetypes.guess_type(name)[0] or "application/octet-stream"
-    if replay is None:
+    if replay is None and equivalent is None:
         artifact = Artifact(
             id=artifact_id, user_id=context.user_id, session_id=context.session_id,
             workspace_id=context.workspace_id, relative_path=internal_relative,
             source_relative_path=source_relative, name=name,
             mime_type=mime_type, size_bytes=len(content), checksum=source_checksum,
+            publication_key=publication_key,
             created_by_agent_id=context.agent_id, work_item_id=work.id,
             runner_id=runner.id, tool_invocation_id=invocation.id,
             parent_artifact_id=parent.id if parent else None,
@@ -153,18 +195,14 @@ async def publish_artifact(db, *, context, args: dict) -> Artifact:
                 published_by_membership_id=membership.id,
             ))
         await db.flush()
-        # Durable intent precedes the immutable file snapshot.
-        await db.commit()
     else:
-        artifact = replay
+        artifact = replay or equivalent
         if (
             artifact.checksum != source_checksum
             or artifact.size_bytes != len(content)
             or artifact.relative_path != internal_relative
+            or artifact.publication_key != publication_key
         ):
-            artifact.status = "unavailable"
-            artifact.version += 1
-            await db.commit()
             raise ArtifactPublishError("publishing Artifact source changed after registration")
 
     if target.exists():
@@ -172,9 +210,6 @@ async def publish_artifact(db, *, context, args: dict) -> Artifact:
             not target.is_file() or target.stat().st_size != artifact.size_bytes
             or sha256_file(target) != artifact.checksum
         ):
-            artifact.status = "unavailable"
-            artifact.version += 1
-            await db.commit()
             raise ArtifactPublishError("immutable Artifact target has conflicting bytes")
     else:
         atomic_write(target, content)
@@ -183,10 +218,8 @@ async def publish_artifact(db, *, context, args: dict) -> Artifact:
         Artifact.id == artifact.id,
     ).with_for_update())
     if artifact.status == "published":
-        await db.commit()
         return artifact
     if artifact.status != "publishing":
-        await db.commit()
         raise ArtifactPublishError("Artifact publication cannot be resumed")
     artifact.status = "published"
     artifact.version += 1
@@ -204,7 +237,6 @@ async def publish_artifact(db, *, context, args: dict) -> Artifact:
         payload={"artifact_id": artifact.id, "name": name, "version_no": version_no},
         correlation_id=work.run_id,
     )
-    await db.commit()
     return artifact
 
 

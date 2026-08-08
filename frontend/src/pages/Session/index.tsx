@@ -545,13 +545,25 @@ export default function SessionPage() {
           }}
         >
           <div className={cn('mx-auto w-full', mode === 'group' ? 'max-w-5xl' : 'max-w-3xl')}>
-            {mode === 'group' ? <GroupPanel group={activeGroup} members={groupMembers} runs={groupRuns}
-              messages={groupMessages} graph={interactionGraph} cards={networkCards?.items || []}
-              plans={groupPlans} artifacts={artifacts} requiredActions={sessionActions}
-              sharedTasks={sharedTasks} busy={groupBusy}
-              onOpenNetwork={() => navigate('/network')}
-              onReplaceReporter={async value => { await replaceReporter.mutateAsync(value) }}
-              onDownload={sessionsApi.downloadArtifact} /> : <div className="space-y-6">
+            {mode === 'group' ? <div className="space-y-6">
+              <PendingActions
+                toolActions={toolActions}
+                clarifications={clarificationActions}
+                answers={clarificationAnswers}
+                deciding={decide.isPending}
+                answering={answerClarification.isPending}
+                onAnswerChange={(id, value) => setClarificationAnswers(current => ({ ...current, [id]: value }))}
+                onDecision={(action, decision) => decide.mutate({ action, decision })}
+                onAnswer={(action, answer) => answerClarification.mutate({ action, answer })}
+              />
+              <GroupPanel group={activeGroup} members={groupMembers} runs={groupRuns}
+                messages={groupMessages} graph={interactionGraph} cards={networkCards?.items || []}
+                plans={groupPlans} artifacts={artifacts} requiredActions={sessionActions}
+                sharedTasks={sharedTasks} busy={groupBusy}
+                onOpenNetwork={() => navigate('/network')}
+                onReplaceReporter={async value => { await replaceReporter.mutateAsync(value) }}
+                onDownload={sessionsApi.downloadArtifact} />
+            </div> : <div className="space-y-6">
               <PendingActions
                 toolActions={toolActions}
                 clarifications={clarificationActions}

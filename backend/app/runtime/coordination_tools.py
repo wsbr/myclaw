@@ -29,17 +29,18 @@ from app.services.group_collaboration_service import (
 RUNTIME_COORDINATION_DEFINITIONS = ({
     "name": "search_tools",
     "description": (
-        "WHEN: a needed capability is not currently visible. WHEN NOT: do not search for an already presented Tool. "
-        "RETURNS: matching pre-authorized frozen ToolVersions, presented next Turn. "
+        "WHEN: a needed capability is not currently visible, or inventory the authorized catalog with an empty "
+        "query. WHEN NOT: do not search for an already presented Tool. "
+        "RETURNS: matching pre-authorized frozen ToolVersions plus current execution availability; executable "
+        "schemas are presented next Turn, while temporarily blocked Tools remain discoverable for planning. "
         "RECOVERY: refine the capability query; discovery never expands authorization."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
-            "query": {"type": "string", "minLength": 1, "maxLength": 500},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 8},
+            "query": {"type": "string", "maxLength": 500, "default": ""},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
         },
-        "required": ["query"],
         "additionalProperties": False,
     },
     "source": "runtime",
@@ -198,7 +199,7 @@ for _definition in RUNTIME_COORDINATION_DEFINITIONS:
                 "input_schema": _definition["input_schema"],
                 "output_schema": _result_schema,
                 "side_effect": _definition.get("side_effect", "none"),
-                "runtime_contract_version": 2,
+                "runtime_contract_version": 4,
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -225,7 +226,7 @@ async def dispatch_coordination_tool(
                 error="Capability snapshot is unavailable", error_code="capability_snapshot_missing",
                 error_category="authorization",
             ), False, None
-        query = arguments["query"].casefold().strip()
+        query = str(arguments.get("query") or "").casefold().strip()
         tokens = [token for token in query.replace("_", " ").split() if token]
         ranked = []
         for definition in capability.authorized_tool_versions:
@@ -234,14 +235,26 @@ async def dispatch_coordination_tool(
                 name_value, str(definition.get("description") or "").casefold(),
                 str(definition.get("namespace") or "").casefold(),
             ])
-            score = sum(3 if token in name_value else 1 for token in tokens if token in haystack)
+            score = (
+                sum(3 if token in name_value else 1 for token in tokens if token in haystack)
+                if tokens else 1
+            )
             if score:
                 ranked.append((score, definition))
         ranked.sort(key=lambda item: (-item[0], item[1]["name"]))
-        loaded = [dict(item[1]) for item in ranked[:int(arguments.get("limit", 8))]]
+        loaded = [dict(item[1]) for item in ranked[:int(arguments.get("limit", 20))]]
+        effective = set(capability.effective_tool_keys or [])
+        denied_reasons = {
+            item.get("capability"): item.get("reason_code")
+            for item in (capability.denied_capabilities or [])
+        }
         summary = [{
             "name": item["name"], "description": item["description"],
             "tool_version_id": item.get("tool_version_id"),
+            "execution_available": item["name"] in effective,
+            "blocked_reason": (
+                None if item["name"] in effective else denied_reasons.get(item["name"])
+            ),
         } for item in loaded]
         return ToolResult(
             status="succeeded", summary=f"Loaded {len(loaded)} authorized ToolVersion(s)",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
@@ -25,6 +26,13 @@ from app.core.tool_registry.schema import (
 from app.core.tool_registry.builtin.workspace_catalog import (
     _compile_search_pattern, _parse_unified_diff,
 )
+from app.core.tool_registry.builtin import web_tools
+from app.core.tool_registry.builtin.browser_tools import _failure as browser_failure
+from app.core.tool_registry.builtin.execute import _bounded_execution_argv
+from app.workers.sandbox_worker import (
+    _attach_memory_disposition, _explicitly_proves_side_effect_not_started,
+)
+from app.services.artifact_service import artifact_publication_key
 from app.services.tool_connection_service import (
     ToolConnectionError,
     _assert_public_config,
@@ -34,12 +42,63 @@ from app.services.tool_connection_service import (
 from app.services.web_tool_service import (
     WebToolError, _public_address, _trusted_synthetic_address, _validate_url,
 )
+from app.runtime.coordination_tools import dispatch_coordination_tool
+from app.runtime.snapshot_resolver import _eager_platform_tool_keys
+from app.services.browser_worker_service import BrowserOutcomeUnknown, BrowserWorkerError
 from app.config import settings
 from app.config import Settings
 from app.schemas.registry_v1 import ModelVersionCreate
 
 
 pytestmark = pytest.mark.unit
+
+
+def test_active_browser_session_keeps_exact_browser_contracts_eager_across_turns():
+    cold = _eager_platform_tool_keys(browser_session_active=False)
+    warm = _eager_platform_tool_keys(browser_session_active=True)
+    browser_keys = {
+        "browser_navigate", "browser_observe", "browser_interact", "browser_screenshot",
+    }
+    assert not (cold & browser_keys)
+    assert "delete_path" in cold
+    assert browser_keys <= warm
+
+
+def test_browser_preinteraction_conflicts_are_not_misclassified_as_outcome_unknown():
+    conflict = browser_failure(BrowserWorkerError(
+        "observe again", code="browser_revision_conflict", category="conflict",
+    ))
+    unknown = browser_failure(BrowserOutcomeUnknown("worker stopped"))
+
+    assert conflict.status == "failed"
+    assert conflict.error.details == {"side_effect_started": False}
+    assert unknown.status == "outcome_unknown"
+    assert unknown.error.details == {}
+
+
+def test_memory_propose_result_reports_atomic_trusted_arbitration_disposition():
+    result = ToolResult(
+        status="succeeded", summary="candidate created",
+        data={"candidate_id": "candidate", "status": "pending"},
+        evidence=[{"kind": "user_messages", "message_ids": ["message"]}],
+    )
+    candidate = SimpleNamespace(
+        id="candidate", status="accepted", result_memory_id="memory",
+        rejection_code=None,
+    )
+
+    settled = _attach_memory_disposition(result, candidate)
+
+    assert settled.data["status"] == "accepted"
+    assert settled.data["memory_id"] == "memory"
+    assert settled.content_blocks == [{"type": "json", "value": settled.data}]
+    assert settled.evidence[-1]["kind"] == "memory_arbitration"
+
+
+def test_memory_search_contract_allows_bounded_inventory_recovery():
+    tool = BUILTIN_TOOLS["memory_search"]
+    assert tool.input_schema["properties"]["query"]["minLength"] == 0
+    assert "empty query" in tool.description
 
 
 def test_every_builtin_has_a_concrete_draft_2020_12_contract_and_recovery_description():
@@ -100,6 +159,165 @@ def test_runtime_context_call_chains_are_not_shared_between_runs():
     second = RuntimeContext(**values)
     first.call_chain.append("child")
     assert second.call_chain == []
+
+
+@pytest.mark.asyncio
+async def test_search_tools_reports_authorized_but_plan_blocked_versions_as_discoverable():
+    capability = SimpleNamespace(
+        id="capability",
+        authorized_tool_versions=[{
+            "name": "write_file",
+            "namespace": "platform",
+            "description": "Write a file in the governed Workspace",
+            "tool_version_id": "tool-version",
+        }],
+        effective_tool_keys=[],
+        denied_capabilities=[{
+            "capability": "write_file",
+            "reason_code": "permission_mode_readonly",
+        }],
+    )
+
+    class Database:
+        async def scalar(self, _statement):
+            return capability
+
+    result, durable_wait, wait_reason = await dispatch_coordination_tool(
+        "search_tools", {"query": "write file"},
+        context=RuntimeContext(
+            session_id="session", runner_id="runner",
+            user_id="user", agent_id="agent",
+            permission_mode="plan_readonly",
+        ),
+        db=Database(), run_id="run", work_item_id="work",
+        source_turn_id="turn", provider_call_id="call",
+    )
+
+    assert result.success is True
+    assert durable_wait is False and wait_reason is None
+    assert result.data["tools"] == [{
+        "name": "write_file",
+        "description": "Write a file in the governed Workspace",
+        "tool_version_id": "tool-version",
+        "execution_available": False,
+        "blocked_reason": "permission_mode_readonly",
+    }]
+
+
+@pytest.mark.asyncio
+async def test_search_tools_empty_query_can_inventory_the_authorized_catalog():
+    capability = SimpleNamespace(
+        id="capability",
+        authorized_tool_versions=[{
+            "name": "publish_artifact", "namespace": "platform",
+            "description": "Publish an immutable Artifact",
+            "tool_version_id": "publish-version",
+        }, {
+            "name": "write_file", "namespace": "platform",
+            "description": "Write a Workspace file",
+            "tool_version_id": "write-version",
+        }],
+        effective_tool_keys=[],
+        denied_capabilities=[
+            {"capability": "publish_artifact", "reason_code": "permission_mode_readonly"},
+            {"capability": "write_file", "reason_code": "permission_mode_readonly"},
+        ],
+    )
+
+    class Database:
+        async def scalar(self, _statement):
+            return capability
+
+    result, _, _ = await dispatch_coordination_tool(
+        "search_tools", {"query": "", "limit": 50},
+        context=RuntimeContext(
+            session_id="session", runner_id="runner",
+            user_id="user", agent_id="agent",
+            permission_mode="plan_readonly",
+        ),
+        db=Database(), run_id="run", work_item_id="work",
+        source_turn_id="turn", provider_call_id="call",
+    )
+
+    assert [item["name"] for item in result.data["tools"]] == [
+        "publish_artifact", "write_file",
+    ]
+    assert all(item["execution_available"] is False for item in result.data["tools"])
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_bounds_model_visible_text_by_default(monkeypatch):
+    captured: dict = {}
+
+    async def fake_safe_fetch(url: str, **kwargs):
+        captured.update({"url": url, **kwargs})
+        return {
+            "final_url": url,
+            "title": "Example",
+            "mime_type": "text/html",
+            "text": "bounded",
+            "checksum": "a" * 64,
+            "elapsed_ms": 1,
+            "text_length": 250_000,
+            "truncated": True,
+        }
+
+    monkeypatch.setattr(web_tools, "safe_fetch", fake_safe_fetch)
+    result = await BUILTIN_TOOLS["web_fetch"].execute(
+        {"url": "https://example.com/large-document"},
+        RuntimeContext(
+            session_id="session", runner_id="runner",
+            user_id="user", agent_id="agent",
+        ),
+    )
+
+    assert result.success is True
+    assert captured["max_text_chars"] == 8_000
+    assert BUILTIN_TOOLS["web_fetch"].input_schema["properties"]["max_chars"]["maximum"] == 100_000
+
+
+def test_execute_applies_memory_limit_after_the_worker_python_image_is_replaced(monkeypatch):
+    monkeypatch.setattr(
+        "app.core.tool_registry.builtin.execute.PRLIMIT_PATH",
+        "/usr/bin/prlimit",
+    )
+    assert _bounded_execution_argv(
+        ["sha256sum", "reports/platform-uat.txt"], memory_mb=256,
+    ) == [
+        "/usr/bin/prlimit", "--as=268435456", "--",
+        "sha256sum", "reports/platform-uat.txt",
+    ]
+
+
+def test_non_idempotent_failure_can_explicitly_prove_the_process_never_started():
+    result = ToolResult(
+        status="failed", summary="isolation unavailable",
+        error="process was not started",
+        error_code="execute_isolation_unavailable",
+        error_category="authorization",
+        error_details={"side_effect_started": False},
+    )
+    assert _explicitly_proves_side_effect_not_started(result) is True
+    uncertain = ToolResult(
+        status="failed", summary="provider disconnected",
+        error="lost response", error_category="provider",
+    )
+    assert _explicitly_proves_side_effect_not_started(uncertain) is False
+
+
+def test_artifact_publication_key_is_stable_and_version_sensitive():
+    values = {
+        "session_id": "session", "user_id": "user", "agent_id": "agent",
+        "source_relative_path": "reports/result.txt", "checksum": "a" * 64,
+        "name": "result.txt", "mime_type": "text/plain",
+        "parent_artifact_id": None, "group_session_id": None,
+    }
+    first = artifact_publication_key(**values)
+    assert first == artifact_publication_key(**values)
+    assert len(first) == 64
+    assert first != artifact_publication_key(
+        **{**values, "parent_artifact_id": "parent-version"},
+    )
 
 
 def test_openai_strict_projects_optional_fields_as_nullable_but_anthropic_keeps_optional_presence():

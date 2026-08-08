@@ -400,7 +400,23 @@ def builtin_tool_specs() -> list[CodeToolSpec]:
                 "untrusted_external_content": tool.name.startswith(("web_", "browser_")),
             },
             implementation_ref=f"{tool.__class__.__module__}:{tool.__class__.__name__}",
-            implementation_version="platform-tools.v3",
+            implementation_version=(
+                "platform-tools.v3.web-fetch-3"
+                if tool.name == "web_fetch"
+                else "platform-tools.v3.execute-2"
+                if tool.name == "execute"
+                else "platform-tools.v3.publish-artifact-2"
+                if tool.name == "publish_artifact"
+                else "platform-tools.v3.memory-propose-2"
+                if tool.name == "memory_propose"
+                else "platform-tools.v3.memory-search-2"
+                if tool.name == "memory_search"
+                else "platform-tools.v3.browser-interact-3"
+                if tool.name == "browser_interact"
+                else "platform-tools.v3.browser-screenshot-2"
+                if tool.name == "browser_screenshot"
+                else "platform-tools.v3"
+            ),
             execution_mode=governance[tool.name][2],
             side_effect=governance[tool.name][3],
             supports_cancel=tool.name == "execute",

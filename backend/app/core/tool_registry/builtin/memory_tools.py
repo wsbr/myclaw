@@ -24,13 +24,13 @@ class MemorySearchTool(BaseTool):
         "WHEN: retrieve currently effective user or user-agent facts with their message provenance. "
         "WHEN NOT: do not assume a missing fact is false and do not use this to modify Memory. "
         "RETURNS: active facts, scope, versions, confidence, and user-message sources. "
-        "RECOVERY: broaden the query or ask the user when no supported fact exists."
+        "RECOVERY: broaden the query or use an empty query for a bounded recent-fact inventory before asking the user."
     )
     input_schema = {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
         "properties": {
-            "query": {"type": "string", "minLength": 1, "maxLength": 500},
+            "query": {"type": "string", "minLength": 0, "maxLength": 500},
             "scope": {"type": "string", "enum": ["all", "user", "user_agent"], "default": "all"},
             "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 20},
         },
@@ -53,10 +53,14 @@ class MemorySearchTool(BaseTool):
         elif scope == "user_agent":
             statement = statement.where(MemoryRecord.scope == "user_agent")
         query = args["query"].strip()
-        statement = statement.where(or_(
-            MemoryRecord.fact_key.like(f"%{query}%"),
-            MemoryRecord.content.like(f"%{query}%"),
-        )).order_by(MemoryRecord.updated_at.desc()).limit(int(args.get("limit", 20)))
+        if query:
+            statement = statement.where(or_(
+                MemoryRecord.fact_key.like(f"%{query}%"),
+                MemoryRecord.content.like(f"%{query}%"),
+            ))
+        statement = statement.order_by(
+            MemoryRecord.updated_at.desc(), MemoryRecord.id.desc(),
+        ).limit(int(args.get("limit", 20)))
         records = list(await db.scalars(statement))
         items = [await memory_view(db, record) for record in records]
         data = {"items": items, "count": len(items), "query": query}
@@ -75,7 +79,7 @@ class MemoryProposeTool(BaseTool):
     description = (
         "WHEN: propose a durable fact explicitly supported by committed user messages. "
         "WHEN NOT: never write Memory directly or cite assistant/web/tool text as the source. "
-        "RETURNS: a pending candidate ID; arbitration applies conflicts and user-edit-wins rules later. "
+        "RETURNS: candidate ID plus the trusted arbitration disposition, effective Memory ID, and provenance. "
         "RECOVERY: ask the user to state the fact when no user-authored source message exists."
     )
     input_schema = {

@@ -52,6 +52,44 @@ class _InvalidToolOutput(RuntimeError):
         super().__init__("Tool output failed its immutable registered schema")
 
 
+def _explicitly_proves_side_effect_not_started(result: ToolResult) -> bool:
+    return bool(
+        result.error
+        and result.error.details.get("side_effect_started") is False
+    )
+
+
+def _attach_memory_disposition(result: ToolResult, candidate) -> ToolResult:
+    """Expose trusted arbitration outcome in the same atomic Tool result."""
+
+    data = {
+        **dict(result.data or {}),
+        "status": candidate.status,
+        "memory_id": candidate.result_memory_id,
+        "rejection_code": candidate.rejection_code,
+    }
+    result.data = data
+    result.summary = (
+        "Memory candidate accepted by governed arbitration"
+        if candidate.status == "accepted"
+        else "Memory candidate rejected by governed arbitration"
+        if candidate.status == "rejected"
+        else "Memory candidate remains pending governed arbitration"
+    )
+    result.content_blocks = [{"type": "json", "value": data}]
+    result.evidence = [
+        *result.evidence,
+        {
+            "kind": "memory_arbitration",
+            "candidate_id": candidate.id,
+            "status": candidate.status,
+            "memory_id": candidate.result_memory_id,
+            "rejection_code": candidate.rejection_code,
+        },
+    ]
+    return result
+
+
 def _safe_request_arguments(value):
     sensitive = ("password", "secret", "token", "api_key", "credential", "authorization")
     if isinstance(value, dict):
@@ -373,11 +411,6 @@ class SandboxWorker:
                         result = await ToolRegistry.execute(
                             claim.tool_key, claim.arguments, context, db=tool_db,
                         )
-                        output_issues = validation_error_refs(
-                            result.model_dump(mode="json"), claim.tool_output_schema,
-                        )
-                        if output_issues:
-                            raise _InvalidToolOutput(output_issues)
                         if (
                             claim.tool_key == "memory_propose"
                             and result.success
@@ -386,7 +419,15 @@ class SandboxWorker:
                         ):
                             # The Tool itself is proposal-only. The trusted platform
                             # adjudicator applies conflict/version/user-edit policy.
-                            await apply_memory_candidate(tool_db, result.data["candidate_id"])
+                            candidate = await apply_memory_candidate(
+                                tool_db, result.data["candidate_id"],
+                            )
+                            result = _attach_memory_disposition(result, candidate)
+                        output_issues = validation_error_refs(
+                            result.model_dump(mode="json"), claim.tool_output_schema,
+                        )
+                        if output_issues:
+                            raise _InvalidToolOutput(output_issues)
                 except _InvalidToolOutput as error:
                     result = ToolResult(
                         status="failed", summary="Tool returned an invalid result",
@@ -551,7 +592,11 @@ class SandboxWorker:
             elif result.error and result.error.category == "outcome_unknown":
                 attempt.status = "outcome_unknown"
                 invocation.status = "outcome_unknown"
-            elif claim.side_effect == "non_idempotent" and attempt.side_effect_started:
+            elif (
+                claim.side_effect == "non_idempotent"
+                and attempt.side_effect_started
+                and not _explicitly_proves_side_effect_not_started(result)
+            ):
                 # A failed return does not prove that an arbitrary business
                 # process produced no side effect. Preserve uncertainty and
                 # never enqueue another execution of this operation.

@@ -16,10 +16,17 @@ from app.services.workspace_file_service import (
 
 
 def _failure(error: BrowserWorkerError) -> ToolResult:
-    status = "outcome_unknown" if isinstance(error, BrowserOutcomeUnknown) else "failed"
+    outcome_unknown = isinstance(error, BrowserOutcomeUnknown)
+    status = "outcome_unknown" if outcome_unknown else "failed"
     return ToolResult(
         status=status, summary=str(error), error=str(error), error_code=error.code,
         error_category=error.category, retryable=False,
+        # Revision, fingerprint, validation, and authorization failures happen
+        # before Playwright is allowed to touch the page. This proof prevents
+        # the generic non-idempotent settler from inflating a safe conflict to
+        # outcome_unknown. BrowserOutcomeUnknown intentionally carries no such
+        # proof and must never be replayed automatically.
+        error_details={} if outcome_unknown else {"side_effect_started": False},
     )
 
 
@@ -146,7 +153,17 @@ class BrowserInteractTool(BaseTool):
             return _failure(error)
         artifacts = []
         if download and download.is_file():
-            artifact = await publish_artifact(db, context=context, args={"path": relative_download, "name": download.name})
+            try:
+                artifact = await publish_artifact(
+                    db, context=context,
+                    args={"path": relative_download, "name": download.name},
+                )
+            except Exception:
+                # The metadata transaction rolls back together with the Tool
+                # invocation. Remove the matching browser output as well so an
+                # exact retry does not conflict with an orphaned file.
+                download.unlink(missing_ok=True)
+                raise
             artifacts.append(artifact.id)
             data["download"] = {
                 **(data.get("download") or {}), "path": relative_download,
@@ -196,7 +213,17 @@ class BrowserScreenshotTool(BaseTool):
             )
         except BrowserWorkerError as error:
             return _failure(error)
-        artifact = await publish_artifact(db, context=context, args={"path": relative, "name": target.name, "mime_type": "image/png"})
+        try:
+            artifact = await publish_artifact(
+                db, context=context,
+                args={"path": relative, "name": target.name, "mime_type": "image/png"},
+            )
+        except Exception:
+            # The database transaction will roll back, so remove the matching
+            # filesystem capture as well. Otherwise a transient publication
+            # failure leaves an orphan that makes every exact retry conflict.
+            target.unlink(missing_ok=True)
+            raise
         data.update({"path": relative, "artifact_id": artifact.id, "checksum": sha256_file(target)})
         return ToolResult(status="succeeded", summary="Browser screenshot captured and published", data=data,
                           content_blocks=[{"type": "image", "artifact_id": artifact.id, "mime_type": "image/png"}],

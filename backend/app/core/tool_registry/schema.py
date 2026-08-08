@@ -201,14 +201,15 @@ BUILTIN_RESULT_DATA_SCHEMAS: dict[str, dict[str, Any]] = {
     "memory_propose": _object("candidate_id", "status", "fact_key", "source_message_ids", "observed_head_version", properties={
         "candidate_id": _S, "status": _S, "fact_key": _S,
         "source_message_ids": _A, "observed_head_version": {"type": ["integer", "null"]},
+        "memory_id": _N_S, "rejection_code": _N_S,
     }),
     "web_search": _object("query", "results", "count", properties={
         "query": _S, "results": _A, "count": _I,
     }),
-    "web_fetch": _object("final_url", "mime_type", "text", "checksum", "truncated", properties={
+    "web_fetch": _object("final_url", "mime_type", "text", "checksum", "truncated", "text_length", properties={
         "final_url": {"type": "string", "format": "uri"}, "mime_type": _S,
         "text": _S, "checksum": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "truncated": _B,
+        "truncated": _B, "text_length": _I,
     }),
     "browser_navigate": _object("url", "title", "status_code", "page_revision", "origin", properties={
         "url": {"type": "string", "format": "uri"}, "title": _S,

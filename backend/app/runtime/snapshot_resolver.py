@@ -17,7 +17,9 @@ from app.models.registry import (
     ModelVersion, SkillVersion, ToolConnectionRevision, ToolDefinition,
     ToolGovernance, ToolVersion,
 )
-from app.models.runtime_v1 import CapabilitySnapshot, DurableRunner, RunnerToolSnapshot
+from app.models.runtime_v1 import (
+    BrowserSessionState, CapabilitySnapshot, DurableRunner, RunnerToolSnapshot,
+)
 from app.runtime.coordination_tools import RUNTIME_COORDINATION_DEFINITIONS
 from app.services.agent_directory_service import discover_agent_cards
 
@@ -38,6 +40,24 @@ class ResolvedRuntimeSnapshot:
 def _hash(value: object) -> str:
     raw = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _eager_platform_tool_keys(*, browser_session_active: bool) -> set[str]:
+    keys = {
+        "list_files", "search_files", "read_file", "write_file",
+        "apply_patch", "delete_path", "execute", "publish_artifact",
+        "web_search", "web_fetch",
+    }
+    # A Browser session is durable across user Turns. Once one exists, keep
+    # its control surface visible so a confirmation or follow-up can continue
+    # with the latest page revision instead of falling back to an unrelated
+    # eager Tool such as execute.
+    if browser_session_active:
+        keys.update({
+            "browser_navigate", "browser_observe", "browser_interact",
+            "browser_screenshot",
+        })
+    return keys
 
 
 class SnapshotResolver:
@@ -82,6 +102,10 @@ class SnapshotResolver:
         }
         readonly = permission_mode in {"readonly", "plan_readonly"}
         budget_blocked = bool((hard_budget or {}).get("tool_calls_remaining") == 0)
+        browser_session_active = await db.get(BrowserSessionState, runner.session_id) is not None
+        eager_keys = _eager_platform_tool_keys(
+            browser_session_active=browser_session_active,
+        )
         for frozen in frozen_tools:
             tool = tools_by_id.get(frozen.platform_tool_id)
             if tool is None:
@@ -109,14 +133,9 @@ class SnapshotResolver:
                 reason = "connection_revision_missing"
             elif connection_revision and frozen.secret_fingerprint != connection_revision.secret_fingerprint:
                 reason = "secret_fingerprint_mismatch"
-            elif readonly and version.side_effect != "none":
-                reason = "permission_mode_readonly"
-            elif budget_blocked:
-                reason = "hard_budget_exhausted"
             if reason:
                 denied.append({"capability": tool.tool_key, "reason_code": reason})
                 continue
-            effective_keys.append(tool.tool_key)
             governance_by_key[tool.tool_key] = governance.version
             definition = {
                 "name": tool.tool_key,
@@ -144,10 +163,19 @@ class SnapshotResolver:
                 "source": "platform",
             }
             authorized_definitions.append(definition)
-            eager_keys = {
-                "list_files", "search_files", "read_file", "write_file",
-                "apply_patch", "execute", "publish_artifact", "web_search", "web_fetch",
-            }
+            if readonly and version.side_effect != "none":
+                denied.append({
+                    "capability": tool.tool_key,
+                    "reason_code": "permission_mode_readonly",
+                })
+                continue
+            if budget_blocked:
+                denied.append({
+                    "capability": tool.tool_key,
+                    "reason_code": "hard_budget_exhausted",
+                })
+                continue
+            effective_keys.append(tool.tool_key)
             if tool.tool_key in eager_keys or bool(version.annotations.get("eager")):
                 definitions.append(definition)
 

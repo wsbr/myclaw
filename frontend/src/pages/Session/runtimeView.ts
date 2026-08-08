@@ -85,17 +85,24 @@ const EVENT_LABELS: Record<string, string> = {
 export const friendlyEventLabel = (event: Pick<ExecutionEvent, 'event_type' | 'summary'>) =>
   EVENT_LABELS[event.event_type] || event.summary || event.event_type.split('_').join(' ')
 
+function parseApiTimestamp(value: string) {
+  // The API serializes UTC datetimes without an offset. Browsers otherwise
+  // interpret those values as local time, which inflates live run durations.
+  const normalized = /(?:Z|[+-]\d{2}:?\d{2})$/.test(value) ? value : `${value}Z`
+  return new Date(normalized)
+}
+
 export function formatClock(value?: string | null) {
   if (!value) return '—'
-  const date = new Date(value)
+  const date = parseApiTimestamp(value)
   if (Number.isNaN(date.getTime())) return '—'
   return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })
 }
 
 export function formatDuration(start?: string | null, end?: string | null) {
   if (!start) return '—'
-  const from = new Date(start).getTime()
-  const to = end ? new Date(end).getTime() : Date.now()
+  const from = parseApiTimestamp(start).getTime()
+  const to = end ? parseApiTimestamp(end).getTime() : Date.now()
   if (!Number.isFinite(from) || !Number.isFinite(to)) return '—'
   const seconds = Math.max(0, Math.round((to - from) / 1000))
   if (seconds < 60) return `${seconds} 秒`

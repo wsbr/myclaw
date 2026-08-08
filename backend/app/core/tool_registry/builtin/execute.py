@@ -7,6 +7,7 @@ import errno
 import os
 import platform
 import resource
+import shutil
 import signal
 import subprocess
 from pathlib import Path
@@ -29,6 +30,7 @@ _LANDLOCK_RESTRICT_SELF = 446
 _LANDLOCK_CREATE_RULESET_VERSION = 1
 _LANDLOCK_RULE_PATH_BENEATH = 1
 _PR_SET_NO_NEW_PRIVS = 38
+PRLIMIT_PATH = shutil.which("prlimit")
 
 
 class _LandlockRulesetAttr(ctypes.Structure):
@@ -209,15 +211,28 @@ def _landlock_restrict(workspace_root: str) -> None:
         os.close(ruleset_fd)
 
 
-def _resource_limits(*, cpu_seconds: int, memory_mb: int, workspace_root: str) -> None:
-    memory_bytes = memory_mb * 1024 * 1024
+def _resource_limits(*, cpu_seconds: int, workspace_root: str) -> None:
+    """Install limits that are safe to apply in the forked Python child.
+
+    RLIMIT_AS cannot be lowered here: the child temporarily retains the
+    long-lived Worker's virtual address space until exec(2), which can already
+    exceed the requested command limit.  The prlimit wrapper below applies the
+    address-space limit after that Python image has been replaced.
+    """
+
     resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds + 1))
-    resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))
     resource.setrlimit(resource.RLIMIT_FSIZE, (50 * 1024 * 1024, 50 * 1024 * 1024))
     if hasattr(resource, "RLIMIT_NPROC"):
         resource.setrlimit(resource.RLIMIT_NPROC, (64, 64))
     _landlock_restrict(workspace_root)
     _deny_network_syscalls()
+
+
+def _bounded_execution_argv(argv: list[str], *, memory_mb: int) -> list[str]:
+    if not PRLIMIT_PATH:
+        raise RuntimeError("prlimit is required for fail-closed memory isolation")
+    memory_bytes = memory_mb * 1024 * 1024
+    return [PRLIMIT_PATH, f"--as={memory_bytes}", "--", *argv]
 
 
 async def _watch_cancellation(invocation_id: str) -> bool:
@@ -307,26 +322,32 @@ class ExecuteTool(BaseTool):
                 input_file_checksums[value] = sha256_file(candidate)
         before = _snapshot(root)
         try:
+            bounded_argv = _bounded_execution_argv(argv, memory_mb=memory_mb)
             process = await asyncio.create_subprocess_exec(
-                *argv, cwd=cwd, env=environment,
+                *bounded_argv, cwd=cwd, env=environment,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,
                 preexec_fn=lambda: _resource_limits(
-                    cpu_seconds=cpu_seconds, memory_mb=memory_mb,
-                    workspace_root=str(root),
+                    cpu_seconds=cpu_seconds, workspace_root=str(root),
                 ),
             )
-        except subprocess.SubprocessError:
+        except (RuntimeError, subprocess.SubprocessError):
             return ToolResult(
                 status="failed",
                 summary="Sandbox filesystem/network isolation is unavailable",
                 error="The process was not started because fail-closed isolation could not be installed",
                 error_code="execute_isolation_unavailable",
                 error_category="authorization",
+                error_details={"side_effect_started": False},
             )
         except OSError as error:
-            return ToolResult(success=False, error=f"failed to start process: {error}")
+            return ToolResult(
+                status="failed", summary="Process could not be started",
+                error=f"failed to start process: {error}",
+                error_code="execute_start_failed", error_category="provider",
+                error_details={"side_effect_started": False},
+            )
         stdout_task = asyncio.create_task(_read_bounded(process.stdout, output_limit))
         stderr_task = asyncio.create_task(_read_bounded(process.stderr, output_limit))
         stdin_task = asyncio.create_task(_feed_stdin(process.stdin, stdin.encode("utf-8")))

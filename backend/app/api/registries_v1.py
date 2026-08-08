@@ -31,7 +31,7 @@ from app.services.provider_conformance import resolve_provider_credential
 from app.services.cursor_service import SortKey, paginate_scalars
 from app.services.mcp_tool_service import McpToolError, mcp_initialize_and_list, sync_mcp_tools
 from app.services.tool_connection_service import (
-    ToolConnectionError, connection_view, create_or_update_connection,
+    ToolConnectionError, _assert_public_config, connection_view, create_or_update_connection,
     resolve_connection_revision,
 )
 from app.services.web_tool_service import WebToolError, web_search

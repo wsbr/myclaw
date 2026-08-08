@@ -14,6 +14,7 @@ class Artifact(Base, TimestampMixin, VersionMixin):
         UniqueConstraint("session_id", "relative_path", "version_no", name="uq_artifact_path_version"),
         UniqueConstraint("parent_artifact_id", "version_no", name="uq_artifact_parent_version"),
         UniqueConstraint("tool_invocation_id", name="uq_artifact_tool_invocation"),
+        UniqueConstraint("publication_key", name="uq_artifact_publication_key"),
         Index("ix_artifact_session_status_created", "session_id", "status", "created_at"),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
@@ -26,6 +27,7 @@ class Artifact(Base, TimestampMixin, VersionMixin):
     mime_type: Mapped[str] = mapped_column(String(255), nullable=False)
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
     checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    publication_key: Mapped[str] = mapped_column(String(64), nullable=False)
     created_by_agent_id: Mapped[str] = mapped_column(String(36), ForeignKey("agent.id"), nullable=False)
     work_item_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("work_item.id"))
     runner_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("runner_v1.id"))

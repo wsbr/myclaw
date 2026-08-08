@@ -132,7 +132,7 @@ def _validate_url(value: str) -> tuple[str, str, int]:
 
 async def safe_fetch(
     url: str, *, timeout_seconds: int = 20, max_bytes: int = 10 * 1024 * 1024,
-    max_redirects: int = 5, max_text_chars: int = 100_000,
+    max_redirects: int = 5, max_text_chars: int = 8_000,
 ) -> dict:
     current = url
     redirects: list[str] = []
