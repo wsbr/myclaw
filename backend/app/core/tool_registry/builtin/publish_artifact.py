@@ -4,8 +4,14 @@ from app.services.artifact_service import artifact_view, publish_artifact
 
 class PublishArtifactTool(BaseTool):
     name = "publish_artifact"
-    description = "将当前 Workspace 中的稳定文件显式登记为不可覆盖的 Artifact；可发布到当前 Group"
+    description = (
+        "WHEN: publish a stable Workspace file as an immutable, downloadable Artifact. "
+        "WHEN NOT: do not publish a missing or still-changing file and do not use this to edit content. "
+        "RETURNS: Artifact ID, name, checksum, size, provenance, and optional parent version. "
+        "RECOVERY: verify the Workspace file/checksum, then publish a new immutable version."
+    )
     input_schema = {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
         "properties": {
             "path": {"type": "string"},
@@ -22,9 +28,15 @@ class PublishArtifactTool(BaseTool):
         if db is None:
             return ToolResult(success=False, error="database connection is required")
         artifact = await publish_artifact(db, context=context, args=args)
+        data = {"artifact": artifact_view(artifact)}
         return ToolResult(
-            success=True,
-            data={"artifact": artifact_view(artifact)},
+            status="succeeded",
+            data=data,
             summary=f"Artifact published: {artifact.name} ({artifact.id})",
+            content_blocks=[{"type": "artifact_reference", "artifact_id": artifact.id}],
             artifact_ids=[artifact.id],
+            evidence=[{
+                "kind": "artifact", "artifact_id": artifact.id,
+                "checksum": artifact.checksum, "source_path": args["path"],
+            }],
         )

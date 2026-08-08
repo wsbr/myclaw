@@ -86,8 +86,8 @@ class PublishedVersionResponse(BaseModel):
     memory_write_policy_version_id: str | None
     memory_recall_policy_version_id: str | None
     sandbox_profile_version_id: str | None
-    tools: list[dict[str, str]] = Field(default_factory=list)
-    skills: list[dict[str, str]] = Field(default_factory=list)
+    tools: list[dict[str, object]] = Field(default_factory=list)
+    skills: list[dict[str, object]] = Field(default_factory=list)
     agent_card_content_hash: str | None = None
 
 
@@ -107,8 +107,8 @@ class AgentVersionDetailResponse(AgentDraftInput):
     memory_write_policy_version_id: str | None
     memory_recall_policy_version_id: str | None
     sandbox_profile_version_id: str | None
-    frozen_tools: list[dict[str, str]] = Field(default_factory=list)
-    frozen_skills: list[dict[str, str]] = Field(default_factory=list)
+    frozen_tools: list[dict[str, object]] = Field(default_factory=list)
+    frozen_skills: list[dict[str, object]] = Field(default_factory=list)
     agent_card_content_hash: str | None = None
 
 

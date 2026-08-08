@@ -105,3 +105,64 @@
     height: 100vh;
   }
 }
+
+@layer components {
+  .runtime-pulse-dot {
+    @apply size-1.5 rounded-full bg-muted-foreground/70;
+    animation: runtime-pulse 1.1s ease-in-out infinite;
+  }
+
+  .runtime-live-badge {
+    @apply rounded-full bg-emerald-500/12 px-1.5 py-0.5 text-[9px] font-bold tracking-wider text-emerald-600 dark:text-emerald-400;
+  }
+
+  .session-composer-textarea.ant-input {
+    border-color: transparent;
+    background: transparent;
+    box-shadow: none;
+    padding: 0.55rem 0.65rem;
+    resize: none;
+  }
+
+  .session-composer-textarea.ant-input:focus,
+  .session-composer-textarea.ant-input-focused {
+    border-color: transparent;
+    box-shadow: none;
+  }
+
+  .message-markdown > :first-child { margin-top: 0; }
+  .message-markdown > :last-child { margin-bottom: 0; }
+  .message-markdown p { margin: 0.55rem 0; }
+  .message-markdown h1,
+  .message-markdown h2,
+  .message-markdown h3 { margin: 1rem 0 0.45rem; font-weight: 650; line-height: 1.35; }
+  .message-markdown h1 { font-size: 1.15rem; }
+  .message-markdown h2 { font-size: 1.05rem; }
+  .message-markdown h3 { font-size: 0.95rem; }
+  .message-markdown ul,
+  .message-markdown ol { margin: 0.55rem 0; padding-left: 1.35rem; }
+  .message-markdown ul { list-style: disc; }
+  .message-markdown ol { list-style: decimal; }
+  .message-markdown li { margin: 0.2rem 0; }
+  .message-markdown a { color: oklch(0.55 0.2 255); text-decoration: underline; text-underline-offset: 2px; }
+  .message-markdown blockquote { margin: 0.7rem 0; border-left: 3px solid var(--border); padding-left: 0.8rem; color: var(--muted-foreground); }
+  .message-markdown code { border-radius: 0.35rem; background: var(--muted); padding: 0.12rem 0.32rem; font-size: 0.82em; }
+  .message-markdown pre { margin: 0.75rem 0; overflow-x: auto; border-radius: 0.7rem; background: oklch(0.2 0 0); padding: 0.85rem; color: oklch(0.93 0 0); }
+  .message-markdown pre code { background: transparent; padding: 0; color: inherit; }
+  .message-markdown table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }
+  .message-markdown th,
+  .message-markdown td { border: 1px solid var(--border); padding: 0.35rem 0.55rem; text-align: left; }
+}
+
+@keyframes runtime-pulse {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.45; }
+  30% { transform: translateY(-3px); opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .runtime-pulse-dot,
+  .runtime-live-badge,
+  .animate-pulse {
+    animation: none !important;
+  }
+}

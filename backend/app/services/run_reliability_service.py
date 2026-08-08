@@ -61,7 +61,11 @@ def default_run_budget(mode: str) -> dict[str, int]:
         "max_tool_invocations": 64,
         "max_agent_invocations": 24,
         "max_transport_retries": 8,
-        "max_tokens": 160_000,
+        # A real-model Plan implementation can legitimately span roughly 20
+        # turns when every durable Tool result resumes through a new Runner.
+        # Keep enough variance headroom above the observed ~162k peak while
+        # retaining a strict, immutable Run-wide cap.
+        "max_tokens": 200_000,
         "max_active_seconds": 900,
         "no_progress_turns": 4,
     }
@@ -355,7 +359,7 @@ async def expire_one_run_deadline(db, *, actor_id: str) -> bool:
             "error": {
                 "code": "run_deadline_exceeded",
                 "message": "Run hard deadline elapsed",
-                "category": "outcome_unknown" if uncertain else "permanent",
+                "category": "outcome_unknown" if uncertain else "provider",
                 "details": {},
             },
         }

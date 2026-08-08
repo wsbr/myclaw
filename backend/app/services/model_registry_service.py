@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.core.platform_secrets import secret_reference, store_secret
 from app.models.common import utcnow, uuid7
 from app.models.registry import ConformanceRun, ModelVersion, RegisteredModel
 
@@ -62,15 +63,25 @@ async def create_model_version(
         raise LookupError("model not found")
     if model.version != expected_version:
         raise ModelRegistryConflict(f"model version changed; current={model.version}")
+    api_key = values.get("api_key")
+    if not api_key:
+        raise ValueError("model api_key is required")
+    secret = await store_secret(
+        db, plaintext=api_key, purpose=f"model:{model.id}",
+        created_by_account_id=actor_account_id,
+    )
+    stored_credential = secret_reference(secret)
     payload = {
         "model_id": model.id,
         "provider": values["provider"], "model_name": values["model_name"],
-        "endpoint": values.get("endpoint"), "credential_ref": values.get("credential_ref"),
+        "endpoint": values.get("endpoint"), "credential_ref": stored_credential,
         "default_parameters": values.get("default_parameters") or {},
         "capabilities": values.get("capabilities") or {},
         "adapter_protocol": "agent_native.v2",
     }
-    content_hash = _hash(payload)
+    hash_payload = dict(payload)
+    hash_payload["credential_ref"] = f"secret-fingerprint://{secret.fingerprint}"
+    content_hash = _hash(hash_payload)
     existing = await db.scalar(select(ModelVersion).where(
         ModelVersion.model_id == model.id, ModelVersion.content_hash == content_hash,
     ))

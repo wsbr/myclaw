@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from dataclasses import dataclass
 from collections.abc import AsyncIterator
 from typing import Any
@@ -12,12 +11,14 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.core.platform_secrets import resolve_secret_reference
 from app.core.model_hub.base import BaseLLM, LLMChunk, LLMResponse
 from app.core.model_hub.registry import ModelHub
 from app.models.common import utcnow, uuid7
 from app.models.registry import ConformanceRun, ModelVersion
 from app.runtime.model_adapter import ModelAdapter
 from app.runtime.context_assembler import ContextAssembler
+from app.runtime.coordination_tools import RUNTIME_COORDINATION_DEFINITIONS
 from app.runtime.protocol import ProviderError, ProviderRequest, StopReason
 
 
@@ -36,26 +37,12 @@ SECOND_PROBE_TOOL = {
     "name": "myclaw_conformance_echo_second",
 }
 
-COORDINATION_PROBE_TOOLS = ({
-    "name": "update_plan", "description": "Update a working plan revision.",
-    "input_schema": {
-        "type": "object", "properties": {"revision": {"type": "integer"}},
-        "required": ["revision"], "additionalProperties": False,
-    },
-}, {
-    "name": "ask_user", "description": "Ask the user for required input.",
-    "input_schema": {
-        "type": "object", "properties": {"question": {"type": "string"}},
-        "required": ["question"], "additionalProperties": False,
-    },
-}, {
-    "name": "invoke_agent", "description": "Invoke an authorized Agent.",
-    "input_schema": {
-        "type": "object", "properties": {
-            "agent_id": {"type": "string"}, "request": {"type": "string"},
-        },
-        "required": ["agent_id", "request"], "additionalProperties": False,
-    },
+COORDINATION_PROBE_TOOLS = tuple({
+    "name": item["name"],
+    "description": item["description"],
+    "input_schema": item["input_schema"],
+} for item in RUNTIME_COORDINATION_DEFINITIONS if item["name"] in {
+    "update_plan", "ask_user", "invoke_agent",
 })
 
 
@@ -147,18 +134,14 @@ def _base_probe_parameters(version: ModelVersion) -> dict[str, Any]:
 
 
 def resolve_credential(reference: str | None) -> str:
-    if not reference:
-        return "local-development-key"
-    if reference.startswith("env://"):
-        value = os.getenv(reference[6:], "")
-        if not value:
-            raise RuntimeError("credential reference is not configured")
-        return value
-    # Production secret-manager references are resolved by deployment
-    # integration. They are never treated as credential material here.
-    if "://" in reference:
-        raise RuntimeError("credential resolver does not support this reference scheme")
-    return reference
+    del reference
+    raise RuntimeError("model credentials must use the platform Secret store")
+
+
+async def resolve_provider_credential(db, reference: str | None) -> str:
+    if reference and reference.startswith("secret://"):
+        return await resolve_secret_reference(db, reference)
+    return resolve_credential(reference)
 
 
 class ProviderConformanceSuite:
@@ -412,8 +395,8 @@ class ProviderConformanceSuite:
         })
         coordination_cases = (
             (
-                "update_plan", {"revision": 2},
-                "Call update_plan exactly once with revision 2.",
+                "update_plan", {"items": [{"text": "Verify provider schema", "status": "completed"}]},
+                "Call update_plan exactly once with one completed item whose text is Verify provider schema.",
             ),
             (
                 "ask_user", {"question": "Which region should be used?"},
@@ -421,10 +404,10 @@ class ProviderConformanceSuite:
             ),
             (
                 "invoke_agent",
-                {"agent_id": "agent-conformance", "request": "Review the evidence."},
+                {"agent_id": "agent-conformance", "task": "Review the evidence."},
                 (
                     "Call invoke_agent exactly once with agent_id agent-conformance "
-                    "and request Review the evidence."
+                    "and task Review the evidence."
                 ),
             ),
         )
@@ -494,7 +477,9 @@ async def execute_conformance_run(
     try:
         if provider is None:
             provider = ModelHub.get(
-                {}, version.provider, resolve_credential(version.credential_ref), version.endpoint,
+                {}, version.provider,
+                await resolve_provider_credential(db, version.credential_ref),
+                version.endpoint,
             )
         report = await ProviderConformanceSuite(provider).run(version)
         run.status = "passed" if report.passed else "failed"
@@ -505,7 +490,7 @@ async def execute_conformance_run(
             "passed": False,
             "probes": [{
                 "name": "suite_execution", "passed": False,
-                "details": {"error_code": type(error).__name__, "message": str(error)[:1000]},
+                "details": {"error_code": type(error).__name__},
             }],
         }
     run.ended_at = utcnow()

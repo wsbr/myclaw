@@ -213,6 +213,8 @@ class RunnerCheckpoint(Base):
     working_plan_revision: Mapped[int | None] = mapped_column(BigInteger)
     result_cursor: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     pending_refs: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    loaded_tool_version_ids: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    presented_schema_bundle_hash: Mapped[str | None] = mapped_column(String(64))
     budget_snapshot: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     content_hash: Mapped[str | None] = mapped_column(String(64))
     last_completed_step: Mapped[str | None] = mapped_column(String(100))
@@ -242,6 +244,7 @@ class CapabilitySnapshot(Base):
     execution_principal: Mapped[dict] = mapped_column(JSON, nullable=False)
     assembled_tool_keys: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
     effective_tool_keys: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    authorized_tool_versions: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
     denied_capabilities: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
     discoverable_agents_scope: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     callable_agents_scope: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
@@ -291,6 +294,7 @@ class AgentTurn(Base):
     context_manifest: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     input_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     turn_items: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    presented_schema_bundle_hash: Mapped[str | None] = mapped_column(String(64))
     stop_reason: Mapped[str | None] = mapped_column(String(64))
     schema_repair_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     usage: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
@@ -634,6 +638,17 @@ class ToolInvocation(Base, TimestampMixin, VersionMixin):
     run_id: Mapped[str] = mapped_column(String(36), ForeignKey("run.id"), nullable=False)
     session_id: Mapped[str] = mapped_column(String(36), ForeignKey("user_session.id"), nullable=False)
     platform_tool_id: Mapped[str] = mapped_column(String(36), ForeignKey("platform_tool.id"), nullable=False)
+    tool_version_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("tool_version.id"), nullable=False
+    )
+    tool_version_content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    connection_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("tool_connection.id")
+    )
+    connection_revision_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("tool_connection_revision.id")
+    )
+    secret_fingerprint: Mapped[str | None] = mapped_column(String(64))
     tool_key: Mapped[str] = mapped_column(String(191), nullable=False)
     source_turn_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("agent_turn.id")
@@ -643,7 +658,6 @@ class ToolInvocation(Base, TimestampMixin, VersionMixin):
     capability_snapshot_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("capability_snapshot.id")
     )
-    tool_registration_hash: Mapped[str | None] = mapped_column(String(64))
     authorization_snapshot: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     execution_mode: Mapped[str] = mapped_column(String(20), nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="created", nullable=False)
@@ -786,9 +800,42 @@ class RunnerToolSnapshot(Base):
     __tablename__ = "runner_tool_snapshot"
     runner_id: Mapped[str] = mapped_column(String(36), ForeignKey("runner_v1.id"), primary_key=True)
     platform_tool_id: Mapped[str] = mapped_column(String(36), ForeignKey("platform_tool.id"), primary_key=True)
-    implementation_version: Mapped[str] = mapped_column(String(64), nullable=False)
-    config_version: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    tool_version_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("tool_version.id"), nullable=False
+    )
+    tool_version_content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    connection_revision_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("tool_connection_revision.id")
+    )
+    secret_fingerprint: Mapped[str | None] = mapped_column(String(64))
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False)
+
+
+class BrowserSessionState(Base, TimestampMixin, VersionMixin):
+    """Durable control-plane state for an isolated Chromium Session."""
+
+    __tablename__ = "browser_session_state"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('new','ready','closed','failed','outcome_unknown')",
+            name="ck_browser_session_status",
+        ),
+        Index("ix_browser_session_status_updated", "status", "updated_at"),
+    )
+
+    session_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("user_session.id"), primary_key=True
+    )
+    workspace_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("workspace.id")
+    )
+    worker_instance_id: Mapped[str | None] = mapped_column(String(191))
+    status: Mapped[str] = mapped_column(String(32), default="new", nullable=False)
+    page_revision: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
+    current_url: Mapped[str | None] = mapped_column(String(2000))
+    current_origin: Mapped[str | None] = mapped_column(String(500))
+    dom_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    last_operation: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
 
 
 class RunnerPolicySnapshot(Base):

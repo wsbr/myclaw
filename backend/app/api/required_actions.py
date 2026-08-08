@@ -424,7 +424,7 @@ async def decide_approval(
             "provider_request_id": None, "retryable": False,
             "error": {
                 "code": invocation.error_code, "message": invocation.error_detail,
-                "category": "permanent", "details": {},
+                "category": "authorization", "details": {},
             },
         }
     invocation.version += 1

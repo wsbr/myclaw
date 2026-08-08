@@ -22,6 +22,15 @@ def test_group_budget_has_bounded_peer_collaboration_headroom():
     assert group["max_active_seconds"] == 1_800
 
 
+def test_direct_budget_has_real_plan_flow_token_headroom():
+    chat = default_run_budget("chat")
+    plan = default_run_budget("plan")
+
+    assert chat["max_tokens"] == 200_000
+    assert plan["max_tokens"] == 200_000
+    assert plan["max_tokens"] < default_run_budget("group")["max_tokens"]
+
+
 def test_existing_run_budget_snapshot_is_not_rewritten_by_new_default():
     historical_400k = normalize_run_budget({"max_tokens": 400_000}, mode="group")
     historical_512k = normalize_run_budget({"max_tokens": 512_000}, mode="group")

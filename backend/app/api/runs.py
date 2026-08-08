@@ -20,6 +20,7 @@ from app.models.runtime_v1 import (
     WorkItem, WorkingPlan,
 )
 from app.models.verification_v1 import VerificationResult
+from app.models.registry import ToolConnection, ToolConnectionRevision, ToolVersion
 from app.persistence.reliable_writes import ExecutionEventWriter, OutboxWriter
 from app.persistence.runtime_graph import persist_replacement_runner
 from app.services.notification_delivery_service import create_notification_delivery_if_channel
@@ -108,6 +109,88 @@ async def get_run(
     current: SessionActor = Depends(get_session_actor),
 ):
     return RunResponse.model_validate(await _owned_run(db, run_id, current))
+
+
+def _redact_tool_value(value):
+    if isinstance(value, dict):
+        safe = {}
+        for key, item in value.items():
+            lowered = str(key).casefold()
+            if any(marker in lowered for marker in (
+                "password", "secret", "token", "api_key", "credential", "authorization",
+            )):
+                safe[key] = {"redacted": True, "configured": item not in (None, "")}
+            else:
+                safe[key] = _redact_tool_value(item)
+        return safe
+    if isinstance(value, list):
+        return [_redact_tool_value(item) for item in value]
+    return value
+
+
+@router.get("/runs/{run_id}/tool-invocations")
+async def list_run_tool_invocations(
+    run_id: str, db: AsyncSession = Depends(get_db),
+    current: SessionActor = Depends(get_session_actor),
+):
+    """Return the complete user-visible Tool ledger without any Secret value."""
+    await _owned_run(db, run_id, current)
+    invocations = list(await db.scalars(select(ToolInvocation).where(
+        ToolInvocation.run_id == run_id,
+    ).order_by(ToolInvocation.created_at, ToolInvocation.id)))
+    items = []
+    for invocation in invocations:
+        attempts = list(await db.scalars(select(ToolAttempt).where(
+            ToolAttempt.tool_invocation_id == invocation.id,
+        ).order_by(ToolAttempt.attempt_no)))
+        version = await db.get(ToolVersion, invocation.tool_version_id) if invocation.tool_version_id else None
+        connection = await db.get(ToolConnection, invocation.connection_id) if invocation.connection_id else None
+        revision_row = await db.get(ToolConnectionRevision, invocation.connection_revision_id) if invocation.connection_revision_id else None
+        result = _redact_tool_value(invocation.result_data or {})
+        safe_arguments = _redact_tool_value(invocation.arguments)
+        if (
+            invocation.tool_key == "browser_interact"
+            and safe_arguments.get("action") == "input"
+            and "text" in safe_arguments
+        ):
+            safe_arguments["text"] = {"redacted": True, "configured": True}
+        items.append({
+            "id": invocation.id, "tool_key": invocation.tool_key,
+            "tool_definition_id": invocation.platform_tool_id,
+            "tool_version_id": invocation.tool_version_id,
+            "tool_version_no": version.version_no if version else None,
+            "tool_version_content_hash": invocation.tool_version_content_hash,
+            "provider": connection.connection_type if connection else (result.get("provider") or {}).get("name"),
+            "connection_revision_id": invocation.connection_revision_id,
+            "connection_revision_no": revision_row.revision_no if revision_row else None,
+            "endpoint": (
+                revision_row.endpoint
+                if revision_row is not None and "admin" in current.roles else None
+            ),
+            "secret_fingerprint": invocation.secret_fingerprint,
+            "status": invocation.status,
+            "arguments": safe_arguments,
+            "arguments_hash": invocation.arguments_hash,
+            "attempt_count": invocation.attempt_count,
+            "result": result,
+            "attempts": [{
+                "id": attempt.id, "attempt_no": attempt.attempt_no,
+                "status": attempt.status,
+                "request": _redact_tool_value(attempt.request_snapshot or {}),
+                "response": _redact_tool_value(attempt.response_snapshot or {}),
+                "retryable": attempt.retryable,
+                "error_code": attempt.error_code,
+                "started_at": attempt.started_at.isoformat() if attempt.started_at else None,
+                "ended_at": attempt.ended_at.isoformat() if attempt.ended_at else None,
+                "latency_ms": (
+                    round((attempt.ended_at - attempt.started_at).total_seconds() * 1000)
+                    if attempt.started_at and attempt.ended_at else None
+                ),
+            } for attempt in attempts],
+            "created_at": invocation.created_at.isoformat(),
+            "updated_at": invocation.updated_at.isoformat(),
+        })
+    return {"items": items}
 
 
 @router.get("/sessions/{session_id}/runs", response_model=dict)

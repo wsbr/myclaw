@@ -6,8 +6,14 @@ from app.services.workspace_file_service import resolve_read_path, sha256_file
 
 class ReadFileTool(BaseTool):
     name = "read_file"
-    description = "分页读取当前 Workspace 文件或本 Runner 固定 Skill Catalog 中的只读文件"
+    description = (
+        "WHEN: read a bounded page from an authorized Workspace, frozen Skill, or Artifact file. "
+        "WHEN NOT: use list_files/search_files to discover paths first; never infer missing content. "
+        "RETURNS: decoded content, checksum, byte offsets, size, and truncation state. "
+        "RECOVERY: continue at next_offset or choose the correct encoding."
+    )
     input_schema = {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
         "properties": {
             "path": {"type": "string"},
@@ -43,11 +49,16 @@ class ReadFileTool(BaseTool):
         except UnicodeDecodeError:
             return ToolResult(success=False, error=f"file content is not valid {encoding}")
         next_offset = offset + len(chunk)
-        return ToolResult(success=True, data={
+        data = {
             "path": display_path,
             "content": content,
             "truncated": next_offset < size,
             "next_offset": next_offset if next_offset < size else None,
             "size": size,
             "checksum": sha256_file(path),
-        })
+        }
+        return ToolResult(
+            status="succeeded", summary=f"Read {len(chunk)} bytes from {display_path}",
+            data=data, content_blocks=[{"type": "text", "text": content}],
+            evidence=[{"kind": "file", "path": display_path, "checksum": data["checksum"], "byte_offset": offset, "byte_length": len(chunk)}],
+        )

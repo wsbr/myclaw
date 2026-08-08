@@ -137,6 +137,11 @@ class AgentLoopCoordinator:
         identity: LoopIdentity | None = None,
     ) -> AgentLoopResult:
         messages = [dict(item) for item in context.messages]
+        presented_definitions = [dict(item) for item in tool_definitions]
+        loaded_tool_version_ids = {
+            item.get("tool_version_id") for item in presented_definitions
+            if item.get("tool_version_id")
+        }
         continuation_start = len(messages)
         turns: list[NormalizedTurnResult] = []
         dispatches: list[DispatchResult] = []
@@ -176,6 +181,14 @@ class AgentLoopCoordinator:
                         else capability_snapshot["id"]
                     ),
                     turn_no=int(previous) + 1, status="started",
+                    presented_schema_bundle_hash=hashlib.sha256(json.dumps([
+                        {
+                            "name": item["name"],
+                            "input_schema": item.get("input_schema") or {},
+                            "registration_hash": item.get("registration_hash"),
+                        }
+                        for item in presented_definitions
+                    ], ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
                     context_manifest=list(context.manifest),
                     input_hash=hashlib.sha256(json.dumps(
                         messages, ensure_ascii=False, sort_keys=True, default=str
@@ -188,7 +201,7 @@ class AgentLoopCoordinator:
             try:
                 result = await self.adapter.invoke(
                     ProviderRequest(
-                        messages=tuple(messages), tools=tuple(tool_definitions),
+                        messages=tuple(messages), tools=tuple(presented_definitions),
                         parameters=model_parameters,
                     ),
                     attempt_observer=recorder.observe if recorder else None,
@@ -257,18 +270,54 @@ class AgentLoopCoordinator:
                 waiting = False
                 turn_schema_repairs = 0
                 turn_dispatches: list[DispatchResult] = []
-                for call in tool_calls:
-                    dispatched = await self.dispatcher.dispatch(
-                        call, capability_snapshot=capability_snapshot,
-                        runtime_context=runtime_context, db=db,
-                        run_id=identity.run_id if identity else None,
-                        work_item_id=identity.work_item_id if identity else None,
-                        source_turn_id=persisted_turn.id if persisted_turn else None,
-                    )
+                batch_results = await self.dispatcher.dispatch_batch(
+                    tool_calls, capability_snapshot=capability_snapshot,
+                    runtime_context=runtime_context, db=db,
+                    run_id=identity.run_id if identity else None,
+                    work_item_id=identity.work_item_id if identity else None,
+                    source_turn_id=persisted_turn.id if persisted_turn else None,
+                )
+                for call, dispatched in zip(tool_calls, batch_results, strict=True):
                     dispatches.append(dispatched)
                     turn_dispatches.append(dispatched)
+                    provider_dispatch = dispatched
+                    if call.name == "search_tools" and dispatched.result.success:
+                        loaded = list((dispatched.result.data or {}).get("loaded_tool_definitions") or [])
+                        effective = set(
+                            capability_snapshot.effective_tool_keys
+                            if isinstance(capability_snapshot, CapabilitySnapshot)
+                            else capability_snapshot.get("effective_tool_keys", [])
+                        )
+                        existing_names = {item["name"] for item in presented_definitions}
+                        admitted = [
+                            item for item in loaded
+                            if item.get("name") in effective and item.get("name") not in existing_names
+                        ]
+                        presented_definitions.extend(admitted)
+                        self.dispatcher.add_definitions(admitted)
+                        loaded_tool_version_ids.update(
+                            item.get("tool_version_id") for item in admitted
+                            if item.get("tool_version_id")
+                        )
+                        # Full frozen definitions are Runtime-internal and are
+                        # presented as actual schemas on the next Turn. Avoid
+                        # duplicating them into model context and checkpoints.
+                        provider_dispatch = DispatchResult(
+                            call_id=dispatched.call_id,
+                            tool_name=dispatched.tool_name,
+                            result=dispatched.result.model_copy(update={
+                                "data": {
+                                    "tools": (dispatched.result.data or {}).get("tools", []),
+                                    "loaded_tool_definitions": [],
+                                },
+                            }),
+                            invocation_id=dispatched.invocation_id,
+                            durable_wait=dispatched.durable_wait,
+                            schema_error=dispatched.schema_error,
+                            wait_reason=dispatched.wait_reason,
+                        )
                     if not dispatched.durable_wait:
-                        messages.append(dispatched.provider_message())
+                        messages.append(provider_dispatch.provider_message())
                     waiting = waiting or dispatched.durable_wait
                     if dispatched.schema_error:
                         schema_repairs += 1
@@ -333,7 +382,16 @@ class AgentLoopCoordinator:
                     checkpoint_payload = {
                         "pending_results": continuation_messages,
                         "last_agent_turn_id": persisted_turn.id if persisted_turn else None,
+                        "loaded_tool_version_ids": sorted(loaded_tool_version_ids),
                     }
+                    presented_hash = hashlib.sha256(json.dumps([
+                        {
+                            "name": item["name"],
+                            "input_schema": item.get("input_schema") or {},
+                            "registration_hash": item.get("registration_hash"),
+                        }
+                        for item in presented_definitions
+                    ], ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
                     checkpoint_hash = hashlib.sha256(json.dumps(
                         checkpoint_payload, ensure_ascii=False,
                         sort_keys=True, default=str,
@@ -359,6 +417,8 @@ class AgentLoopCoordinator:
                                 if item.invocation_id
                             ],
                         },
+                        loaded_tool_version_ids=sorted(loaded_tool_version_ids),
+                        presented_schema_bundle_hash=presented_hash,
                         content_hash=checkpoint_hash,
                         last_completed_step="tool_results_persisted",
                         safe_to_resume=True,

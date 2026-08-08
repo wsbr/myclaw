@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Awaitable, Callable
 
 from sqlalchemy import select
@@ -13,9 +13,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.tool_registry.base import RuntimeContext, ToolError, ToolResult
 from app.core.tool_registry.registry import ToolRegistry
+from app.core.tool_registry.schema import validation_error_refs, validation_errors
+from app.core.platform_secrets import secret_reference, store_secret
 from app.models.common import utcnow, uuid7
 from app.models.foundation import UserSession
-from app.models.runtime_v1 import Approval, CapabilitySnapshot, Run, SessionGrant, ToolInvocation
+from app.models.runtime_v1 import (
+    Approval, BrowserSessionState, CapabilitySnapshot, Run, SessionGrant, ToolInvocation,
+)
 from app.persistence.reliable_writes import ExecutionEventWriter
 from app.runtime.coordination_tools import dispatch_coordination_tool
 from app.runtime.protocol import ToolCallItem
@@ -44,50 +48,129 @@ class DispatchResult:
 Executor = Callable[[str, dict[str, Any], RuntimeContext, AsyncSession | None], Awaitable[ToolResult]]
 
 
+def _safe_argument_projection(value: Any, *, force_text_redaction: bool = False) -> Any:
+    """Return a UI/log-safe projection while hashes continue binding raw input."""
+
+    sensitive = ("password", "secret", "token", "api_key", "credential", "authorization")
+    if isinstance(value, dict):
+        projected: dict[str, Any] = {}
+        for key, item in value.items():
+            lowered = str(key).casefold()
+            if any(marker in lowered for marker in sensitive) or (
+                force_text_redaction and key == "text"
+            ):
+                projected[key] = "[REDACTED]"
+            else:
+                projected[key] = _safe_argument_projection(item)
+        return projected
+    if isinstance(value, list):
+        return [_safe_argument_projection(item) for item in value]
+    return value
+
+
 def _schema_errors(value: Any, schema: dict[str, Any], path: str = "$") -> list[str]:
-    errors: list[str] = []
-    expected = schema.get("type")
-    if expected == "object":
-        if not isinstance(value, dict):
-            return [f"{path} must be an object"]
-        required = schema.get("required") or []
-        errors.extend(f"{path}.{key} is required" for key in required if key not in value)
-        properties = schema.get("properties") or {}
-        if schema.get("additionalProperties") is False:
-            errors.extend(f"{path}.{key} is not allowed" for key in value if key not in properties)
-        for key, child in properties.items():
-            if key in value:
-                errors.extend(_schema_errors(value[key], child, f"{path}.{key}"))
-    elif expected == "array":
-        if not isinstance(value, list):
-            return [f"{path} must be an array"]
-        if "minItems" in schema and len(value) < schema["minItems"]:
-            errors.append(f"{path} has too few items")
-        if "maxItems" in schema and len(value) > schema["maxItems"]:
-            errors.append(f"{path} has too many items")
-        for index, item in enumerate(value):
-            errors.extend(_schema_errors(item, schema.get("items") or {}, f"{path}[{index}]"))
-    elif expected == "string" and not isinstance(value, str):
-        errors.append(f"{path} must be a string")
-    elif expected == "integer" and (not isinstance(value, int) or isinstance(value, bool)):
-        errors.append(f"{path} must be an integer")
-    elif expected == "number" and (not isinstance(value, (int, float)) or isinstance(value, bool)):
-        errors.append(f"{path} must be a number")
-    elif expected == "boolean" and not isinstance(value, bool):
-        errors.append(f"{path} must be a boolean")
-    if "enum" in schema and value not in schema["enum"]:
-        errors.append(f"{path} must be one of {schema['enum']}")
-    if isinstance(value, str):
-        if "minLength" in schema and len(value) < schema["minLength"]:
-            errors.append(f"{path} is too short")
-        if "maxLength" in schema and len(value) > schema["maxLength"]:
-            errors.append(f"{path} is too long")
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        if "minimum" in schema and value < schema["minimum"]:
-            errors.append(f"{path} is below minimum")
-        if "maximum" in schema and value > schema["maximum"]:
-            errors.append(f"{path} is above maximum")
-    return errors
+    del path
+    return [
+        f"{item['path'] or '/'}: {item['message']}"
+        for item in validation_errors(value, schema)
+    ]
+
+
+def _remove_optional_nulls(value: Any, schema: dict[str, Any]) -> Any:
+    """Undo OpenAI strict-mode nullable placeholders before neutral validation."""
+
+    if not isinstance(value, dict) or not isinstance(schema, dict):
+        return value
+    required = set(schema.get("required") or [])
+    properties = schema.get("properties") or {}
+    normalized: dict[str, Any] = {}
+    for key, item in value.items():
+        child = properties.get(key) or {}
+        if item is None and key not in required:
+            continue
+        if isinstance(item, dict):
+            normalized[key] = _remove_optional_nulls(item, child)
+        elif isinstance(item, list) and isinstance(child.get("items"), dict):
+            normalized[key] = [
+                _remove_optional_nulls(element, child["items"])
+                for element in item
+            ]
+        else:
+            normalized[key] = item
+    return normalized
+
+
+async def _dynamic_confirmation(
+    db: AsyncSession | None, *, definition: dict[str, Any], arguments: dict[str, Any],
+    context: RuntimeContext,
+) -> tuple[str, dict[str, Any]]:
+    policy = definition.get("confirmation_policy", "never")
+    risk: dict[str, Any] = {"reasons": []}
+    if definition.get("name") == "browser_interact" and db is not None:
+        state = await db.get(BrowserSessionState, context.session_id)
+        if state is not None:
+            elements = {
+                item.get("ref"): item
+                for item in (state.last_operation or {}).get("elements", [])
+                if isinstance(item, dict)
+            }
+            element = elements.get(arguments.get("element_ref")) or {}
+            action = arguments.get("action")
+            name = str(element.get("name") or "").casefold()
+            sensitive_markers = (
+                "submit", "sign in", "log in", "pay", "purchase", "buy", "send",
+                "publish", "post", "delete", "remove", "cancel", "withdraw", "confirm",
+                "提交", "登录", "支付", "购买", "发送", "发布", "删除", "撤销", "确认",
+            )
+            reasons = []
+            if action in {"upload", "download"}:
+                reasons.append(action)
+            if action == "input" and str(element.get("type") or "").casefold() == "password":
+                reasons.append("login_credential")
+            if action in {"click", "press"} and (
+                str(element.get("form_method") or "").upper() not in {"", "GET"}
+                or str(element.get("type") or "").casefold() in {"submit", "image"}
+                or any(marker in name for marker in sensitive_markers)
+                or (action == "press" and str(arguments.get("key") or "").casefold() == "enter")
+            ):
+                reasons.append("external_side_effect")
+            if reasons:
+                policy = "per_call"
+            risk = {
+                "reasons": reasons, "origin": state.current_origin,
+                "page_revision": state.page_revision,
+                "dom_fingerprint": state.dom_fingerprint,
+                "element": element,
+            }
+    configured_rules = (
+        (definition.get("platform_config") or {}).get("risk_rules") or []
+    )
+    for index, rule in enumerate(configured_rules):
+        if not isinstance(rule, dict):
+            continue
+        condition = rule.get("when")
+        matches = condition == "always"
+        if condition == "unknown_side_effect":
+            matches = bool(
+                (definition.get("annotations") or {}).get("mcp_annotations_untrusted")
+                or definition.get("side_effect") == "non_idempotent"
+            )
+        elif isinstance(condition, dict):
+            key = condition.get("argument")
+            present = isinstance(key, str) and key in arguments
+            matches = bool(present)
+            if "equals" in condition:
+                matches = present and arguments.get(key) == condition["equals"]
+            elif "in" in condition and isinstance(condition["in"], list):
+                matches = present and arguments.get(key) in condition["in"]
+            elif "exists" in condition:
+                matches = present is bool(condition["exists"])
+        requested = rule.get("confirmation", "per_call")
+        if matches and requested in {"per_call", "session_grant"}:
+            if requested == "per_call" or policy == "never":
+                policy = requested
+            risk.setdefault("reasons", []).append(f"governance_rule:{index}")
+    return policy, risk
 
 
 async def _builtin_executor(name, arguments, context, db):
@@ -134,6 +217,120 @@ class ActionDispatcher:
         self.definitions = {value["name"]: value for value in tool_definitions}
         self.executor = executor
 
+    def add_definitions(self, definitions: list[dict[str, Any]]) -> None:
+        """Load only definitions already admitted by the CapabilitySnapshot."""
+        for definition in definitions:
+            self.definitions[definition["name"]] = dict(definition)
+
+    def _preflight(
+        self, call: ToolCallItem, *, effective: set[str], permission_mode: str,
+    ) -> DispatchResult | None:
+        definition = self.definitions.get(call.name)
+        if call.name not in effective or definition is None:
+            return DispatchResult(
+                call.call_id, call.name,
+                ToolResult(
+                    status="failed", summary="Tool is not authorized",
+                    error=ToolError(
+                        code="tool_not_in_capability_snapshot",
+                        message=f"Tool '{call.name}' is not available in this Runner",
+                        category="authorization", details={},
+                    ),
+                ),
+            )
+        neutral = _remove_optional_nulls(call.arguments, definition.get("input_schema") or {})
+        errors = _schema_errors(neutral, definition.get("input_schema") or {})
+        if errors:
+            return DispatchResult(
+                call.call_id, call.name,
+                ToolResult(
+                    status="failed", summary="Tool arguments failed schema validation",
+                    error=ToolError(
+                        code="tool_arguments_schema_error", message="; ".join(errors),
+                        category="validation", details={"errors": errors},
+                    ),
+                ), schema_error=True,
+            )
+        if permission_mode == "plan_readonly" and definition.get("side_effect", "none") != "none":
+            return DispatchResult(
+                call.call_id, call.name,
+                ToolResult(
+                    status="failed", summary="Plan read-only mode denied this side effect",
+                    error=ToolError(
+                        code="permission_mode_denied",
+                        message=f"Tool '{call.name}' has side effects before Plan approval",
+                        category="authorization", details={"permission_mode": permission_mode},
+                    ),
+                ),
+            )
+        return None
+
+    async def dispatch_batch(
+        self, calls: list[ToolCallItem], *,
+        capability_snapshot: CapabilitySnapshot | dict[str, Any],
+        runtime_context: RuntimeContext, db: AsyncSession | None = None,
+        run_id: str | None = None, work_item_id: str | None = None,
+        source_turn_id: str | None = None,
+    ) -> list[DispatchResult]:
+        """Preflight the whole batch before admitting any side effect.
+
+        Read-only durable calls are enqueued first so independent Sandbox
+        workers may execute them concurrently. Browser, Workspace mutations,
+        and other side-effecting calls preserve provider order.
+        """
+        effective = set(
+            capability_snapshot.effective_tool_keys
+            if isinstance(capability_snapshot, CapabilitySnapshot)
+            else capability_snapshot.get("effective_tool_keys", [])
+        )
+        rejected: dict[str, DispatchResult] = {}
+        admitted: list[ToolCallItem] = []
+        for call in calls:
+            failure = self._preflight(
+                call, effective=effective, permission_mode=runtime_context.permission_mode,
+            )
+            if failure is not None:
+                rejected[call.call_id] = failure
+                if failure.result.error and failure.result.error.category == "authorization":
+                    await _record_authorization_rejection(
+                        db, call=call, context=runtime_context, run_id=run_id,
+                        source_turn_id=source_turn_id,
+                        error_code=failure.result.error.code,
+                    )
+            else:
+                admitted.append(call)
+        # Risk classification is part of whole-batch preflight. Execution
+        # repeats it immediately before admission so a Browser revision or
+        # governance change cannot rely on this earlier snapshot.
+        for call in admitted:
+            await _dynamic_confirmation(
+                db, definition=self.definitions[call.name],
+                arguments=call.arguments, context=runtime_context,
+            )
+        # No admitted Tool may run until every call has completed Schema,
+        # capability, permission, and resource-class preflight.
+        readonly: list[ToolCallItem] = []
+        serialized: list[ToolCallItem] = []
+        for call in admitted:
+            definition = self.definitions[call.name]
+            workspace_access = ((definition.get("platform_config") or {}).get("workspace_policy") or {}).get("workspace_access")
+            if (
+                definition.get("side_effect", "none") == "none"
+                and not call.name.startswith("browser_")
+                and workspace_access != "write"
+            ):
+                readonly.append(call)
+            else:
+                serialized.append(call)
+        completed: dict[str, DispatchResult] = dict(rejected)
+        for call in [*readonly, *serialized]:
+            completed[call.call_id] = await self.dispatch(
+                call, capability_snapshot=capability_snapshot,
+                runtime_context=runtime_context, db=db, run_id=run_id,
+                work_item_id=work_item_id, source_turn_id=source_turn_id,
+            )
+        return [completed[call.call_id] for call in calls]
+
     async def dispatch(
         self,
         call: ToolCallItem,
@@ -168,6 +365,11 @@ class ActionDispatcher:
                     ),
                 ),
             )
+        neutral_arguments = _remove_optional_nulls(
+            call.arguments, definition.get("input_schema") or {}
+        )
+        if neutral_arguments != call.arguments:
+            call = replace(call, arguments=neutral_arguments)
         errors = _schema_errors(call.arguments, definition.get("input_schema") or {})
         if errors:
             return DispatchResult(
@@ -228,7 +430,7 @@ class ActionDispatcher:
                         status="failed", summary="Durable Runtime context is required",
                         error_code="runtime_context_required",
                         error="Durable Runtime context is required",
-                        error_category="permanent",
+                        error_category="provider",
                     ),
                 )
             if call.name == "invoke_agent":
@@ -241,7 +443,7 @@ class ActionDispatcher:
                             status="failed", summary=str(error),
                             error=ToolError(
                                 code=error.code, message=str(error),
-                                category="permanent",
+                                category="authorization",
                                 details={
                                     "dimension": error.dimension,
                                     "limit": error.limit, "used": error.used,
@@ -254,11 +456,26 @@ class ActionDispatcher:
                 run_id=run_id, work_item_id=work_item_id,
                 source_turn_id=source_turn_id, provider_call_id=call.call_id,
             )
+            output_issues = validation_error_refs(
+                result.model_dump(mode="json"), definition["output_schema"],
+            )
+            if output_issues:
+                result = ToolResult(
+                    status="failed", summary="Runtime Tool returned an invalid result",
+                    error="Runtime Tool output failed its registered schema",
+                    error_code="tool_output_schema_error", error_category="provider",
+                    error_details={"errors": output_issues},
+                )
+                durable_wait = False
+                wait_reason = None
             return DispatchResult(
                 call.call_id, call.name, result,
                 durable_wait=durable_wait, wait_reason=wait_reason,
             )
 
+        confirmation_policy, dynamic_risk = await _dynamic_confirmation(
+            db, definition=definition, arguments=call.arguments, context=runtime_context,
+        )
         invocation = None
         if db is not None and run_id and work_item_id and source_turn_id:
             encoded = json.dumps(call.arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -280,7 +497,7 @@ class ActionDispatcher:
                             error=ToolError(
                                 code="idempotency_conflict",
                                 message="The existing operation key has different Tool arguments",
-                                category="permanent", details={
+                                category="conflict", details={
                                     "invocation_id": existing.id,
                                 },
                             ),
@@ -317,7 +534,7 @@ class ActionDispatcher:
                         ToolResult(
                             status="failed", summary=str(error),
                             error=ToolError(
-                                code=error.code, message=str(error), category="permanent",
+                                code=error.code, message=str(error), category="authorization",
                                 details={
                                     "dimension": error.dimension,
                                     "limit": error.limit, "used": error.used,
@@ -325,18 +542,37 @@ class ActionDispatcher:
                             ),
                         ),
                     )
+            stored_arguments = call.arguments
+            if (
+                "login_credential" in dynamic_risk.get("reasons", [])
+                and call.name == "browser_interact"
+                and isinstance(call.arguments.get("text"), str)
+            ):
+                browser_secret = await store_secret(
+                    db, plaintext=call.arguments["text"],
+                    purpose="browser_input",
+                    created_by_account_id=runtime_context.account_id,
+                )
+                stored_arguments = {
+                    **call.arguments,
+                    "text": secret_reference(browser_secret),
+                }
             invocation = ToolInvocation(
                 id=uuid7(), runner_id=runtime_context.runner_id,
                 work_item_id=work_item_id, run_id=run_id,
                 session_id=runtime_context.session_id,
                 platform_tool_id=definition["platform_tool_id"], tool_key=call.name,
+                tool_version_id=definition.get("tool_version_id"),
+                tool_version_content_hash=definition.get("tool_version_content_hash"),
+                connection_id=definition.get("connection_id"),
+                connection_revision_id=definition.get("connection_revision_id"),
+                secret_fingerprint=definition.get("secret_fingerprint"),
                 source_turn_id=source_turn_id, provider_tool_call_id=call.call_id,
                 operation_key=operation_key,
                 capability_snapshot_id=(
                     capability_snapshot.id if isinstance(capability_snapshot, CapabilitySnapshot)
                     else capability_snapshot.get("id")
                 ),
-                tool_registration_hash=definition.get("registration_hash"),
                 authorization_snapshot={
                     "effective_tool_keys": list(effective),
                     "account_id": runtime_context.account_id,
@@ -345,7 +581,7 @@ class ActionDispatcher:
                     "permission_mode": runtime_context.permission_mode,
                 },
                 execution_mode=definition.get("execution_mode", "inline"), status="created",
-                arguments=call.arguments, arguments_hash=arguments_hash,
+                arguments=stored_arguments, arguments_hash=arguments_hash,
                 business_idempotency_key=operation_key,
                 principal_hash=hashlib.sha256(json.dumps({
                     "session_id": runtime_context.session_id,
@@ -370,7 +606,6 @@ class ActionDispatcher:
                 payload={"tool_key": call.name, "status": invocation.status},
                 correlation_id=run_id,
             )
-        confirmation_policy = definition.get("confirmation_policy", "never")
         if confirmation_policy == "always":
             confirmation_policy = "per_call"
         if confirmation_policy == "session_grant" and invocation is not None:
@@ -392,6 +627,17 @@ class ActionDispatcher:
                 }
                 confirmation_policy = "never"
         if confirmation_policy in {"per_call", "session_grant"}:
+            if invocation is None:
+                return DispatchResult(
+                    call.call_id, call.name,
+                    ToolResult(
+                        status="failed",
+                        summary="Durable approval context is required",
+                        error="A confirmation-required Tool cannot execute without a durable database context",
+                        error_code="confirmation_context_required",
+                        error_category="confirmation",
+                    ),
+                )
             if invocation is not None:
                 invocation.status = "waiting_confirmation"
                 subject = {
@@ -399,8 +645,12 @@ class ActionDispatcher:
                     "tool_key": call.name,
                     "arguments_hash": invocation.arguments_hash,
                     "principal_hash": invocation.principal_hash,
-                    "tool_registration_hash": invocation.tool_registration_hash,
+                    "tool_version_id": invocation.tool_version_id,
+                    "tool_version_content_hash": invocation.tool_version_content_hash,
+                    "connection_revision_id": invocation.connection_revision_id,
+                    "secret_fingerprint": invocation.secret_fingerprint,
                     "permission_revision": runtime_context.permission_revision,
+                    "dynamic_risk": dynamic_risk,
                 }
                 subject_hash = hashlib.sha256(json.dumps(
                     subject, sort_keys=True, separators=(",", ":")
@@ -420,7 +670,12 @@ class ActionDispatcher:
                         "summary": "Approve this exact Tool call"
                         if confirmation_policy == "per_call"
                         else "Approve this call and a limited Session grant",
-                        "tool_key": call.name, "arguments": call.arguments,
+                        "tool_key": call.name,
+                        "arguments": _safe_argument_projection(
+                            call.arguments,
+                            force_text_redaction="login_credential" in dynamic_risk.get("reasons", []),
+                        ),
+                        "risk": dynamic_risk,
                     },
                     status="pending",
                     deadline_at=owning_run.deadline_at if owning_run else None,
@@ -466,9 +721,37 @@ class ActionDispatcher:
         if invocation is not None:
             invocation.status = "running"
             invocation.attempt_count = 1
-        result = self.executor(call.name, call.arguments, runtime_context, db)
+        execution_context = runtime_context.model_copy(update={
+            "tool_invocation_id": invocation.id if invocation else None,
+            "tool_version_id": definition.get("tool_version_id"),
+            "tool_connection_revision_id": definition.get("connection_revision_id"),
+        })
+        result = self.executor(call.name, call.arguments, execution_context, db)
         if inspect.isawaitable(result):
             result = await result
+        output_issues = validation_error_refs(
+            result.model_dump(mode="json"), definition["output_schema"],
+        )
+        if output_issues:
+            result = ToolResult(
+                status="failed", summary="Tool returned an invalid result",
+                error="Tool output failed its immutable registered schema",
+                error_code="tool_output_schema_error", error_category="provider",
+                error_details={"errors": output_issues},
+            )
+        if (
+            call.name == "memory_propose"
+            and result.success
+            and db is not None
+            and isinstance(result.data, dict)
+            and result.data.get("candidate_id")
+        ):
+            # memory_propose only creates the user-sourced candidate. The
+            # platform adjudicator, not the model-facing Tool, applies the
+            # conflict/version/user-edit policy in the same durable commit.
+            from app.services.memory_service import apply_memory_candidate
+
+            await apply_memory_candidate(db, result.data["candidate_id"])
         if invocation is not None:
             invocation.status = result.status
             invocation.result_data = result.model_dump(mode="json")

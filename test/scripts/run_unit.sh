@@ -9,4 +9,5 @@ if [ ! -x "$ROOT/.venv/bin/pytest" ]; then
   exit 1
 fi
 
-PYTHONPATH="$ROOT/../backend" "$ROOT/.venv/bin/pytest" unit/backend/ -v -m unit "$@"
+PYTHONPATH="$ROOT/../backend" "$ROOT/.venv/bin/pytest" \
+  unit/backend -v -m unit "$@"

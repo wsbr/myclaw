@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { lazy, Suspense, useState, useEffect } from 'react'
 import { useNavigate, useLocation, Routes, Route, Navigate } from 'react-router-dom'
 import {
   Bot,
@@ -21,19 +21,20 @@ import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { useAuthStore } from '@/store/auth'
 import NotificationBell from '@/components/layout/NotificationBell'
-import AgentListPage from '@/pages/Agents/List'
-import AgentConfigPage from '@/pages/Agents/Config'
-import SessionPage from '@/pages/Session'
-import TracePage from '@/pages/Trace'
-import UsersPage from '@/pages/Admin/UsersPage'
-import ToolsPage from '@/pages/Admin/ToolsPage'
-import SkillsPage from '@/pages/Admin/SkillsPage'
-import ModelsPage from '@/pages/Admin/ModelsPage'
-import GovernancePage from '@/pages/Admin/GovernancePage'
-import AuditPage from '@/pages/Admin/AuditPage'
-import MemoriesPage from '@/pages/Memories'
-import AccountPage from '@/pages/Account'
-import AgentNetworkPage from '@/pages/AgentNetwork'
+
+const AgentListPage = lazy(() => import('@/pages/Agents/List'))
+const AgentConfigPage = lazy(() => import('@/pages/Agents/Config'))
+const SessionPage = lazy(() => import('@/pages/Session'))
+const TracePage = lazy(() => import('@/pages/Trace'))
+const UsersPage = lazy(() => import('@/pages/Admin/UsersPage'))
+const ToolsPage = lazy(() => import('@/pages/Admin/ToolsPage'))
+const SkillsPage = lazy(() => import('@/pages/Admin/SkillsPage'))
+const ModelsPage = lazy(() => import('@/pages/Admin/ModelsPage'))
+const GovernancePage = lazy(() => import('@/pages/Admin/GovernancePage'))
+const AuditPage = lazy(() => import('@/pages/Admin/AuditPage'))
+const MemoriesPage = lazy(() => import('@/pages/Memories'))
+const AccountPage = lazy(() => import('@/pages/Account'))
+const AgentNetworkPage = lazy(() => import('@/pages/AgentNetwork'))
 
 const SIDEBAR_KEY = 'myclaw_sidebar_collapsed'
 
@@ -198,27 +199,29 @@ export default function WorkspaceLayout() {
         )}
 
         <main className={cn('min-h-0 flex-1 overflow-auto', isChatPage ? 'p-0' : 'p-6')}>
-          <Routes>
-            <Route path="/" element={<AgentListPage />} />
-            <Route path="/agents" element={<AgentListPage />} />
-            <Route path="/network" element={<AgentNetworkPage />} />
-            <Route path="/agents/new/config" element={<AgentConfigPage />} />
-            <Route path="/agents/:id/config" element={<AgentConfigPage />} />
-            {/* 用可选段而非两条独立 Route：否则带/不带 session_id 之间跳转会
-                被当成不同路由，导致 SessionPage 被卸载重装，正在流式写入的
-                聊天状态会被清空 */}
-            <Route path="/agents/:agentId/chat/:sessionId?" element={<SessionPage />} />
-            <Route path="/memories" element={<MemoriesPage />} />
-            <Route path="/account" element={<AccountPage />} />
-            <Route path="/users" element={<UsersPage />} />
-            <Route path="/tools" element={<ToolsPage />} />
-            <Route path="/skills" element={<SkillsPage />} />
-            <Route path="/models" element={<ModelsPage />} />
-            <Route path="/governance" element={<GovernancePage />} />
-            <Route path="/audit" element={<AuditPage />} />
-            <Route path="/admin" element={<Navigate to="/users" replace />} />
-            <Route path="/sessions/:sessionId/trace" element={<TracePage />} />
-          </Routes>
+          <Suspense fallback={<div className="flex h-full min-h-48 items-center justify-center text-sm text-muted-foreground">正在加载工作区…</div>}>
+            <Routes>
+              <Route path="/" element={<AgentListPage />} />
+              <Route path="/agents" element={<AgentListPage />} />
+              <Route path="/network" element={<AgentNetworkPage />} />
+              <Route path="/agents/new/config" element={<AgentConfigPage />} />
+              <Route path="/agents/:id/config" element={<AgentConfigPage />} />
+              {/* 用可选段而非两条独立 Route：否则带/不带 session_id 之间跳转会
+                  被当成不同路由，导致 SessionPage 被卸载重装，正在流式写入的
+                  聊天状态会被清空 */}
+              <Route path="/agents/:agentId/chat/:sessionId?" element={<SessionPage />} />
+              <Route path="/memories" element={<MemoriesPage />} />
+              <Route path="/account" element={<AccountPage />} />
+              <Route path="/users" element={<UsersPage />} />
+              <Route path="/tools" element={<ToolsPage />} />
+              <Route path="/skills" element={<SkillsPage />} />
+              <Route path="/models" element={<ModelsPage />} />
+              <Route path="/governance" element={<GovernancePage />} />
+              <Route path="/audit" element={<AuditPage />} />
+              <Route path="/admin" element={<Navigate to="/users" replace />} />
+              <Route path="/sessions/:sessionId/trace" element={<TracePage />} />
+            </Routes>
+          </Suspense>
         </main>
       </div>
     </div>

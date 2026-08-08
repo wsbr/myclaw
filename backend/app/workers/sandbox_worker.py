@@ -16,12 +16,16 @@ from sqlalchemy.exc import OperationalError
 
 from app.core.tool_registry.base import RuntimeContext, ToolResult
 from app.core.tool_registry.registry import ToolRegistry
+from app.core.tool_registry.schema import TOOL_RESULT_SCHEMA, validation_error_refs
+from app.core.platform_secrets import resolve_secret_reference
 from app.config import settings
 from app.database import AsyncSessionLocal
 from app.models.common import utcnow, uuid7
 from app.models.foundation import OutboxCommand, UserSession
 from app.models.group_v1 import GroupRun
-from app.models.registry import PlatformTool
+from app.models.registry import (
+    ToolConnectionRevision, ToolDefinition, ToolGovernance, ToolVersion,
+)
 from app.models.runtime_v1 import (
     DurableRunner, Run, ToolAttempt, ToolInvocation, WorkItem, Workspace, WorkspaceLockRequest,
 )
@@ -31,6 +35,7 @@ from app.services.runtime_resume_service import (
 )
 from app.services.observability_service import record_runner_fact_spans
 from app.services.artifact_service import reconcile_one_publishing_artifact
+from app.services.memory_service import apply_memory_candidate
 from app.services.workspace_lock_service import (
     WorkspaceLockConflict, WorkspaceLockGrant, acquire_workspace_lock,
     assert_workspace_lock, release_workspace_lock,
@@ -39,6 +44,29 @@ from app.services.run_reliability_service import record_late_result
 
 
 logger = logging.getLogger(__name__)
+
+
+class _InvalidToolOutput(RuntimeError):
+    def __init__(self, issues: list[dict]):
+        self.issues = issues
+        super().__init__("Tool output failed its immutable registered schema")
+
+
+def _safe_request_arguments(value):
+    sensitive = ("password", "secret", "token", "api_key", "credential", "authorization")
+    if isinstance(value, dict):
+        return {
+            key: (
+                "[REDACTED]"
+                if any(marker in str(key).casefold() for marker in sensitive)
+                or (value.get("action") == "input" and key == "text")
+                else _safe_request_arguments(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_safe_request_arguments(item) for item in value]
+    return value
 
 
 @dataclass(frozen=True)
@@ -61,6 +89,9 @@ class SandboxClaim:
     attempt_fencing_token: int
     execution_epoch: int
     side_effect: str
+    tool_version_id: str | None
+    tool_output_schema: dict
+    connection_revision_id: str | None
     group_session_id: str | None
     group_run_id: str | None
     group_membership_id: str | None
@@ -68,15 +99,33 @@ class SandboxClaim:
 
 
 class SandboxWorker:
-    def __init__(self, worker_id: str | None = None):
-        self.worker_id = worker_id or f"sandbox:{socket.gethostname()}:{os.getpid()}"
+    def __init__(self, worker_id: str | None = None, *, worker_kind: str = "sandbox"):
+        if worker_kind not in {"sandbox", "browser", "connector"}:
+            raise ValueError("worker_kind must be sandbox, browser, or connector")
+        self.worker_kind = worker_kind
+        self.worker_id = worker_id or f"{worker_kind}:{socket.gethostname()}:{os.getpid()}"
+
+    def _tool_scope(self):
+        browser_tool = ToolInvocation.tool_key.startswith("browser_", autoescape=True)
+        connector_tool = or_(
+            ToolInvocation.tool_key.startswith("web_", autoescape=True),
+            ToolInvocation.tool_key.startswith("mcp__", autoescape=True),
+        )
+        if self.worker_kind == "browser":
+            return browser_tool
+        if self.worker_kind == "connector":
+            return connector_tool
+        return ~(browser_tool | connector_tool)
 
     async def claim_one(self) -> SandboxClaim | None:
         async with AsyncSessionLocal.begin() as db:
             now = utcnow()
-            command = await db.scalar(select(OutboxCommand).where(
+            command = await db.scalar(select(OutboxCommand).join(
+                ToolInvocation, ToolInvocation.id == OutboxCommand.aggregate_id,
+            ).where(
                 OutboxCommand.topic == "runtime.sandbox",
                 OutboxCommand.action == "execute_tool",
+                self._tool_scope(),
                 or_(
                     (OutboxCommand.status.in_(("pending", "retry_wait"))) & (OutboxCommand.available_at <= now),
                     (OutboxCommand.status == "claimed") & (OutboxCommand.dispatch_lease_expires_at <= now),
@@ -108,7 +157,13 @@ class SandboxWorker:
             work = await db.scalar(select(WorkItem).where(WorkItem.id == invocation.work_item_id).with_for_update())
             run = await db.scalar(select(Run).where(Run.id == invocation.run_id).with_for_update())
             source_runner = await db.get(DurableRunner, invocation.runner_id)
-            tool = await db.get(PlatformTool, invocation.platform_tool_id)
+            tool = await db.get(ToolDefinition, invocation.platform_tool_id)
+            version = await db.get(ToolVersion, invocation.tool_version_id) if invocation.tool_version_id else None
+            governance = await db.get(ToolGovernance, invocation.platform_tool_id)
+            connection_revision = (
+                await db.get(ToolConnectionRevision, invocation.connection_revision_id)
+                if invocation.connection_revision_id else None
+            )
             if work is None or run is None or source_runner is None:
                 command.status = "dead"
                 command.last_error = "Durable Tool runtime graph is unavailable"
@@ -156,13 +211,22 @@ class SandboxWorker:
             ).with_for_update())
             lock_grant = None
             preflight_error = None
-            workspace_access = str((tool.platform_config or {}).get("workspace_access") or "none") if tool else "none"
+            workspace_access = str((governance.workspace_policy or {}).get("workspace_access") or "none") if governance else "none"
             if (
-                tool is None or not tool.enabled
+                tool is None or version is None or governance is None or not governance.enabled
                 or invocation.execution_mode != "durable_async"
-                or tool.registration_hash != invocation.tool_registration_hash
+                or version.id != invocation.tool_version_id
+                or version.content_hash != invocation.tool_version_content_hash
+                or version.definition_id != tool.id
+                or (
+                    invocation.connection_revision_id is not None
+                    and (
+                        connection_revision is None
+                        or connection_revision.secret_fingerprint != invocation.secret_fingerprint
+                    )
+                )
             ):
-                preflight_error = "Durable Tool is disabled or no longer registered"
+                preflight_error = "Durable ToolVersion or frozen connection revision is unavailable"
             elif workspace_access in {"read", "write"}:
                 if workspace is None:
                     preflight_error = "Tool requires an active Session Workspace"
@@ -200,7 +264,7 @@ class SandboxWorker:
                 "tool_key": invocation.tool_key,
                 "operation_key": invocation.operation_key,
                 "arguments_hash": invocation.arguments_hash,
-                "arguments": invocation.arguments,
+                "arguments": _safe_request_arguments(invocation.arguments),
                 "argv": invocation.arguments.get("argv") if invocation.tool_key == "execute" else None,
                 "cwd": invocation.arguments.get("cwd", ".") if invocation.tool_key == "execute" else None,
                 "execution_epoch": invocation.execution_epoch,
@@ -239,9 +303,19 @@ class SandboxWorker:
             if work.group_run_id:
                 group_run = await db.get(GroupRun, work.group_run_id)
                 group_session_id = group_run.group_session_id if group_run else None
+            claim_arguments = dict(invocation.arguments)
+            if (
+                invocation.tool_key == "browser_interact"
+                and claim_arguments.get("action") == "input"
+                and isinstance(claim_arguments.get("text"), str)
+                and claim_arguments["text"].startswith("secret://")
+            ):
+                claim_arguments["text"] = await resolve_secret_reference(
+                    db, claim_arguments["text"],
+                )
             return SandboxClaim(
                 invocation_id=invocation.id, attempt_id=attempt.id, lease_token=lease_token,
-                tool_key=invocation.tool_key, arguments=dict(invocation.arguments),
+                tool_key=invocation.tool_key, arguments=claim_arguments,
                 session_id=run.session_id, run_id=run.id, work_item_id=work.id,
                 source_runner_id=source_runner.id,
                 user_id=str(source_runner.principal_snapshot.get("user_id") or run.user_id),
@@ -251,7 +325,13 @@ class SandboxWorker:
                 workspace_fencing_token=lock_grant.fencing_token if lock_grant else None,
                 attempt_fencing_token=attempt.fencing_token,
                 execution_epoch=attempt.execution_epoch,
-                side_effect=tool.side_effect if tool is not None else "non_idempotent",
+                side_effect=version.side_effect if version is not None else "non_idempotent",
+                tool_version_id=invocation.tool_version_id,
+                tool_output_schema=(
+                    dict(version.output_schema) if version is not None
+                    else dict(TOOL_RESULT_SCHEMA)
+                ),
+                connection_revision_id=invocation.connection_revision_id,
                 group_session_id=group_session_id, group_run_id=work.group_run_id,
                 group_membership_id=work.group_membership_id, preflight_error=preflight_error,
             )
@@ -263,30 +343,71 @@ class SandboxWorker:
             return
         stop = asyncio.Event()
         heartbeat = asyncio.create_task(self._heartbeat_loop(claim, stop))
-        if claim.preflight_error:
-            result = ToolResult(
-                status="failed", error=claim.preflight_error,
-                error_code="sandbox_preflight_failed", error_category="permanent",
-            )
-        else:
-            context = RuntimeContext(
-                session_id=claim.session_id, runner_id=claim.source_runner_id,
-                task_id=claim.work_item_id, user_id=claim.user_id, agent_id=claim.agent_id,
-                workspace_id=claim.workspace_id, workspace_lock_request_id=claim.lock_request_id,
-                workspace_lease_token=claim.workspace_lease_token,
-                workspace_fencing_token=claim.workspace_fencing_token,
-                tool_invocation_id=claim.invocation_id,
-                execution_epoch=claim.execution_epoch,
-                group_session_id=claim.group_session_id, group_run_id=claim.group_run_id,
-                group_membership_id=claim.group_membership_id,
-            )
-            async with AsyncSessionLocal() as tool_db:
-                result = await ToolRegistry.execute(claim.tool_key, claim.arguments, context, db=tool_db)
         try:
+            if claim.preflight_error:
+                result = ToolResult(
+                    status="failed", error=claim.preflight_error,
+                    error_code="sandbox_preflight_failed", error_category="provider",
+                )
+            else:
+                context = RuntimeContext(
+                    session_id=claim.session_id, runner_id=claim.source_runner_id,
+                    task_id=claim.work_item_id, user_id=claim.user_id, agent_id=claim.agent_id,
+                    workspace_id=claim.workspace_id, workspace_lock_request_id=claim.lock_request_id,
+                    workspace_lease_token=claim.workspace_lease_token,
+                    workspace_fencing_token=claim.workspace_fencing_token,
+                    tool_invocation_id=claim.invocation_id,
+                    tool_version_id=claim.tool_version_id,
+                    tool_connection_revision_id=claim.connection_revision_id,
+                    execution_epoch=claim.execution_epoch,
+                    group_session_id=claim.group_session_id, group_run_id=claim.group_run_id,
+                    group_membership_id=claim.group_membership_id,
+                )
+                # Tool implementations that publish Artifacts, advance Browser
+                # state, or create Memory candidates write authoritative rows.
+                # Keep those writes and the platform-side Memory arbitration in
+                # one transaction so a successful result can never describe data
+                # that was silently rolled back when this context exits.
+                try:
+                    async with AsyncSessionLocal.begin() as tool_db:
+                        result = await ToolRegistry.execute(
+                            claim.tool_key, claim.arguments, context, db=tool_db,
+                        )
+                        output_issues = validation_error_refs(
+                            result.model_dump(mode="json"), claim.tool_output_schema,
+                        )
+                        if output_issues:
+                            raise _InvalidToolOutput(output_issues)
+                        if (
+                            claim.tool_key == "memory_propose"
+                            and result.success
+                            and isinstance(result.data, dict)
+                            and result.data.get("candidate_id")
+                        ):
+                            # The Tool itself is proposal-only. The trusted platform
+                            # adjudicator applies conflict/version/user-edit policy.
+                            await apply_memory_candidate(tool_db, result.data["candidate_id"])
+                except _InvalidToolOutput as error:
+                    result = ToolResult(
+                        status="failed", summary="Tool returned an invalid result",
+                        error="Tool output failed its immutable registered schema",
+                        error_code="tool_output_schema_error", error_category="provider",
+                        error_details={"errors": error.issues},
+                    )
+                except Exception as error:
+                    # The Tool transaction has rolled back. Preserve only the
+                    # exception class as bounded diagnostic evidence; messages
+                    # can contain Provider response bodies or credentials.
+                    result = ToolResult(
+                        status="failed", summary="Tool implementation failed",
+                        error=f"Tool implementation raised {type(error).__name__}",
+                        error_code="tool_implementation_exception",
+                        error_category="provider", retryable=False,
+                    )
             await self.settle(claim, result)
         finally:
             stop.set()
-            await heartbeat
+            await asyncio.gather(heartbeat, return_exceptions=True)
             await record_runner_fact_spans(
                 claim.source_runner_id, session_factory=AsyncSessionLocal,
             )
@@ -507,6 +628,7 @@ class SandboxWorker:
             attempt = await db.scalar(select(ToolAttempt).join(
                 ToolInvocation, ToolInvocation.id == ToolAttempt.tool_invocation_id,
             ).where(
+                self._tool_scope(),
                 ToolAttempt.status == "running",
                 ToolInvocation.status == "running",
                 ToolInvocation.active_attempt_id == ToolAttempt.id,
@@ -536,9 +658,9 @@ class SandboxWorker:
             if work.group_run_id:
                 group_run = await db.get(GroupRun, work.group_run_id)
                 group_session_id = group_run.group_session_id if group_run else None
-            platform_tool = (
-                await db.get(PlatformTool, invocation.platform_tool_id)
-                if invocation.platform_tool_id else None
+            tool_version = (
+                await db.get(ToolVersion, invocation.tool_version_id)
+                if invocation.tool_version_id else None
             )
             claim = SandboxClaim(
                 invocation_id=invocation.id, attempt_id=attempt.id,
@@ -552,7 +674,13 @@ class SandboxWorker:
                 workspace_fencing_token=request.fencing_token if request else None,
                 attempt_fencing_token=attempt.fencing_token,
                 execution_epoch=attempt.execution_epoch,
-                side_effect=str(platform_tool.side_effect if platform_tool else "non_idempotent"),
+                side_effect=str(tool_version.side_effect if tool_version else "non_idempotent"),
+                tool_version_id=invocation.tool_version_id,
+                tool_output_schema=(
+                    dict(tool_version.output_schema) if tool_version is not None
+                    else dict(TOOL_RESULT_SCHEMA)
+                ),
+                connection_revision_id=invocation.connection_revision_id,
                 group_session_id=group_session_id, group_run_id=work.group_run_id,
                 group_membership_id=work.group_membership_id,
             )
@@ -580,9 +708,10 @@ class SandboxWorker:
         poll_seconds = settings.sandbox_worker_poll_seconds if poll_seconds is None else poll_seconds
         while True:
             try:
-                async with AsyncSessionLocal.begin() as db:
-                    if await reconcile_one_publishing_artifact(db):
-                        continue
+                if self.worker_kind == "sandbox":
+                    async with AsyncSessionLocal.begin() as db:
+                        if await reconcile_one_publishing_artifact(db):
+                            continue
                 if await self.recover_one(stale_seconds=settings.sandbox_attempt_stale_seconds):
                     continue
                 claim = await self.claim_one()
@@ -594,7 +723,10 @@ class SandboxWorker:
                 # A durable attempt remains recoverable from ToolAttempt and
                 # OutboxCommand state. Keep the worker alive so its recovery
                 # loop can fence or resume that work on the next iteration.
-                logger.exception("Sandbox worker iteration failed; durable recovery will retry")
+                logger.exception(
+                    "%s worker iteration failed; durable recovery will retry",
+                    self.worker_kind.capitalize(),
+                )
                 await asyncio.sleep(poll_seconds)
 
     @staticmethod

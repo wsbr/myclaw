@@ -105,14 +105,19 @@ def test_uat_single_node_uses_isolated_persistent_volumes_and_sha_bound_operatio
     ):
         assert f"name: {volume_name}" in compose
     assert compose.count("external: true") == 3
-    assert "MYCLAW_REAL_LLM_API_KEY: ${MYCLAW_REAL_LLM_API_KEY:?real model key is required}" in compose
-    assert sum(
-        line.lstrip().startswith("MYCLAW_REAL_LLM_API_KEY:")
-        for line in compose.splitlines()
-    ) == 2
+    # Runtime containers never receive model/Search credentials as ambient
+    # environment. Administrators submit them through write-only APIs and the
+    # platform resolves encrypted secret references only at the call boundary.
+    assert "MYCLAW_REAL_LLM_API_KEY:" not in compose
+    assert "MYCLAW_BOCHA_API_KEY:" not in compose
+    assert "MYCLAW_BRAVE_API_KEY:" not in compose
     assert "deploy:\n      replicas: 2" in compose
     assert "--no-tablespaces" in (uat / "backup.sh").read_text()
     assert "MYCLAW_REAL_LLM_API_KEY=\n" in example
+    assert "MYCLAW_BOCHA_API_KEY=\n" in example
+    assert "MYCLAW_BRAVE_API_KEY=\n" in example
+    assert ': "${MYCLAW_BOCHA_API_KEY:?Bocha API key is required for UAT}"' in acceptance
+    assert ': "${MYCLAW_BRAVE_API_KEY:?Brave API key is required for UAT}"' in acceptance
     assert "MYCLAW_PRICING_TIER_MAX_INPUT_TOKENS=128000" in example
     assert "Refusing to reuse existing UAT volume" in init_env
     assert "Refusing to accept a dirty workspace" in acceptance

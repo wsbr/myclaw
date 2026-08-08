@@ -23,7 +23,11 @@ from app.models.common import utcnow, uuid7
 from app.models.registry import (
     ConformanceRun,
     ModelVersion,
-    PlatformTool,
+    ToolConnection,
+    ToolConnectionRevision,
+    ToolDefinition,
+    ToolGovernance,
+    ToolVersion,
     PolicyDefinition,
     PolicyVersion,
     RegisteredModel,
@@ -57,7 +61,7 @@ class ResolvedAssembly:
     model_version: ModelVersion
     policy_versions: dict[str, PolicyVersion]
     sandbox_version: SandboxProfileVersion
-    tools: tuple[PlatformTool, ...]
+    tools: tuple["ResolvedTool", ...]
     skills: tuple[tuple[RegisteredSkill, SkillVersion], ...]
 
     def safe_snapshot(self) -> dict[str, Any]:
@@ -81,7 +85,14 @@ class ResolvedAssembly:
                 "content_hash": self.sandbox_version.content_hash,
             },
             "tools": [
-                {"tool_id": tool.id, "registration_hash": tool.registration_hash}
+                {
+                    "tool_definition_id": tool.definition.id,
+                    "tool_version_id": tool.version.id,
+                    "content_hash": tool.version.content_hash,
+                    "connection_id": tool.connection.id if tool.connection else None,
+                    "connection_revision_id": tool.connection_revision.id if tool.connection_revision else None,
+                    "secret_fingerprint": tool.connection_revision.secret_fingerprint if tool.connection_revision else None,
+                }
                 for tool in self.tools
             ],
             "skills": [
@@ -93,6 +104,15 @@ class ResolvedAssembly:
                 for skill, version in self.skills
             ],
         }
+
+
+@dataclass(frozen=True)
+class ResolvedTool:
+    definition: ToolDefinition
+    version: ToolVersion
+    governance: ToolGovernance
+    connection: ToolConnection | None = None
+    connection_revision: ToolConnectionRevision | None = None
 
 
 async def create_agent(
@@ -195,10 +215,11 @@ async def _replace_selection(
         AgentVersionTool(
             agent_version_id=version_id,
             platform_tool_id=value,
-            tool_registration_hash=(
-                next(tool.registration_hash for tool in resolved.tools if tool.id == value)
-                if resolved is not None else None
-            ),
+            tool_version_id=(next(tool.version.id for tool in resolved.tools if tool.definition.id == value) if resolved is not None else None),
+            tool_version_content_hash=(next(tool.version.content_hash for tool in resolved.tools if tool.definition.id == value) if resolved is not None else None),
+            connection_id=(next((tool.connection.id if tool.connection else None) for tool in resolved.tools if tool.definition.id == value) if resolved is not None else None),
+            connection_revision_id=(next((tool.connection_revision.id if tool.connection_revision else None) for tool in resolved.tools if tool.definition.id == value) if resolved is not None else None),
+            secret_fingerprint=(next((tool.connection_revision.secret_fingerprint if tool.connection_revision else None) for tool in resolved.tools if tool.definition.id == value) if resolved is not None else None),
             sort_order=index,
         )
         for index, value in enumerate(selection.tool_ids)
@@ -396,16 +417,41 @@ async def check_publish_capabilities(
         else:
             policy_versions[expected_type] = version
 
-    tools: list[PlatformTool] = []
+    tools: list[ResolvedTool] = []
     if selection.tool_ids:
-        rows = list(await db.scalars(select(PlatformTool).where(
-            PlatformTool.id.in_(selection.tool_ids), PlatformTool.enabled.is_(True)
+        rows = list(await db.scalars(select(ToolDefinition).where(
+            ToolDefinition.id.in_(selection.tool_ids), ToolDefinition.status == "active",
         )))
         by_id = {row.id: row for row in rows}
         if len(by_id) != len(set(selection.tool_ids)):
             issues.append("one or more tools are unavailable")
         else:
-            tools = [by_id[value] for value in selection.tool_ids]
+            for value in selection.tool_ids:
+                definition = by_id[value]
+                version = await db.get(ToolVersion, definition.current_version_id)
+                governance = await db.get(ToolGovernance, definition.id)
+                if version is None or governance is None or not governance.enabled:
+                    issues.append(f"tool {definition.tool_key} is disabled or has no immutable current version")
+                    continue
+                connection = None
+                connection_revision = None
+                connection_id = version.default_connection_id
+                if definition.tool_key == "web_search" and connection_id is None:
+                    connection = await db.scalar(select(ToolConnection).where(
+                        ToolConnection.connection_type.in_(["bocha", "brave"]),
+                        ToolConnection.is_primary.is_(True), ToolConnection.status == "active",
+                    ))
+                elif connection_id:
+                    connection = await db.get(ToolConnection, connection_id)
+                if connection is not None:
+                    connection_revision = await db.get(ToolConnectionRevision, connection.current_revision_id)
+                    if connection.status != "active" or connection_revision is None:
+                        issues.append(f"tool {definition.tool_key} connection is unavailable")
+                        continue
+                elif definition.tool_key == "web_search" or definition.origin == "mcp":
+                    issues.append(f"tool {definition.tool_key} requires an active connection")
+                    continue
+                tools.append(ResolvedTool(definition, version, governance, connection, connection_revision))
 
     skills: list[tuple[RegisteredSkill, SkillVersion]] = []
     if selection.skill_ids:
@@ -473,7 +519,7 @@ def _agent_card(
     }
     capabilities = {
         "model_version_id": resolved.model_version.id,
-        "tool_keys": [tool.tool_key for tool in resolved.tools],
+        "tool_keys": [tool.definition.tool_key for tool in resolved.tools],
         "skill_version_ids": [item.id for _, item in resolved.skills],
         "sandbox_profile_version_id": resolved.sandbox_version.id,
     }

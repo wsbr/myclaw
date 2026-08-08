@@ -1,13 +1,19 @@
 from abc import ABC, abstractmethod
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+from app.core.tool_registry.schema import TOOL_RESULT_SCHEMA
 
 
 class ToolError(BaseModel):
     code: str
     message: str
-    category: Literal["validation", "authorization", "transient", "permanent", "outcome_unknown"]
+    category: Literal[
+        "validation", "authorization", "confirmation", "conflict",
+        "rate_limit", "timeout", "transient", "provider", "cancelled",
+        "outcome_unknown",
+    ]
     details: dict = Field(default_factory=dict)
 
     def __str__(self) -> str:
@@ -25,11 +31,14 @@ class ToolResult(BaseModel):
     always follow the platform contract.
     """
 
-    status: Literal["succeeded", "failed"]
-    data: Any = None
+    status: Literal["succeeded", "failed", "cancelled", "outcome_unknown"]
     summary: str
+    content_blocks: list[dict[str, Any]] = Field(default_factory=list)
+    data: Any = None
+    evidence: list[dict[str, Any]] = Field(default_factory=list)
     artifact_ids: list[str] = Field(default_factory=list)
-    provider_request_id: str | None = None
+    provider: dict[str, Any] | None = None
+    timing: dict[str, Any] = Field(default_factory=dict)
     retryable: bool = False
     error: ToolError | None = None
 
@@ -42,21 +51,41 @@ class ToolResult(BaseModel):
             values["error"] = ToolError(
                 code=str(values.pop("error_code", "tool_execution_failed")),
                 message=raw_error,
-                category=values.pop("error_category", "permanent"),
+                category=values.pop("error_category", "provider"),
                 details=values.pop("error_details", {}),
             )
-        if values["status"] == "failed" and values.get("error") is None:
+        if values["status"] != "succeeded" and values.get("error") is None:
+            category = values.pop(
+                "error_category",
+                values["status"]
+                if values["status"] in {"cancelled", "outcome_unknown"}
+                else "provider",
+            )
             values["error"] = ToolError(
                 code=str(values.pop("error_code", "tool_execution_failed")),
-                message="Tool execution failed",
-                category=values.pop("error_category", "permanent"),
+                message={
+                    "failed": "Tool execution failed",
+                    "cancelled": "Tool execution was cancelled",
+                    "outcome_unknown": "Tool execution outcome is unknown",
+                }[values["status"]],
+                category=category,
                 details=values.pop("error_details", {}),
             )
         values.setdefault(
             "summary",
-            "Tool completed" if values["status"] == "succeeded" else values["error"].message,
+            "Tool completed"
+            if values["status"] == "succeeded"
+            else values["error"].message,
         )
         super().__init__(**values)
+
+    @model_validator(mode="after")
+    def _status_matches_error(self):
+        if self.status == "succeeded" and self.error is not None:
+            raise ValueError("successful Tool results cannot contain an error")
+        if self.status != "succeeded" and self.error is None:
+            raise ValueError("non-successful Tool results require a typed error")
+        return self
 
     @property
     def success(self) -> bool:
@@ -74,7 +103,7 @@ class RuntimeContext(BaseModel):
     permission_revision: int = 1
     execution_epoch: int = 1
     authentication_source: str = "web_session"
-    call_chain: list[str] = []
+    call_chain: list[str] = Field(default_factory=list)
     max_depth: int = 5
     timeout: int = 300
     output_channel: str = "platform_ui"
@@ -83,6 +112,8 @@ class RuntimeContext(BaseModel):
     workspace_lease_token: str | None = None
     workspace_fencing_token: int | None = None
     tool_invocation_id: str | None = None
+    tool_version_id: str | None = None
+    tool_connection_revision_id: str | None = None
     group_session_id: str | None = None
     group_run_id: str | None = None
     group_membership_id: str | None = None
@@ -94,6 +125,7 @@ class BaseTool(ABC):
     name: str
     description: str
     input_schema: dict
+    output_schema: dict = TOOL_RESULT_SCHEMA
 
     @abstractmethod
     async def execute(self, args: dict, context: RuntimeContext, db=None) -> ToolResult: ...
@@ -103,4 +135,5 @@ class BaseTool(ABC):
             "name": self.name,
             "description": self.description,
             "input_schema": self.input_schema,
+            "output_schema": self.output_schema,
         }

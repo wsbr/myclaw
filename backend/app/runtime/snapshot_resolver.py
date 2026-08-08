@@ -13,8 +13,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.models.agent_v1 import AgentAssemblyVersion, AgentVersionSkill, AgentVersionTool
 from app.models.common import uuid7
-from app.models.registry import ModelVersion, PlatformTool, SkillVersion
-from app.models.runtime_v1 import CapabilitySnapshot, DurableRunner
+from app.models.registry import (
+    ModelVersion, SkillVersion, ToolConnectionRevision, ToolDefinition,
+    ToolGovernance, ToolVersion,
+)
+from app.models.runtime_v1 import CapabilitySnapshot, DurableRunner, RunnerToolSnapshot
 from app.runtime.coordination_tools import RUNTIME_COORDINATION_DEFINITIONS
 from app.services.agent_directory_service import discover_agent_cards
 
@@ -64,14 +67,16 @@ class SnapshotResolver:
             .where(AgentVersionTool.agent_version_id == assembly.id)
             .order_by(AgentVersionTool.sort_order)
         ))
-        tool_rows = list(await db.scalars(select(PlatformTool).where(
-            PlatformTool.id.in_([item.platform_tool_id for item in frozen_tools])
+        tool_rows = list(await db.scalars(select(ToolDefinition).where(
+            ToolDefinition.id.in_([item.platform_tool_id for item in frozen_tools])
         ))) if frozen_tools else []
         tools_by_id = {tool.id: tool for tool in tool_rows}
         assembled_keys: list[str] = []
         effective_keys: list[str] = []
         denied: list[dict[str, str]] = []
         definitions: list[dict[str, Any]] = []
+        authorized_definitions: list[dict[str, Any]] = []
+        governance_by_key: dict[str, int] = {}
         runtime_coordination_names = {
             item["name"] for item in RUNTIME_COORDINATION_DEFINITIONS
         }
@@ -87,12 +92,24 @@ class SnapshotResolver:
                 # each Tool name exactly once.
                 continue
             assembled_keys.append(tool.tool_key)
+            version = await db.get(ToolVersion, frozen.tool_version_id)
+            governance = await db.get(ToolGovernance, tool.id)
+            connection_revision = (
+                await db.get(ToolConnectionRevision, frozen.connection_revision_id)
+                if frozen.connection_revision_id else None
+            )
             reason = None
-            if frozen.tool_registration_hash != tool.registration_hash:
-                reason = "registration_hash_changed"
-            elif not tool.enabled:
+            if version is None or version.definition_id != tool.id:
+                reason = "tool_version_missing"
+            elif frozen.tool_version_content_hash != version.content_hash:
+                reason = "tool_version_hash_mismatch"
+            elif tool.status != "active" or governance is None or not governance.enabled:
                 reason = "platform_tool_disabled"
-            elif readonly and tool.side_effect != "none":
+            elif frozen.connection_revision_id and connection_revision is None:
+                reason = "connection_revision_missing"
+            elif connection_revision and frozen.secret_fingerprint != connection_revision.secret_fingerprint:
+                reason = "secret_fingerprint_mismatch"
+            elif readonly and version.side_effect != "none":
                 reason = "permission_mode_readonly"
             elif budget_blocked:
                 reason = "hard_budget_exhausted"
@@ -100,20 +117,39 @@ class SnapshotResolver:
                 denied.append({"capability": tool.tool_key, "reason_code": reason})
                 continue
             effective_keys.append(tool.tool_key)
-            definitions.append({
+            governance_by_key[tool.tool_key] = governance.version
+            definition = {
                 "name": tool.tool_key,
-                "description": tool.description,
-                "input_schema": tool.input_schema,
-                "output_schema": tool.output_schema,
+                "namespace": tool.namespace,
+                "description": version.model_description,
+                "input_schema": version.input_schema,
+                "output_schema": version.output_schema,
                 "platform_tool_id": tool.id,
-                "registration_hash": tool.registration_hash,
-                "execution_mode": tool.execution_mode,
-                "side_effect": tool.side_effect,
-                "confirmation_policy": tool.confirmation_policy,
-                "confirmation_policy_version": tool.config_version,
-                "platform_config": dict(tool.platform_config or {}),
+                "tool_version_id": version.id,
+                "registration_hash": version.content_hash,
+                "tool_version_content_hash": version.content_hash,
+                "connection_id": frozen.connection_id,
+                "connection_revision_id": frozen.connection_revision_id,
+                "secret_fingerprint": frozen.secret_fingerprint,
+                "execution_mode": version.execution_mode,
+                "side_effect": version.side_effect,
+                "confirmation_policy": governance.confirmation_policy,
+                "confirmation_policy_version": governance.version,
+                "platform_config": {
+                    "network_policy": dict(governance.network_policy or {}),
+                    "workspace_policy": dict(governance.workspace_policy or {}),
+                    "risk_rules": list(governance.risk_rules or []),
+                },
+                "annotations": dict(version.annotations or {}),
                 "source": "platform",
-            })
+            }
+            authorized_definitions.append(definition)
+            eager_keys = {
+                "list_files", "search_files", "read_file", "write_file",
+                "apply_patch", "execute", "publish_artifact", "web_search", "web_fetch",
+            }
+            if tool.tool_key in eager_keys or bool(version.annotations.get("eager")):
+                definitions.append(definition)
 
         # Coordination Tools are Runtime-owned. They are injected consistently
         # and cannot be selected, replaced, or disabled through Agent assembly.
@@ -156,19 +192,22 @@ class SnapshotResolver:
         tool_schema_bundle_hash = _hash([{
             "name": item["name"], "input_schema": item["input_schema"],
             "registration_hash": item["registration_hash"],
-        } for item in definitions])
+        } for item in authorized_definitions + [
+            item for item in definitions if item.get("source") == "runtime"
+        ]])
         payload = {
             "runner_id": runner.id,
             "agent_version_id": assembly.id,
             "execution_principal": execution_principal,
             "assembled_tool_keys": assembled_keys,
             "effective_tool_keys": effective_keys,
+            "authorized_tool_versions": authorized_definitions,
             "denied_capabilities": denied,
             "discoverable_agents_scope": discover_scope,
             "callable_agents_scope": discover_scope,
             "permission_mode": permission_mode,
             "governance_versions": {
-                "tools": {tool.tool_key: tool.config_version for tool in tool_rows},
+                "tools": governance_by_key,
             },
             "budget_snapshot": hard_budget or {},
             "runtime_release_id": settings.runtime_release_id,
@@ -184,6 +223,7 @@ class SnapshotResolver:
             id=uuid7(), runner_id=runner.id, work_item_id=runner.work_item_id,
             agent_version_id=assembly.id, execution_principal=execution_principal,
             assembled_tool_keys=assembled_keys, effective_tool_keys=effective_keys,
+            authorized_tool_versions=authorized_definitions,
             denied_capabilities=denied,
             discoverable_agents_scope=discover_scope,
             callable_agents_scope=discover_scope,
@@ -195,6 +235,35 @@ class SnapshotResolver:
             tool_schema_bundle_hash=tool_schema_bundle_hash, content_hash=_hash(payload),
         )
         db.add(capability)
+        await db.flush()
+        for sort_order, definition in enumerate(authorized_definitions):
+            identity = {
+                "runner_id": runner.id,
+                "platform_tool_id": definition["platform_tool_id"],
+            }
+            frozen = await db.get(RunnerToolSnapshot, identity)
+            expected = (
+                definition["tool_version_id"],
+                definition["tool_version_content_hash"],
+                definition.get("connection_revision_id"),
+                definition.get("secret_fingerprint"),
+            )
+            if frozen is None:
+                db.add(RunnerToolSnapshot(
+                    **identity,
+                    tool_version_id=expected[0],
+                    tool_version_content_hash=expected[1],
+                    connection_revision_id=expected[2],
+                    secret_fingerprint=expected[3],
+                    sort_order=sort_order,
+                ))
+            elif (
+                frozen.tool_version_id,
+                frozen.tool_version_content_hash,
+                frozen.connection_revision_id,
+                frozen.secret_fingerprint,
+            ) != expected:
+                raise SnapshotResolutionError("Runner ToolVersion snapshot changed during execution")
         await db.flush()
         runner.capability_snapshot_id = capability.id
         runner.assembly_snapshot = {

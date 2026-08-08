@@ -56,7 +56,7 @@ async def tool_continuation(
                 error_code=invocation.error_code or "tool_failed",
                 error=error,
                 error_category=(
-                    "outcome_unknown" if invocation.status == "outcome_unknown" else "permanent"
+                    "outcome_unknown" if invocation.status == "outcome_unknown" else "provider"
                 ),
             ).model_dump(mode="json")
         messages.append(_tool_message(invocation.provider_tool_call_id, result))
@@ -149,6 +149,11 @@ async def queue_work_item_resume(
         input_snapshot={
             **dict(source_runner.input_snapshot or {}),
             "resume_reason": reason, "pending_results": cumulative_results,
+            "loaded_tool_version_ids": list(
+                (latest_checkpoint.loaded_tool_version_ids if latest_checkpoint else None)
+                or (source_runner.input_snapshot or {}).get("loaded_tool_version_ids")
+                or []
+            ),
         },
     )
     run.status = "active"

@@ -13,7 +13,7 @@ Model
 
 ModelVersion (immutable)
 ├── provider / model_name / endpoint
-├── credential_ref / default_parameters
+├── encrypted credential / default_parameters
 ├── capabilities / adapter protocol
 └── content_hash / published_at
 
@@ -23,7 +23,7 @@ ConformanceRun (append-only evidence)
 └── started_at / ended_at
 ```
 
-`credential_ref` 指向安全存储，明文凭证不能进入 Agent 配置、Prompt、事件和 Trace。Draft 只选择逻辑 `model_id` 并显示当前解析预览；发布 AgentVersion 或 draft_test_snapshot 时固定精确 `model_version_id + content_hash`。Endpoint、model name、参数、能力或 Adapter 协议变化必须发布新 ModelVersion；Secret Manager 中同一 credential reference 的密钥轮换不创建行为版本。
+管理页面直接接收完整 Provider API Key，HTTP 请求字段是 write-only；后端使用部署级 `ENCRYPTION_KEY` 做带认证加密，数据库只保存带版本前缀的密文。查询接口仅返回是否配置及存储来源，明文和密文都不能进入 Agent 配置、Prompt、事件或 Trace。历史记录和旧版内部路径保留 `env://` 解析兼容，但 v2 ModelVersion 公开写接口不再接收引用。Draft 只选择逻辑 `model_id` 并显示当前解析预览；发布 AgentVersion 或 draft_test_snapshot 时固定精确 `model_version_id + content_hash`。Endpoint、model name、API Key、参数、能力或 Adapter 协议变化必须发布新 ModelVersion。
 
 Conformance 结果不写回 ModelVersion。每次测试创建新的 ConformanceRun，API 中的 `latest_conformance` 只是查询投影；准入以当前必需 suite 的最新 terminal passed 证据为准，不改写历史版本。
 

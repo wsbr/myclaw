@@ -1,23 +1,30 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Button, Descriptions, Form, Input, Modal, Select, Space, Switch, Table, Tag, message } from 'antd'
-import { ApiOutlined, EditOutlined, SyncOutlined } from '@ant-design/icons'
+import { Alert, Button, Descriptions, Form, Input, Modal, Select, Space, Switch, Table, Tabs, Tag, message } from 'antd'
+import { ApiOutlined, EditOutlined, PlusOutlined, SyncOutlined } from '@ant-design/icons'
 import { useState } from 'react'
 import client from '../../api/client'
 
-type PlatformTool = {
-  id: string
-  tool_key: string
-  display_name: string
-  description: string
-  input_schema: Record<string, unknown>
-  output_schema?: Record<string, unknown>
-  implementation_ref: string
-  implementation_version: string
-  execution_mode: string
-  enabled: boolean
-  confirmation_policy: 'never' | 'always'
-  platform_config: Record<string, unknown>
-  config_version: number
+type ToolDefinition = {
+  id: string; tool_key: string; namespace: string; origin: 'builtin' | 'mcp'
+  display_name: string; display_name_zh: string; description: string
+  tool_version_id: string; version_no: number; content_hash: string
+  input_schema: Record<string, unknown>; output_schema: Record<string, unknown>
+  examples: unknown[]; error_catalog: unknown[]; annotations: Record<string, unknown>
+  implementation_ref: string; implementation_version: string
+  execution_mode: string; side_effect: string; enabled: boolean
+  confirmation_policy: 'never' | 'per_call' | 'session_grant'
+  network_policy: Record<string, unknown>; workspace_policy: Record<string, unknown>
+  risk_rules: unknown[]; config_version: number
+}
+
+type ToolConnection = {
+  id: string; connection_key: string; display_name: string
+  connection_type: 'bocha' | 'brave' | 'mcp' | 'browser'
+  auth_type: 'none' | 'bearer' | 'x_api_key'; status: string; enabled: boolean
+  is_primary: boolean; endpoint: string; secret_configured: boolean
+  secret_fingerprint: string | null; config: Record<string, unknown>
+  revision_no: number; current_revision_id: string; version: number
+  health: { status: string; checked_at: string | null; latency_ms: number | null; error_code: string | null }
 }
 
 const commandHeaders = (version?: number) => ({
@@ -27,77 +34,145 @@ const commandHeaders = (version?: number) => ({
 
 export default function ToolsTab() {
   const queryClient = useQueryClient()
-  const [form] = Form.useForm()
-  const [editing, setEditing] = useState<PlatformTool | null>(null)
-  const [details, setDetails] = useState<PlatformTool | null>(null)
+  const [toolForm] = Form.useForm()
+  const [connectionForm] = Form.useForm()
+  const [editing, setEditing] = useState<ToolDefinition | null>(null)
+  const [details, setDetails] = useState<ToolDefinition | null>(null)
+  const [connection, setConnection] = useState<ToolConnection | 'new' | null>(null)
 
   const tools = useQuery({
     queryKey: ['platform-tools'],
-    queryFn: () => client.get('/platform-tools').then(response => response.data.items as PlatformTool[]),
+    queryFn: () => client.get('/platform-tools', { params: { limit: 500 } }).then(response => response.data.items as ToolDefinition[]),
+  })
+  const connections = useQuery({
+    queryKey: ['tool-connections'],
+    queryFn: () => client.get('/tool-connections').then(response => response.data.items as ToolConnection[]),
   })
 
-  const update = useMutation({
-    mutationFn: ({ tool, patch }: { tool: PlatformTool; patch: Record<string, unknown> }) =>
+  const updateTool = useMutation({
+    mutationFn: ({ tool, patch }: { tool: ToolDefinition; patch: Record<string, unknown> }) =>
       client.patch(`/platform-tools/${tool.id}`, patch, { headers: commandHeaders(tool.config_version) }),
-    onSuccess: () => {
-      message.success('Tool 治理配置已更新')
-      setEditing(null)
-      queryClient.invalidateQueries({ queryKey: ['platform-tools'] })
-    },
+    onSuccess: () => { message.success('Tool 治理已发布'); setEditing(null); queryClient.invalidateQueries({ queryKey: ['platform-tools'] }) },
     onError: (error: any) => message.error(error?.response?.data?.error?.code || '更新失败'),
   })
-
+  const saveConnection = useMutation({
+    mutationFn: ({ current, values }: { current: ToolConnection | 'new'; values: any }) => {
+      const payload = { ...values, config: JSON.parse(values.config || '{}') }
+      return current === 'new'
+        ? client.post('/tool-connections', payload, { headers: commandHeaders() })
+        : client.patch(`/tool-connections/${current.id}`, payload, { headers: commandHeaders(current.version) })
+    },
+    onSuccess: () => { message.success('连接 revision 已保存，API Key 不会回显'); setConnection(null); queryClient.invalidateQueries({ queryKey: ['tool-connections'] }) },
+    onError: (error: any) => message.error(error?.response?.data?.error?.code || '连接保存失败'),
+  })
   const reconcile = useMutation({
     mutationFn: () => client.post('/platform-tools/reconcile', {}, { headers: commandHeaders() }).then(response => response.data),
-    onSuccess: result => {
-      message.success(`对账完成：新增 ${result.created}，更新 ${result.updated}`)
-      queryClient.invalidateQueries({ queryKey: ['platform-tools'] })
-    },
+    onSuccess: result => { message.success(`不可变目录已对账：新增 ${result.created}，新版本 ${result.updated}`); queryClient.invalidateQueries({ queryKey: ['platform-tools'] }) },
   })
 
-  const openEditor = (tool: PlatformTool) => {
+  const openTool = (tool: ToolDefinition) => {
     setEditing(tool)
-    form.setFieldsValue({ ...tool, platform_config: JSON.stringify(tool.platform_config, null, 2) })
+    toolForm.setFieldsValue({
+      display_name: tool.display_name, display_name_zh: tool.display_name_zh,
+      confirmation_policy: tool.confirmation_policy, enabled: tool.enabled,
+      network_policy: JSON.stringify(tool.network_policy, null, 2),
+      workspace_policy: JSON.stringify(tool.workspace_policy, null, 2),
+      risk_rules: JSON.stringify(tool.risk_rules, null, 2),
+    })
+  }
+  const openConnection = (current: ToolConnection | 'new') => {
+    setConnection(current)
+    connectionForm.resetFields()
+    connectionForm.setFieldsValue(current === 'new' ? {
+      connection_type: 'brave', auth_type: 'x_api_key', enabled: true, is_primary: false, config: '{}',
+    } : { ...current, api_key: undefined, config: JSON.stringify(current.config, null, 2) })
   }
 
-  return (
-    <>
-      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 12 }}>
-        <Button icon={<SyncOutlined />} loading={reconcile.isPending} onClick={() => reconcile.mutate()}>与代码注册表对账</Button>
-      </div>
-      <Table
-        rowKey="id"
-        loading={tools.isLoading}
-        dataSource={tools.data || []}
-        columns={[
-          { title: 'Key', dataIndex: 'tool_key' },
-          { title: '显示名', dataIndex: 'display_name' },
-          { title: '执行模式', dataIndex: 'execution_mode', render: value => <Tag>{value}</Tag> },
-          { title: '实现版本', dataIndex: 'implementation_version' },
-          { title: '确认策略', dataIndex: 'confirmation_policy', render: (value, tool: PlatformTool) => <Select size="small" value={value} style={{ width: 100 }} options={[{ value: 'never' }, { value: 'always' }]} onChange={next => update.mutate({ tool, patch: { confirmation_policy: next } })} /> },
-          { title: '启用', dataIndex: 'enabled', render: (value, tool: PlatformTool) => <Switch checked={value} onChange={next => update.mutate({ tool, patch: { enabled: next } })} /> },
-          { title: '配置版本', dataIndex: 'config_version' },
-          { title: '操作', render: (_, tool: PlatformTool) => <Space><Button size="small" icon={<EditOutlined />} onClick={() => openEditor(tool)}>编辑</Button><Button size="small" onClick={() => setDetails(tool)}>详情</Button><Button size="small" icon={<ApiOutlined />} onClick={async () => { const result = await client.post(`/platform-tools/${tool.id}/connection-test`).then(r => r.data); message[result.ok ? 'success' : 'warning'](result.ok ? 'Tool 可用' : result.provider_error_code) }}>测试</Button></Space> },
-        ]}
-      />
-      <Modal title={`编辑 ${editing?.tool_key || ''}`} open={!!editing} onCancel={() => setEditing(null)} onOk={() => form.submit()} confirmLoading={update.isPending}>
-        <Form form={form} layout="vertical" onFinish={values => {
-          if (!editing) return
-          try { update.mutate({ tool: editing, patch: { ...values, platform_config: JSON.parse(values.platform_config || '{}') } }) }
-          catch { message.error('平台配置必须是有效 JSON') }
-        }}>
-          <Form.Item name="display_name" label="显示名" rules={[{ required: true }]}><Input /></Form.Item>
-          <Form.Item name="description" label="说明"><Input.TextArea rows={3} /></Form.Item>
-          <Form.Item name="platform_config" label="平台配置 JSON"><Input.TextArea rows={6} /></Form.Item>
-        </Form>
-      </Modal>
-      <Modal title={details?.tool_key} open={!!details} onCancel={() => setDetails(null)} footer={null} width={760}>
-        {details && <Descriptions column={1} bordered size="small" items={[
-          { key: 'impl', label: '实现', children: details.implementation_ref },
-          { key: 'input', label: 'Input Schema', children: <pre style={{ whiteSpace: 'pre-wrap' }}>{JSON.stringify(details.input_schema, null, 2)}</pre> },
-          { key: 'output', label: 'Output Schema', children: <pre style={{ whiteSpace: 'pre-wrap' }}>{JSON.stringify(details.output_schema || {}, null, 2)}</pre> },
-        ]} />}
-      </Modal>
-    </>
-  )
+  const connectionTab = <>
+    <Alert className="mb-3" type="info" showIcon message="平台统一凭证" description="API Key 仅在保存时提交，数据库使用 AES-GCM 密文；API、日志、Trace 和幂等快照均不会回显。连接测试会真实请求 Provider。" />
+    <div className="mb-3 flex justify-end"><Button icon={<PlusOutlined />} onClick={() => openConnection('new')}>新建连接</Button></div>
+    <Table rowKey="id" loading={connections.isLoading} dataSource={connections.data || []} columns={[
+      { title: '连接', render: (_, item: ToolConnection) => <><div>{item.display_name}</div><code className="text-xs">{item.connection_key}</code></> },
+      { title: '类型', dataIndex: 'connection_type', render: value => <Tag>{value}</Tag> },
+      { title: 'Revision', dataIndex: 'revision_no' },
+      { title: '凭证', render: (_, item: ToolConnection) => item.secret_configured ? <Tag color="green">已加密 · {item.secret_fingerprint?.slice(0, 8)}</Tag> : <Tag>匿名</Tag> },
+      { title: '主搜索', dataIndex: 'is_primary', render: value => value ? <Tag color="blue">PRIMARY</Tag> : null },
+      { title: '健康', render: (_, item: ToolConnection) => <Tag color={item.health.status === 'healthy' ? 'green' : item.health.status === 'unhealthy' ? 'red' : 'default'}>{item.health.status}{item.health.latency_ms != null ? ` · ${item.health.latency_ms}ms` : ''}</Tag> },
+      { title: '操作', render: (_, item: ToolConnection) => <Space>
+        <Button size="small" icon={<EditOutlined />} onClick={() => openConnection(item)}>配置</Button>
+        <Button size="small" icon={<ApiOutlined />} onClick={async () => {
+          const result = await client.post(`/tool-connections/${item.id}/connection-test`).then(r => r.data)
+          message[result.ok ? 'success' : 'error'](result.ok ? `真实连接成功 · ${result.latency_ms}ms` : result.provider_error_code)
+          queryClient.invalidateQueries({ queryKey: ['tool-connections'] })
+        }}>真实测试</Button>
+        {item.connection_type === 'mcp' && <Button size="small" icon={<SyncOutlined />} onClick={async () => {
+          const result = await client.post(`/mcp-servers/${item.id}/sync`, {}, { headers: commandHeaders() }).then(r => r.data)
+          message.success(`MCP 同步 ${result.tools.length} 个 Tool，默认待审核`)
+          queryClient.invalidateQueries({ queryKey: ['platform-tools'] })
+        }}>同步 MCP</Button>}
+      </Space> },
+    ]} />
+  </>
+
+  const toolTab = <>
+    <div className="mb-3 flex justify-end"><Button icon={<SyncOutlined />} loading={reconcile.isPending} onClick={() => reconcile.mutate()}>发布代码 ToolVersion</Button></div>
+    <Table rowKey="id" loading={tools.isLoading} dataSource={tools.data || []} columns={[
+      { title: 'Tool', render: (_, item: ToolDefinition) => <><div>{item.display_name_zh || item.display_name}</div><code className="text-xs">{item.tool_key}</code></> },
+      { title: '来源', render: (_, item: ToolDefinition) => <Tag color={item.origin === 'mcp' ? 'purple' : 'blue'}>{item.namespace}</Tag> },
+      { title: '版本', render: (_, item: ToolDefinition) => <span>v{item.version_no} <code>{item.content_hash?.slice(0, 8)}</code></span> },
+      { title: '执行/风险', render: (_, item: ToolDefinition) => <Space direction="vertical" size={0}><Tag>{item.execution_mode}</Tag><Tag>{item.side_effect}</Tag></Space> },
+      { title: '确认', dataIndex: 'confirmation_policy', render: value => <Tag color={value === 'per_call' ? 'orange' : value === 'session_grant' ? 'gold' : 'default'}>{value}</Tag> },
+      { title: '状态', dataIndex: 'enabled', render: value => <Tag color={value ? 'green' : 'default'}>{value ? '已启用' : '待审核/停用'}</Tag> },
+      { title: '操作', render: (_, item: ToolDefinition) => <Space><Button size="small" onClick={() => openTool(item)}>治理</Button><Button size="small" onClick={() => setDetails(item)}>合同</Button></Space> },
+    ]} />
+  </>
+
+  return <>
+    <Tabs items={[{ key: 'connections', label: 'Provider / MCP / Browser', children: connectionTab }, { key: 'catalog', label: 'Tool Catalog', children: toolTab }]} />
+    <Modal title={`治理 ${editing?.tool_key || ''}`} open={!!editing} onCancel={() => setEditing(null)} onOk={() => toolForm.submit()} confirmLoading={updateTool.isPending}>
+      <Form form={toolForm} layout="vertical" onFinish={values => {
+        if (!editing) return
+        try { updateTool.mutate({ tool: editing, patch: { ...values, network_policy: JSON.parse(values.network_policy), workspace_policy: JSON.parse(values.workspace_policy), risk_rules: JSON.parse(values.risk_rules) } }) }
+        catch { message.error('治理策略必须是有效 JSON') }
+      }}>
+        <Form.Item name="display_name" label="英文显示名" rules={[{ required: true }]}><Input /></Form.Item>
+        <Form.Item name="display_name_zh" label="中文显示名"><Input /></Form.Item>
+        <Form.Item name="confirmation_policy" label="默认确认策略"><Select options={[{ value: 'never' }, { value: 'per_call' }, { value: 'session_grant' }]} /></Form.Item>
+        <Form.Item name="enabled" label="管理员审核启用" valuePropName="checked"><Switch /></Form.Item>
+        <Form.Item name="network_policy" label="Network Policy"><Input.TextArea rows={3} /></Form.Item>
+        <Form.Item name="workspace_policy" label="Workspace Policy"><Input.TextArea rows={3} /></Form.Item>
+        <Form.Item name="risk_rules" label="Dynamic Risk Rules"><Input.TextArea rows={3} /></Form.Item>
+      </Form>
+    </Modal>
+    <Modal title={details?.tool_key} open={!!details} onCancel={() => setDetails(null)} footer={null} width={860}>
+      {details && <Descriptions column={1} bordered size="small" items={[
+        { key: 'identity', label: '不可变版本', children: `${details.tool_version_id} · ${details.content_hash}` },
+        { key: 'impl', label: '实现', children: `${details.implementation_ref}@${details.implementation_version}` },
+        { key: 'description', label: '模型说明', children: details.description },
+        { key: 'input', label: 'Input Schema', children: <pre className="max-h-64 overflow-auto whitespace-pre-wrap">{JSON.stringify(details.input_schema, null, 2)}</pre> },
+        { key: 'output', label: 'Output Schema', children: <pre className="max-h-64 overflow-auto whitespace-pre-wrap">{JSON.stringify(details.output_schema, null, 2)}</pre> },
+        { key: 'errors', label: '错误目录', children: <pre className="whitespace-pre-wrap">{JSON.stringify(details.error_catalog, null, 2)}</pre> },
+      ]} />}
+    </Modal>
+    <Modal title={connection === 'new' ? '新建 Tool 连接' : `配置 ${(connection as ToolConnection | null)?.connection_key || ''}`} open={!!connection} onCancel={() => setConnection(null)} onOk={() => connectionForm.submit()} confirmLoading={saveConnection.isPending}>
+      <Form form={connectionForm} layout="vertical" onValuesChange={changed => {
+        if (connection === 'new' && changed.connection_type) {
+          const type = changed.connection_type
+          connectionForm.setFieldsValue({
+            auth_type: type === 'bocha' ? 'bearer' : type === 'brave' ? 'x_api_key' : 'none',
+            is_primary: type === 'bocha' || type === 'brave' ? connectionForm.getFieldValue('is_primary') : false,
+          })
+        }
+      }} onFinish={values => connection && saveConnection.mutate({ current: connection, values })}>
+        {connection === 'new' && <Form.Item name="connection_key" label="稳定 Key" rules={[{ required: true }]}><Input placeholder="search.brave.primary" /></Form.Item>}
+        <Form.Item name="display_name" label="显示名" rules={[{ required: true }]}><Input /></Form.Item>
+        {connection === 'new' && <Form.Item name="connection_type" label="类型"><Select options={['bocha', 'brave', 'mcp'].map(value => ({ value }))} /></Form.Item>}
+        <Form.Item name="endpoint" label="HTTPS Endpoint" rules={[{ required: true }]}><Input /></Form.Item>
+        <Form.Item name="auth_type" label="认证"><Select options={['none', 'bearer', 'x_api_key'].map(value => ({ value }))} /></Form.Item>
+        <Form.Item name="api_key" label="API Key（write-only）" extra={(connection as ToolConnection)?.secret_configured ? '留空保留当前加密 Secret；输入新值会创建新 revision 并轮换。' : undefined}><Input.Password autoComplete="new-password" /></Form.Item>
+        <Form.Item name="config" label="类型化扩展配置 JSON"><Input.TextArea rows={4} /></Form.Item>
+        <Space><Form.Item name="enabled" valuePropName="checked"><Switch checkedChildren="启用" unCheckedChildren="停用" /></Form.Item><Form.Item name="is_primary" valuePropName="checked"><Switch checkedChildren="主搜索" unCheckedChildren="非主搜索" /></Form.Item></Space>
+      </Form>
+    </Modal>
+  </>
 }

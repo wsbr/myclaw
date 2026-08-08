@@ -8,8 +8,9 @@ import json
 from sqlalchemy import select
 
 from app.core.tool_registry.base import RuntimeContext, ToolResult
+from app.core.tool_registry.schema import runtime_result_schema
 from app.models.common import uuid7
-from app.models.runtime_v1 import DurableRunner, Clarification, Message, Run, WorkItem
+from app.models.runtime_v1 import CapabilitySnapshot, DurableRunner, Clarification, Message, Run, WorkItem
 from app.persistence.reliable_writes import ExecutionEventWriter
 from app.services.working_plan_service import WorkingPlanConflict, update_working_plan
 from app.services.agent_directory_service import agent_card_view, discover_agent_cards
@@ -26,10 +27,28 @@ from app.services.group_collaboration_service import (
 
 
 RUNTIME_COORDINATION_DEFINITIONS = ({
+    "name": "search_tools",
+    "description": (
+        "WHEN: a needed capability is not currently visible. WHEN NOT: do not search for an already presented Tool. "
+        "RETURNS: matching pre-authorized frozen ToolVersions, presented next Turn. "
+        "RECOVERY: refine the capability query; discovery never expands authorization."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "minLength": 1, "maxLength": 500},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 8},
+        },
+        "required": ["query"],
+        "additionalProperties": False,
+    },
+    "source": "runtime",
+}, {
     "name": "update_plan",
     "description": (
-        "Create or revise your visible working plan when the task benefits from planning. "
-        "Do not call this for a simple one-step request."
+        "WHEN: create or revise the visible working plan for a multi-step task. "
+        "WHEN NOT: skip it for a simple one-step request. RETURNS: the persisted WorkingPlan revision. "
+        "RECOVERY: refresh the current revision after a conflict."
     ),
     "input_schema": {
         "type": "object",
@@ -60,7 +79,8 @@ RUNTIME_COORDINATION_DEFINITIONS = ({
 }, {
     "name": "ask_user",
     "description": (
-        "Ask one necessary user-facing clarification question and wait durably for the answer."
+        "WHEN: one essential user decision is missing. WHEN NOT: do not ask for discoverable facts. "
+        "RETURNS: a durable clarification wait. RECOVERY: continue only after the user's committed answer."
     ),
     "input_schema": {
         "type": "object",
@@ -74,8 +94,8 @@ RUNTIME_COORDINATION_DEFINITIONS = ({
 }, {
     "name": "discover_agents",
     "description": (
-        "Search the governed Agent Network for current professional candidates. "
-        "Discovery does not itself authorize or invoke a candidate."
+        "WHEN: find a governed professional Agent for a bounded subtask. WHEN NOT: do not use for Platform Tools. "
+        "RETURNS: currently visible Agent cards. RECOVERY: refine the query; discovery does not authorize invocation."
     ),
     "input_schema": {
         "type": "object",
@@ -94,8 +114,8 @@ RUNTIME_COORDINATION_DEFINITIONS = ({
 }, {
     "name": "invoke_agent",
     "description": (
-        "Invoke one authorized Agent for a bounded professional request and wait "
-        "durably for its result. Choose candidates yourself from current evidence."
+        "WHEN: delegate a bounded request to an authorized discovered Agent. WHEN NOT: do not invoke unknown IDs. "
+        "RETURNS: a durable AgentInvocation wait. RECOVERY: inspect authorization or the returned Agent result."
     ),
     "input_schema": {
         "type": "object",
@@ -111,8 +131,8 @@ RUNTIME_COORDINATION_DEFINITIONS = ({
 }, {
     "name": "send_group_message",
     "description": (
-        "Send a real Group message. A direct message wakes only the named member; "
-        "a group message is shared history and does not broadcast-wake every member."
+        "WHEN: contribute or direct a message inside the current governed Group. WHEN NOT: do not contact outsiders. "
+        "RETURNS: the committed Group message and wake decision. RECOVERY: correct recipient/visibility after policy errors."
     ),
     "input_schema": {
         "type": "object",
@@ -130,8 +150,8 @@ RUNTIME_COORDINATION_DEFINITIONS = ({
 }, {
     "name": "invite_agent",
     "description": (
-        "Propose inviting a governed Agent. In first-phase fixed_for_run Groups, "
-        "out-of-graph proposals return an auditable rejected result."
+        "WHEN: propose an additional governed Group member. WHEN NOT: do not assume invitations are permitted. "
+        "RETURNS: an auditable invitation outcome. RECOVERY: fixed-for-run Groups require a new Group instead."
     ),
     "input_schema": {
         "type": "object",
@@ -148,8 +168,8 @@ RUNTIME_COORDINATION_DEFINITIONS = ({
 }, {
     "name": "update_shared_task",
     "description": (
-        "Create or update an optional Group SharedTask collaboration record. "
-        "It never schedules an Agent or imposes an execution DAG."
+        "WHEN: track optional shared Group work. WHEN NOT: do not use it to schedule an Agent. "
+        "RETURNS: the persisted SharedTask. RECOVERY: refresh the task and retry valid state transitions."
     ),
     "input_schema": {
         "type": "object",
@@ -168,13 +188,17 @@ RUNTIME_COORDINATION_DEFINITIONS = ({
 })
 
 for _definition in RUNTIME_COORDINATION_DEFINITIONS:
+    _result_schema = runtime_result_schema(_definition["name"])
     _definition.update({
-        "output_schema": {"type": "object"},
+        "output_schema": _result_schema,
         "registration_hash": hashlib.sha256(json.dumps(
             {
                 "name": _definition["name"],
+                "description": _definition["description"],
                 "input_schema": _definition["input_schema"],
-                "runtime_contract_version": 1,
+                "output_schema": _result_schema,
+                "side_effect": _definition.get("side_effect", "none"),
+                "runtime_contract_version": 2,
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -191,6 +215,43 @@ async def dispatch_coordination_tool(
     run_id: str, work_item_id: str, source_turn_id: str, provider_call_id: str,
 ) -> tuple[ToolResult, bool, str | None]:
     operation_key = f"turn:{source_turn_id}:call:{provider_call_id}"
+    if name == "search_tools":
+        capability = await db.scalar(select(CapabilitySnapshot).where(
+            CapabilitySnapshot.runner_id == context.runner_id,
+        ).order_by(CapabilitySnapshot.created_at.desc()))
+        if capability is None:
+            return ToolResult(
+                status="failed", summary="Capability snapshot is unavailable",
+                error="Capability snapshot is unavailable", error_code="capability_snapshot_missing",
+                error_category="authorization",
+            ), False, None
+        query = arguments["query"].casefold().strip()
+        tokens = [token for token in query.replace("_", " ").split() if token]
+        ranked = []
+        for definition in capability.authorized_tool_versions:
+            name_value = str(definition.get("name") or "").casefold()
+            haystack = " ".join([
+                name_value, str(definition.get("description") or "").casefold(),
+                str(definition.get("namespace") or "").casefold(),
+            ])
+            score = sum(3 if token in name_value else 1 for token in tokens if token in haystack)
+            if score:
+                ranked.append((score, definition))
+        ranked.sort(key=lambda item: (-item[0], item[1]["name"]))
+        loaded = [dict(item[1]) for item in ranked[:int(arguments.get("limit", 8))]]
+        summary = [{
+            "name": item["name"], "description": item["description"],
+            "tool_version_id": item.get("tool_version_id"),
+        } for item in loaded]
+        return ToolResult(
+            status="succeeded", summary=f"Loaded {len(loaded)} authorized ToolVersion(s)",
+            data={"tools": summary, "loaded_tool_definitions": loaded},
+            content_blocks=[{"type": "json", "value": summary}],
+            evidence=[{
+                "kind": "capability_snapshot", "id": capability.id,
+                "loaded_tool_version_ids": [item.get("tool_version_id") for item in loaded],
+            }],
+        ), False, None
     if name == "update_plan":
         try:
             view = await update_working_plan(
@@ -231,7 +292,7 @@ async def dispatch_coordination_tool(
                 status="failed", summary="AgentInvocation runtime graph is unavailable",
                 error_code="runtime_context_required",
                 error="AgentInvocation runtime graph is unavailable",
-                error_category="permanent",
+                error_category="provider",
             ), False, None
         try:
             invocation = await dispatch_agent_invocation(

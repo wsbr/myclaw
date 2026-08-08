@@ -1,3 +1,5 @@
+import ipaddress
+
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from functools import lru_cache
@@ -37,6 +39,10 @@ class Settings(BaseSettings):
     myclaw_environment: str = "development"
     debug: bool = False
     cors_origins: list[str] = ["http://localhost", "http://localhost:80"]
+    # Some controlled egress gateways (including the local UAT tunnel) use a
+    # synthetic DNS range for public names. Keep this opt-in and empty by
+    # default; literal IP URLs and local/internal hostnames remain prohibited.
+    trusted_synthetic_dns_cidrs: list[str] = []
     sandbox_root: str = "/var/lib/myclaw/workspaces"
     skill_package_root: str = "/var/lib/myclaw/skill-packages"
     shared_skill_root: str = "/var/lib/myclaw/shared-skills"
@@ -81,6 +87,17 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_production_safety(self):
+        for cidr in self.trusted_synthetic_dns_cidrs:
+            try:
+                network = ipaddress.ip_network(cidr, strict=True)
+            except ValueError as error:
+                raise ValueError(
+                    f"TRUSTED_SYNTHETIC_DNS_CIDRS contains invalid CIDR: {cidr}"
+                ) from error
+            if network.version not in {4, 6}:
+                raise ValueError(
+                    f"TRUSTED_SYNTHETIC_DNS_CIDRS contains unsupported CIDR: {cidr}"
+                )
         if self.runtime_runner_heartbeat_seconds >= self.runtime_runner_lease_seconds:
             raise ValueError("RUNTIME_RUNNER_HEARTBEAT_SECONDS must be below RUNTIME_RUNNER_LEASE_SECONDS")
         if self.sandbox_attempt_heartbeat_seconds >= self.sandbox_attempt_lease_seconds:

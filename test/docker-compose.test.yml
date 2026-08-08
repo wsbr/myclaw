@@ -1,11 +1,18 @@
 # Test infrastructure — isolated ports from dev stack
-#   MySQL 3307 | Redis 6380 | API 8001 | Frontend 8081 | Mock LLM 9090
+#   MySQL 3307 | Redis 6380 | API 8001 | Frontend 8081
 #
 # Quick start (infra only):
 #   docker compose -f docker-compose.test.yml up -d mysql-test redis-test
 #
 # Full stack deployment tests:
 #   docker compose -f docker-compose.test.yml --profile fullstack up -d --build
+
+x-backend-security: &backend-security
+  user: "10001:10001"
+  init: true
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
 
 services:
   mysql-test:
@@ -25,6 +32,9 @@ services:
       retries: 15
     tmpfs:
       - /var/lib/mysql
+    networks:
+      - default
+      - sandbox-internal
 
   redis-test:
     image: redis:7-alpine
@@ -37,22 +47,6 @@ services:
       timeout: 3s
       retries: 10
 
-  mock-llm:
-    build:
-      context: .
-      dockerfile: docker/Dockerfile.mock-llm
-      labels:
-        org.opencontainers.image.revision: ${MYCLAW_ACCEPTANCE_COMMIT_SHA:-unbound}
-    ports:
-      - "9090:9090"
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:9090/health')"]
-      interval: 5s
-      timeout: 3s
-      retries: 10
-    profiles:
-      - fullstack
-
   otel-collector-test:
     image: otel/opentelemetry-collector-contrib:0.153.0
     command: ["--config=/etc/otelcol-contrib/config.yaml"]
@@ -63,15 +57,29 @@ services:
       - "13134:13133"
     profiles:
       - fullstack
+    networks:
+      - default
+      - sandbox-internal
 
   api-test:
+    <<: *backend-security
     build:
       context: ../backend
       dockerfile: Dockerfile
       labels:
         org.opencontainers.image.revision: ${MYCLAW_ACCEPTANCE_COMMIT_SHA:-unbound}
     command: >
-      sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+      sh -c '
+        for attempt in $$(seq 1 30); do
+          if alembic upgrade head; then
+            exec uvicorn app.main:app --host 0.0.0.0 --port 8000;
+          fi;
+          echo "Migration attempt $$attempt failed; retrying in 2 seconds" >&2;
+          sleep 2;
+        done;
+        echo "Database migrations failed after 30 attempts" >&2;
+        exit 1
+      '
     ports:
       - "8001:8000"
     env_file: .env.test
@@ -79,17 +87,15 @@ services:
       DATABASE_URL: mysql+aiomysql://myclaw:mypassword@mysql-test:3306/myclaw_test
       REDIS_URL: redis://:redispassword@redis-test:6379/0
       CORS_ORIGINS: '["${MYCLAW_FULLSTACK_UI_URL:-http://localhost:8081}","${MYCLAW_FULLSTACK_API_URL:-http://localhost:8001}"]'
+      TRUSTED_SYNTHETIC_DNS_CIDRS: '${TRUSTED_SYNTHETIC_DNS_CIDRS:-["198.18.0.0/15"]}'
       INIT_ADMIN_EMAIL: admin@test.myclaw.local
       INIT_ADMIN_PASSWORD: testpassword123
-      MYCLAW_REAL_LLM_API_KEY: ${MYCLAW_REAL_LLM_API_KEY:-}
       OTEL_SERVICE_NAME: myclaw-api-test
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector-test:4318
     depends_on:
       mysql-test:
         condition: service_healthy
       redis-test:
-        condition: service_healthy
-      mock-llm:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
@@ -103,6 +109,7 @@ services:
       - myclaw-test-data:/var/lib/myclaw
 
   runtime-worker-test:
+    <<: *backend-security
     build:
       context: ../backend
       dockerfile: Dockerfile
@@ -113,7 +120,6 @@ services:
     environment:
       DATABASE_URL: mysql+aiomysql://myclaw:mypassword@mysql-test:3306/myclaw_test
       REDIS_URL: redis://:redispassword@redis-test:6379/0
-      MYCLAW_REAL_LLM_API_KEY: ${MYCLAW_REAL_LLM_API_KEY:-}
       RUNTIME_WORKER_POLL_SECONDS: "0.1"
       RUNTIME_OUTBOX_CLAIM_LEASE_SECONDS: "5"
       RUNTIME_RUNNER_LEASE_SECONDS: "8"
@@ -129,6 +135,7 @@ services:
       - myclaw-test-data:/var/lib/myclaw
 
   sandbox-worker-test:
+    <<: *backend-security
     build:
       context: ../backend
       dockerfile: Dockerfile
@@ -145,6 +152,60 @@ services:
       SANDBOX_ATTEMPT_LEASE_SECONDS: "8"
       SANDBOX_ATTEMPT_HEARTBEAT_SECONDS: "2"
       OTEL_SERVICE_NAME: myclaw-sandbox-worker-test
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector-test:4318
+    depends_on:
+      api-test:
+        condition: service_healthy
+    profiles:
+      - fullstack
+    volumes:
+      - myclaw-test-data:/var/lib/myclaw
+    networks:
+      - sandbox-internal
+
+  connector-worker-test:
+    <<: *backend-security
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+      labels:
+        org.opencontainers.image.revision: ${MYCLAW_ACCEPTANCE_COMMIT_SHA:-unbound}
+    command: python -m app.workers.connector_worker
+    env_file: .env.test
+    environment:
+      DATABASE_URL: mysql+aiomysql://myclaw:mypassword@mysql-test:3306/myclaw_test
+      REDIS_URL: redis://:redispassword@redis-test:6379/0
+      SANDBOX_WORKER_POLL_SECONDS: "0.1"
+      SANDBOX_OUTBOX_CLAIM_LEASE_SECONDS: "5"
+      SANDBOX_ATTEMPT_STALE_SECONDS: "10"
+      OTEL_SERVICE_NAME: myclaw-connector-worker-test
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector-test:4318
+    depends_on:
+      api-test:
+        condition: service_healthy
+    profiles:
+      - fullstack
+    volumes:
+      - myclaw-test-data:/var/lib/myclaw
+
+  browser-worker-test:
+    <<: *backend-security
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+      labels:
+        org.opencontainers.image.revision: ${MYCLAW_ACCEPTANCE_COMMIT_SHA:-unbound}
+    command: python -m app.workers.browser_worker
+    env_file: .env.test
+    environment:
+      DATABASE_URL: mysql+aiomysql://myclaw:mypassword@mysql-test:3306/myclaw_test
+      REDIS_URL: redis://:redispassword@redis-test:6379/0
+      SANDBOX_WORKER_POLL_SECONDS: "0.1"
+      SANDBOX_OUTBOX_CLAIM_LEASE_SECONDS: "5"
+      SANDBOX_ATTEMPT_STALE_SECONDS: "10"
+      SANDBOX_ATTEMPT_LEASE_SECONDS: "8"
+      SANDBOX_ATTEMPT_HEARTBEAT_SECONDS: "2"
+      OTEL_SERVICE_NAME: myclaw-browser-worker-test
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector-test:4318
     depends_on:
       api-test:
@@ -178,3 +239,7 @@ services:
 
 volumes:
   myclaw-test-data:
+
+networks:
+  sandbox-internal:
+    internal: true

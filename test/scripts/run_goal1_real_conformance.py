@@ -90,7 +90,7 @@ def main() -> int:
                     "provider": "openai_compatible",
                     "model_name": required["MYCLAW_REAL_LLM_MODEL"],
                     "endpoint": required["MYCLAW_REAL_LLM_ENDPOINT"],
-                    "credential_ref": "env://MYCLAW_REAL_LLM_API_KEY",
+                    "api_key": required["MYCLAW_REAL_LLM_API_KEY"],
                     "default_parameters": {
                         "temperature": 0,
                         "max_tokens": 4096,

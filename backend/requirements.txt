@@ -1,5 +1,7 @@
 # Web framework
-fastapi==0.115.5
+fastapi==0.141.1
+starlette==1.5.1
+sse-starlette==3.4.8
 uvicorn[standard]==0.32.1
 python-multipart==0.0.20
 
@@ -9,8 +11,9 @@ aiomysql==0.2.0
 alembic==1.14.0
 
 # Validation
-pydantic[email]==2.10.3
+pydantic[email]==2.12.5
 pydantic-settings==2.7.0
+jsonschema[format]==4.25.0
 
 # Auth
 python-jose[cryptography]==3.3.0
@@ -27,12 +30,17 @@ openai==1.57.4
 httpx==0.28.1
 httpx-sse==0.4.0
 
+# Platform tools
+mcp==2.0.0
+playwright==1.54.0
+pypdf==5.9.0
+beautifulsoup4==4.13.4
+
 # Encryption
 cryptography==44.0.0
 
 # Utils
 python-dotenv==1.0.1
-orjson==3.10.12
 PyMySQL==1.1.1
 
 # OpenTelemetry (optional OTLP export is enabled by OTEL_* environment variables)

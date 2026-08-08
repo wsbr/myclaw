@@ -8,8 +8,14 @@ from app.services.workspace_file_service import (
 
 class WriteFileTool(BaseTool):
     name = "write_file"
-    description = "以原子写入方式在当前 Workspace 创建或替换文件；默认不发布 Artifact"
+    description = (
+        "WHEN: atomically create or replace one complete Workspace file from inline content or an Artifact. "
+        "WHEN NOT: use apply_patch for precise multi-file edits; writing does not publish an Artifact. "
+        "RETURNS: final path, size, checksum, and provenance. "
+        "RECOVERY: refresh checksum after a conflict and retry with an explicit mode."
+    )
     input_schema = {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
         "properties": {
             "path": {"type": "string"},
@@ -19,6 +25,16 @@ class WriteFileTool(BaseTool):
             "expected_checksum": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         },
         "required": ["path", "mode"],
+        "allOf": [
+            {
+                "if": {"properties": {"mode": {"const": "replace"}}},
+                "then": {"required": ["expected_checksum"]},
+            }
+        ],
+        "oneOf": [
+            {"required": ["content"], "not": {"required": ["source_artifact_id"]}},
+            {"required": ["source_artifact_id"], "not": {"required": ["content"]}},
+        ],
         "additionalProperties": False,
     }
 
@@ -41,13 +57,31 @@ class WriteFileTool(BaseTool):
         if exists and not path.is_file():
             return ToolResult(success=False, error="target exists and is not a regular file")
         if mode == "create" and exists:
-            return ToolResult(success=False, error="version conflict: target already exists")
+            return ToolResult(
+                status="failed", error="version conflict: target already exists",
+                error_code="workspace_target_exists", error_category="conflict",
+                retryable=True,
+            )
         if mode == "replace" and not exists:
-            return ToolResult(success=False, error="version conflict: target does not exist")
+            return ToolResult(
+                status="failed", error="version conflict: target does not exist",
+                error_code="workspace_target_missing", error_category="conflict",
+                retryable=True,
+            )
+        if mode == "replace" and not args.get("expected_checksum"):
+            return ToolResult(
+                status="failed", error="replace requires expected_checksum CAS",
+                error_code="workspace_checksum_required",
+                error_category="validation", retryable=False,
+            )
         expected = args.get("expected_checksum")
         if expected is not None:
             if not exists or sha256_file(path) != expected:
-                return ToolResult(success=False, error="version conflict: checksum does not match")
+                return ToolResult(
+                    status="failed", error="version conflict: checksum does not match",
+                    error_code="workspace_checksum_conflict", error_category="conflict",
+                    retryable=True,
+                )
         if has_artifact:
             source, artifact = await resolve_artifact_storage_path(
                 db, context=context, artifact_id=args["source_artifact_id"],
@@ -65,4 +99,8 @@ class WriteFileTool(BaseTool):
         }
         if has_artifact:
             result["source_artifact_id"] = artifact.id
-        return ToolResult(success=True, data=result)
+        return ToolResult(
+            status="succeeded", summary=f"Wrote {len(content)} bytes to {relative}",
+            data=result, content_blocks=[{"type": "json", "value": result}],
+            evidence=[{"kind": "workspace_write", **result}],
+        )

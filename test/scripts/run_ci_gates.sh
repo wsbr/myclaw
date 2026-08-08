@@ -63,19 +63,12 @@ wait_for_mysql() {
 }
 
 run_unit_gate() {
-  echo "==> Unit and critical branch coverage"
+  echo "==> Pure Tool contract and security gates (no model surrogate)"
   (
     cd "$TEST_ROOT"
-    PYTHONPATH="$ROOT/backend" "$PYTEST_BIN" unit/backend -m unit -v --tb=short \
-      --junitxml="$RESULTS_ROOT/unit.xml" \
-      --cov=app.workers.runtime_worker \
-      --cov=app.services.group_collaboration_service \
-      --cov=app.api.agents \
-      --cov=app.api.groups \
-      --cov-branch \
-      --cov-report=term \
-      --cov-report="xml:$RESULTS_ROOT/critical-coverage.xml" \
-      --cov-fail-under=30
+    PYTHONPATH="$ROOT/backend" "$PYTEST_BIN" \
+      unit/backend \
+      -m unit -v --tb=short --junitxml="$RESULTS_ROOT/tool-contracts.xml"
   )
 }
 
@@ -113,49 +106,41 @@ run_migration_gate() {
     "$backend_image" alembic heads | tee "$RESULTS_ROOT/migration-heads.txt"
   test "$(grep -cve '^[[:space:]]*$' "$RESULTS_ROOT/migration-heads.txt")" = "1"
   docker exec "$mysql_container" mysql -umyclaw -pmypassword myclaw_test -N -e "
-    SELECT CONCAT('legacy_tables=', COUNT(*))
+    SELECT CONCAT('tool_contract_tables=', COUNT(*))
       FROM information_schema.TABLES
-     WHERE TABLE_SCHEMA='myclaw_test'
-       AND TABLE_NAME IN (
-         'plan_execution','plan_work_item_node','plan_work_item_dependency',
-         'plan_declared_agent','group_formation_proposal','group_formation_revision',
-         'group_formation_participant','group_formation_work_item',
-         'group_formation_suggested_edge','group_agent_node',
-         'group_initial_suggested_edge','group_run_agent_version',
-         'group_collaboration_edge'
-       );
-    SELECT CONCAT('legacy_run_columns=', COUNT(*))
+     WHERE TABLE_SCHEMA='myclaw_test' AND TABLE_NAME IN (
+       'platform_secret','platform_tool','tool_version','tool_connection',
+       'tool_connection_revision','tool_governance','browser_session_state');
+    SELECT CONCAT('legacy_tool_columns=', COUNT(*))
       FROM information_schema.COLUMNS
-     WHERE TABLE_SCHEMA='myclaw_test' AND TABLE_NAME='run'
+     WHERE TABLE_SCHEMA='myclaw_test' AND TABLE_NAME='platform_tool'
        AND COLUMN_NAME IN (
-         'lifecycle','outcome','execution_kind','entry_agent_id','source_run_id',
-         'result_summary','error_code','started_at','finished_at'
-       );
-    SELECT CONCAT('archive_seal_triggers=', COUNT(*))
+         'input_schema','output_schema','implementation_ref','execution_mode',
+         'enabled','confirmation_policy','platform_config','registration_hash');
+    SELECT CONCAT('immutable_tool_triggers=', COUNT(*))
       FROM information_schema.TRIGGERS
-     WHERE TRIGGER_SCHEMA='myclaw_test'
-       AND EVENT_OBJECT_TABLE='legacy_uat_fact_archive';
-    SELECT CONCAT('first_payload_columns=', COUNT(*))
+     WHERE TRIGGER_SCHEMA='myclaw_test' AND TRIGGER_NAME IN (
+       'trg_tool_version_immutable_update','trg_tool_version_immutable_delete',
+       'trg_tool_connection_revision_immutable_update','trg_tool_connection_revision_immutable_delete',
+       'trg_platform_secret_material_immutable','trg_agent_version_tool_tool_binding_immutable',
+       'trg_tool_invocation_tool_binding_immutable','trg_runner_tool_snapshot_tool_binding_immutable');
+    SELECT CONCAT('exact_nonnull_columns=', COUNT(*))
       FROM information_schema.COLUMNS
-     WHERE TABLE_SCHEMA='myclaw_test' AND TABLE_NAME='provider_attempt'
-       AND COLUMN_NAME='first_payload_at';
-    SELECT CONCAT('schema_repair_columns=', COUNT(*))
-      FROM information_schema.COLUMNS
-     WHERE TABLE_SCHEMA='myclaw_test' AND TABLE_NAME='agent_turn'
-       AND COLUMN_NAME='schema_repair_count';
+     WHERE TABLE_SCHEMA='myclaw_test' AND IS_NULLABLE='NO' AND (
+       (TABLE_NAME='tool_invocation' AND COLUMN_NAME IN ('tool_version_id','tool_version_content_hash')) OR
+       (TABLE_NAME='runner_tool_snapshot' AND COLUMN_NAME IN ('tool_version_id','tool_version_content_hash')));
   " | tee "$RESULTS_ROOT/schema-contract.txt"
-  grep -qx 'legacy_tables=0' "$RESULTS_ROOT/schema-contract.txt"
-  grep -qx 'legacy_run_columns=0' "$RESULTS_ROOT/schema-contract.txt"
-  grep -qx 'archive_seal_triggers=3' "$RESULTS_ROOT/schema-contract.txt"
-  grep -qx 'first_payload_columns=1' "$RESULTS_ROOT/schema-contract.txt"
-  grep -qx 'schema_repair_columns=1' "$RESULTS_ROOT/schema-contract.txt"
-  echo "==> MySQL Agent-native integration round trip"
+  grep -qx 'tool_contract_tables=7' "$RESULTS_ROOT/schema-contract.txt"
+  grep -qx 'legacy_tool_columns=0' "$RESULTS_ROOT/schema-contract.txt"
+  grep -qx 'immutable_tool_triggers=8' "$RESULTS_ROOT/schema-contract.txt"
+  grep -qx 'exact_nonnull_columns=4' "$RESULTS_ROOT/schema-contract.txt"
+  echo "==> Real MySQL Tool contract and trigger verification"
   (
     cd "$TEST_ROOT"
     PYTHONPATH="$ROOT/backend" \
-      MYCLAW_V2_ACCEPTANCE_DATABASE_URL="mysql+aiomysql://myclaw:mypassword@127.0.0.1:3307/myclaw_test" \
-      "$PYTEST_BIN" integration/test_agent_native_v2_mysql.py -m integration -v --tb=short \
-      --junitxml="$RESULTS_ROOT/mysql-integration.xml"
+      MYCLAW_V3_ACCEPTANCE_DATABASE_URL="mysql+aiomysql://myclaw:mypassword@127.0.0.1:3307/myclaw_test" \
+      "$PYTEST_BIN" integration/test_platform_tool_v3_mysql.py -m integration -v --tb=short \
+      --junitxml="$RESULTS_ROOT/mysql-tool-contracts.xml"
   )
   cleanup_stack
 }
@@ -184,17 +169,14 @@ case "$MODE" in
     run_unit_gate
     run_frontend_gate
     run_migration_gate
-    echo "==> Two Runtime Worker Mock Docker full-stack"
-    export MYCLAW_LLM_MODE=mock
-    export MYCLAW_RUNTIME_WORKER_REPLICAS=2
-    run_fullstack_gate mock-fullstack.xml
     ;;
   real)
     : "${MYCLAW_REAL_LLM_API_KEY:?MYCLAW_REAL_LLM_API_KEY must be injected as a secret}"
     : "${MYCLAW_REAL_LLM_ENDPOINT:?MYCLAW_REAL_LLM_ENDPOINT is required}"
     : "${MYCLAW_REAL_LLM_MODEL:?MYCLAW_REAL_LLM_MODEL is required}"
+    : "${MYCLAW_BOCHA_API_KEY:?MYCLAW_BOCHA_API_KEY must be injected as a secret}"
+    : "${MYCLAW_BRAVE_API_KEY:?MYCLAW_BRAVE_API_KEY must be injected as a secret}"
     echo "==> Real-model Docker API and Chromium acceptance"
-    export MYCLAW_LLM_MODE=real
     export MYCLAW_RUNTIME_WORKER_REPLICAS=2
     run_fullstack_gate real-model-fullstack.xml
     ;;

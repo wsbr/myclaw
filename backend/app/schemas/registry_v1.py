@@ -1,3 +1,6 @@
+from urllib.parse import urlsplit
+from typing import Literal
+
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -10,17 +13,59 @@ def _validate_model_capabilities(value: dict | None) -> dict | None:
     return value
 
 
+def _validate_no_embedded_secrets(value):
+    sensitive = {
+        "apikey", "api_key", "authorization", "bearer", "bearer_token",
+        "credential", "credentials", "password", "secret", "token",
+        "access_token",
+    }
+    if isinstance(value, dict):
+        for key, item in value.items():
+            normalized = str(key).strip().casefold().replace("-", "_")
+            if normalized in sensitive or normalized.replace("_", "") in sensitive:
+                raise ValueError(
+                    "credentials must be submitted only through the write-only api_key field"
+                )
+            _validate_no_embedded_secrets(item)
+    elif isinstance(value, list):
+        for item in value:
+            _validate_no_embedded_secrets(item)
+    return value
+
+
+def _validate_endpoint(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    parsed = urlsplit(normalized)
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise ValueError("endpoint must be an absolute HTTPS URL")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError("endpoint must not contain credentials, query parameters, or fragments")
+    if len(normalized) > 500:
+        raise ValueError("endpoint is too long")
+    return normalized
+
+
 class ModelCreate(BaseModel):
     key: str
     provider: str
     model_name: str
     endpoint: str | None = None
-    credential_ref: str | None = None
+    api_key: str = Field(
+        min_length=1,
+        max_length=4096,
+        repr=False,
+        json_schema_extra={"writeOnly": True, "format": "password"},
+    )
     default_parameters: dict = Field(default_factory=dict)
     capabilities: dict = Field(default_factory=dict)
     enabled: bool = True
 
     _capabilities_are_valid = field_validator("capabilities")(_validate_model_capabilities)
+    _default_parameters_have_no_secrets = field_validator("default_parameters")(_validate_no_embedded_secrets)
+    _capabilities_have_no_secrets = field_validator("capabilities")(_validate_no_embedded_secrets)
+    _endpoint_is_valid = field_validator("endpoint")(_validate_endpoint)
 
 
 class LogicalModelCreate(BaseModel):
@@ -31,30 +76,77 @@ class LogicalModelCreate(BaseModel):
 class ModelVersionCreate(BaseModel):
     provider: str
     model_name: str
-    endpoint: str | None = None
-    credential_ref: str | None = None
+    endpoint: str
+    api_key: str = Field(
+        min_length=1,
+        max_length=4096,
+        repr=False,
+        json_schema_extra={"writeOnly": True, "format": "password"},
+    )
     default_parameters: dict = Field(default_factory=dict)
     capabilities: dict
 
     _capabilities_are_valid = field_validator("capabilities")(_validate_model_capabilities)
+    _default_parameters_have_no_secrets = field_validator("default_parameters")(_validate_no_embedded_secrets)
+    _capabilities_have_no_secrets = field_validator("capabilities")(_validate_no_embedded_secrets)
+    _endpoint_is_valid = field_validator("endpoint")(_validate_endpoint)
 
 
 class ModelPatch(BaseModel):
     endpoint: str | None = None
-    credential_ref: str | None = None
+    api_key: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=4096,
+        repr=False,
+        json_schema_extra={"writeOnly": True, "format": "password"},
+    )
     default_parameters: dict | None = None
     capabilities: dict | None = None
     enabled: bool | None = None
 
     _capabilities_are_valid = field_validator("capabilities")(_validate_model_capabilities)
+    _default_parameters_have_no_secrets = field_validator("default_parameters")(_validate_no_embedded_secrets)
+    _capabilities_have_no_secrets = field_validator("capabilities")(_validate_no_embedded_secrets)
+    _endpoint_is_valid = field_validator("endpoint")(_validate_endpoint)
 
 
 class PlatformToolPatch(BaseModel):
     display_name: str | None = None
-    description: str | None = None
+    display_name_zh: str | None = None
     enabled: bool | None = None
     confirmation_policy: str | None = None
-    platform_config: dict | None = None
+    network_policy: dict | None = None
+    workspace_policy: dict | None = None
+    risk_rules: list[dict] | None = None
+
+
+class ToolConnectionUpsert(BaseModel):
+    connection_key: str = Field(min_length=1, max_length=191, pattern=r"^[a-z][a-z0-9_.-]*$")
+    display_name: str = Field(min_length=1, max_length=200)
+    connection_type: Literal["bocha", "brave", "mcp", "browser"]
+    endpoint: str
+    auth_type: Literal["none", "bearer", "x_api_key"] = "none"
+    api_key: str | None = Field(
+        default=None, min_length=1, max_length=4096, repr=False,
+        json_schema_extra={"writeOnly": True, "format": "password"},
+    )
+    config: dict = Field(default_factory=dict)
+    enabled: bool = True
+    is_primary: bool = False
+
+
+class ToolConnectionPatch(BaseModel):
+    display_name: str
+    endpoint: str
+    auth_type: Literal["none", "bearer", "x_api_key"]
+    api_key: str | None = Field(
+        default=None, min_length=1, max_length=4096, repr=False,
+        json_schema_extra={"writeOnly": True, "format": "password"},
+    )
+    config: dict = Field(default_factory=dict)
+    enabled: bool = True
+    is_primary: bool = False
 
 
 class PolicyPatch(BaseModel):

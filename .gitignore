@@ -5,6 +5,7 @@
 deploy/uat/.env
 deploy/uat/.env.tmp
 deploy/uat/backups/
+deploy/uat/evidence/
 deploy/uat_single_node/.env
 deploy/uat_single_node/.env.tmp
 deploy/uat_single_node/backups/

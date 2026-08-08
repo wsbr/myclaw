@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Alert, Button, Card, Form, Input, Modal, Select, Space, Table, Tag, Typography, message } from 'antd'
 import { ApiOutlined, CheckCircleOutlined, PlusOutlined } from '@ant-design/icons'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import client from '../../api/client'
 
 type LogicalModel = {
@@ -27,7 +27,8 @@ type ModelVersion = {
   provider: string
   model_name: string
   endpoint?: string | null
-  credential_ref?: string | null
+  credential_configured: boolean
+  credential_source?: 'encrypted' | 'deployment' | 'external' | 'legacy' | null
   default_parameters: Record<string, unknown>
   capabilities: Record<string, unknown>
   latest_conformance: ConformanceRun | null
@@ -61,6 +62,14 @@ export default function ModelsTab() {
     enabled: !!selected,
   })
 
+  useEffect(() => {
+    if (!models.data) return
+    setSelected(current => {
+      if (!current) return current
+      return models.data.find(model => model.id === current.id) ?? current
+    })
+  }, [models.data])
+
   const refresh = () => {
     queryClient.invalidateQueries({ queryKey: ['models-v2'] })
     queryClient.invalidateQueries({ queryKey: ['model-versions-v2', selected?.id] })
@@ -79,13 +88,15 @@ export default function ModelsTab() {
   const createVersion = useMutation({
     mutationFn: (values: any) => client.post(`/admin/models/${selected!.id}/versions`, {
       ...values,
-      endpoint: values.endpoint || null,
-      credential_ref: values.credential_ref || null,
+      endpoint: values.endpoint,
+      api_key: values.api_key,
       default_parameters: parseObject(values.default_parameters),
       capabilities: parseObject(values.capabilities),
     }, { headers: { ...commandHeaders(), 'If-Match': `"${selected!.version}"` } }).then(response => response.data),
     onSuccess: () => {
-      setVersionOpen(false); versionForm.resetFields(); refresh()
+      setVersionOpen(false); versionForm.resetFields()
+      setSelected(current => current ? { ...current, version: current.version + 1 } : current)
+      refresh()
       message.success('不可变 ModelVersion 已创建')
     },
     onError: (error: any) => message.error(error?.response?.data?.error?.message || error?.message || 'ModelVersion 创建失败'),
@@ -132,17 +143,22 @@ export default function ModelsTab() {
 
     {selected && <Card title={`${selected.name} · 不可变版本`}
       extra={<Button type="primary" icon={<PlusOutlined />} onClick={() => {
+        const current = versions.data?.find(version => version.id === selected.current_version_id)
         versionForm.setFieldsValue({
-          default_parameters: JSON.stringify({ max_tokens: 2048 }, null, 2),
-          capabilities: JSON.stringify({ streaming: true, native_tool_calling: true, tool_result_continuation: true, stop_reason: true }, null, 2),
+          provider: current?.provider,
+          model_name: current?.model_name,
+          endpoint: current?.endpoint,
+          api_key: '',
+          default_parameters: JSON.stringify(current?.default_parameters ?? { max_tokens: 2048 }, null, 2),
+          capabilities: JSON.stringify(current?.capabilities ?? { streaming: true, native_tool_calling: true, tool_result_continuation: true, stop_reason: true }, null, 2),
         })
         setVersionOpen(true)
       }}>追加版本</Button>}>
       <Table rowKey="id" loading={versions.isLoading} dataSource={versions.data ?? []} pagination={false}
         expandable={{ expandedRowRender: version => <div className="space-y-2">
           <Typography.Paragraph copyable={{ text: version.content_hash }}><Typography.Text strong>内容哈希：</Typography.Text> {version.content_hash}</Typography.Paragraph>
-          <Typography.Paragraph><Typography.Text strong>Endpoint：</Typography.Text> {version.endpoint || '官方默认'}</Typography.Paragraph>
-          <Typography.Paragraph><Typography.Text strong>Credential：</Typography.Text> {version.credential_ref ? '已配置安全引用' : '未配置'}</Typography.Paragraph>
+          <Typography.Paragraph><Typography.Text strong>API 地址：</Typography.Text> {version.endpoint || '未配置'}</Typography.Paragraph>
+          <Typography.Paragraph><Typography.Text strong>API Key：</Typography.Text> {version.credential_configured ? `已加密保存（${version.credential_source ?? 'stored'}）` : '未配置'}</Typography.Paragraph>
           <Typography.Paragraph><Typography.Text strong>默认参数：</Typography.Text> <Typography.Text code>{JSON.stringify(version.default_parameters)}</Typography.Text></Typography.Paragraph>
           <Typography.Paragraph><Typography.Text strong>能力：</Typography.Text> <Typography.Text code>{JSON.stringify(version.capabilities)}</Typography.Text></Typography.Paragraph>
           {version.latest_conformance && <Typography.Paragraph><Typography.Text strong>Conformance：</Typography.Text> {version.latest_conformance.suite_version} · {version.latest_conformance.status}</Typography.Paragraph>}
@@ -175,8 +191,12 @@ export default function ModelsTab() {
           <Form.Item name="provider" label="Provider" rules={[{ required: true }]}><Select options={providers} style={{ width: 190 }} /></Form.Item>
           <Form.Item name="model_name" label="Provider 模型名" rules={[{ required: true }]}><Input style={{ width: 260 }} /></Form.Item>
         </Space>
-        <Form.Item name="endpoint" label="Endpoint"><Input placeholder="留空使用官方默认" /></Form.Item>
-        <Form.Item name="credential_ref" label="凭证引用"><Input.Password placeholder="env://OPENAI_API_KEY" /></Form.Item>
+        <Form.Item name="endpoint" label="API 地址（Endpoint）" rules={[{ required: true, message: '请输入模型 API 地址' }]}>
+          <Input placeholder="https://api.example.com/v1" />
+        </Form.Item>
+        <Form.Item name="api_key" label="模型 API Key" extra="完整密钥只提交一次；后端加密保存，页面与 API 均不会回显。" rules={[{ required: true, message: '请输入完整模型 API Key' }]}>
+          <Input.Password autoComplete="new-password" placeholder="请输入完整 API Key" />
+        </Form.Item>
         <Form.Item name="default_parameters" label="默认参数 JSON" rules={[{ validator: async (_, value) => { try { parseObject(value) } catch { throw new Error('请输入有效 JSON') } } }]}><Input.TextArea rows={4} /></Form.Item>
         <Form.Item name="capabilities" label="Provider 能力 JSON" rules={[{ required: true }, { validator: async (_, value) => { try { parseObject(value) } catch { throw new Error('请输入有效 JSON') } } }]}><Input.TextArea rows={6} /></Form.Item>
       </Form>

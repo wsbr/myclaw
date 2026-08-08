@@ -16,6 +16,7 @@ x-app-environment: &app-environment
   ENCRYPTION_KEY: ${ENCRYPTION_KEY}
   DEBUG: "false"
   CORS_ORIGINS: ${CORS_ORIGINS}
+  TRUSTED_SYNTHETIC_DNS_CIDRS: ${TRUSTED_SYNTHETIC_DNS_CIDRS:-[]}
   INIT_ADMIN_EMAIL: ${INIT_ADMIN_EMAIL}
   INIT_ADMIN_PASSWORD: ${INIT_ADMIN_PASSWORD}
   RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-true}
@@ -43,6 +44,11 @@ x-app-environment: &app-environment
 x-backend-common: &backend-common
   build: *backend-build
   restart: unless-stopped
+  user: "10001:10001"
+  init: true
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
   volumes:
     - myclaw_data:/var/lib/myclaw
 
@@ -54,7 +60,6 @@ services:
     environment:
       <<: *app-environment
       OTEL_SERVICE_NAME: myclaw-uat-api
-      MYCLAW_REAL_LLM_API_KEY: ${MYCLAW_REAL_LLM_API_KEY}
     ports:
       - "${UAT_BIND_HOST:-127.0.0.1}:${UAT_API_PORT:-8101}:8000"
     depends_on:
@@ -92,7 +97,6 @@ services:
     environment:
       <<: *app-environment
       OTEL_SERVICE_NAME: myclaw-uat-runtime-worker
-      MYCLAW_REAL_LLM_API_KEY: ${MYCLAW_REAL_LLM_API_KEY}
     depends_on:
       api:
         condition: service_healthy
@@ -105,6 +109,30 @@ services:
     environment:
       <<: *app-environment
       OTEL_SERVICE_NAME: myclaw-uat-sandbox-worker
+    depends_on:
+      api:
+        condition: service_healthy
+    deploy:
+      replicas: 2
+    networks:
+      - sandbox_internal
+
+  connector-worker:
+    <<: *backend-common
+    command: python -m app.workers.connector_worker
+    environment:
+      <<: *app-environment
+      OTEL_SERVICE_NAME: myclaw-uat-connector-worker
+    depends_on:
+      api:
+        condition: service_healthy
+
+  browser-worker:
+    <<: *backend-common
+    command: python -m app.workers.browser_worker
+    environment:
+      <<: *app-environment
+      OTEL_SERVICE_NAME: myclaw-uat-browser-worker
     depends_on:
       api:
         condition: service_healthy
@@ -138,6 +166,9 @@ services:
       retries: 30
       start_period: 10s
     restart: unless-stopped
+    networks:
+      - default
+      - sandbox_internal
 
   redis:
     image: redis:7-alpine
@@ -184,6 +215,9 @@ services:
       otel-volume-init:
         condition: service_completed_successfully
     restart: unless-stopped
+    networks:
+      - default
+      - sandbox_internal
 
 volumes:
   mysql_data:
@@ -195,3 +229,7 @@ volumes:
   myclaw_data:
     external: true
     name: myclaw-uat-app-data
+
+networks:
+  sandbox_internal:
+    internal: true

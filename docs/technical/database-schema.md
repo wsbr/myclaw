@@ -131,9 +131,9 @@ CHECK/Trigger 要求只有 `account_type=user` 可以存在 role 行，且 user 
 ### `model`、`model_version`
 
 - `model`：`id PK`、`key UNIQUE`、`name`、`current_version_id FK NULL`、`status active|inactive`、`next_version_no`、`version`；
-- `model_version`：`id PK`、`model_id FK`、`version_no`、`provider`、`model_name`、`endpoint`、`credential_ref`、`default_parameters_json`、`capabilities_json`、`content_hash`、`published_at`、`published_by_account_id FK`，只追加；唯一 `(model_id,version_no)` 和 `(model_id,content_hash)`。
+- `model_version`：`id PK`、`model_id FK`、`version_no`、`provider`、`model_name`、`endpoint`、`credential_ref`（迁移期物理列；保存版本化密文或内部部署引用，API 不返回）、`default_parameters_json`、`capabilities_json`、`content_hash`、`published_at`、`published_by_account_id FK`，只追加；唯一 `(model_id,version_no)` 和 `(model_id,content_hash)`。
 
-Credential 轮换更新 Secret Manager 中同一 reference 的版本，不修改 ModelVersion；任何 endpoint、model name、参数、能力或 Adapter 协议变化都发布新 ModelVersion。只有存在当前必需 suite 的 passed ConformanceRun 的版本可进入 AgentVersion 快照。
+历史 `env://` reference 在 Secret Manager 中轮换时不修改 ModelVersion；由公开 v2 API 管理的加密 API Key 轮换，以及任何 endpoint、model name、参数、能力或 Adapter 协议变化，都必须发布新 ModelVersion。只有存在当前必需 suite 的 passed ConformanceRun 的版本可进入 AgentVersion 快照。
 
 ### `conformance_run`
 

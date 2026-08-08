@@ -17,6 +17,7 @@ x-app-environment: &app-environment
   ENCRYPTION_KEY: ${ENCRYPTION_KEY}
   DEBUG: "false"
   CORS_ORIGINS: ${CORS_ORIGINS}
+  TRUSTED_SYNTHETIC_DNS_CIDRS: ${TRUSTED_SYNTHETIC_DNS_CIDRS:-[]}
   INIT_ADMIN_EMAIL: ${INIT_ADMIN_EMAIL}
   INIT_ADMIN_PASSWORD: ${INIT_ADMIN_PASSWORD}
   RATE_LIMIT_ENABLED: "true"
@@ -39,6 +40,10 @@ x-app-environment: &app-environment
 x-backend-common: &backend-common
   build: *backend-build
   restart: unless-stopped
+  user: "10001:10001"
+  init: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
   volumes:
     - myclaw_data:/var/lib/myclaw
 
@@ -50,9 +55,6 @@ services:
     environment:
       <<: *app-environment
       OTEL_SERVICE_NAME: myclaw-uat-single-node-api
-      MYCLAW_REAL_LLM_API_KEY: ${MYCLAW_REAL_LLM_API_KEY:?real model key is required}
-      MYCLAW_REAL_LLM_ENDPOINT: ${MYCLAW_REAL_LLM_ENDPOINT:?model endpoint is required}
-      MYCLAW_REAL_LLM_MODEL: ${MYCLAW_REAL_LLM_MODEL:?model name is required}
     ports:
       - "${UAT_BIND_HOST:-127.0.0.1}:${UAT_API_PORT:-8201}:8000"
     depends_on:
@@ -89,9 +91,6 @@ services:
     environment:
       <<: *app-environment
       OTEL_SERVICE_NAME: myclaw-uat-single-node-runtime-worker
-      MYCLAW_REAL_LLM_API_KEY: ${MYCLAW_REAL_LLM_API_KEY}
-      MYCLAW_REAL_LLM_ENDPOINT: ${MYCLAW_REAL_LLM_ENDPOINT}
-      MYCLAW_REAL_LLM_MODEL: ${MYCLAW_REAL_LLM_MODEL}
     depends_on:
       api: {condition: service_healthy}
 
@@ -101,6 +100,24 @@ services:
     environment:
       <<: *app-environment
       OTEL_SERVICE_NAME: myclaw-uat-single-node-sandbox-worker
+    depends_on:
+      api: {condition: service_healthy}
+
+  connector-worker:
+    <<: *backend-common
+    command: python -m app.workers.connector_worker
+    environment:
+      <<: *app-environment
+      OTEL_SERVICE_NAME: myclaw-uat-single-node-connector-worker
+    depends_on:
+      api: {condition: service_healthy}
+
+  browser-worker:
+    <<: *backend-common
+    command: python -m app.workers.browser_worker
+    environment:
+      <<: *app-environment
+      OTEL_SERVICE_NAME: myclaw-uat-single-node-browser-worker
     depends_on:
       api: {condition: service_healthy}
 

@@ -102,7 +102,14 @@ Draft PATCH 可以选择逻辑 `skill_ids`；响应同时返回当前解析预�
     "memory_recall_policy_version_id": "pv4",
     "sandbox_profile_version_id": "spv2",
     "tools": [
-      {"tool_id": "t1", "registration_hash": "..."}
+      {
+        "tool_definition_id": "td1",
+        "tool_version_id": "tv7",
+        "tool_version_content_hash": "...",
+        "connection_id": "tc1",
+        "connection_revision_id": "tcr3",
+        "secret_fingerprint": "..."
+      }
     ],
     "skills": [
       {"skill_id": "s1", "skill_version_id": "sv7", "checksum": "..."}
@@ -111,17 +118,18 @@ Draft PATCH 可以选择逻辑 `skill_ids`；响应同时返回当前解析预�
 }
 ```
 
-Runner/API 不提供“对已发布版本刷新依赖”的命令；采用新的 ModelVersion、PolicyVersion、SandboxProfileVersion 或 SkillVersion 必须发布新 AgentVersion。Tool 的启停、Confirmation、风险和连接配置仍按实时治理规则执行，但 Tool registration hash 不兼容时必须拒绝启动，不能静默漂移。
+Runner/API 不提供“对已发布版本刷新依赖”的命令；采用新的 ModelVersion、PolicyVersion、SandboxProfileVersion、SkillVersion、ToolVersion 或 ToolConnectionRevision 必须发布新 AgentVersion。AgentVersion 封存时数据库强制验证 ToolVersion content hash、连接 revision 与 Secret fingerprint；执行时仍应用实时启停与更严格的治理规则，但绝不把调用静默漂移到新版本或新凭证。
 
 Registry 路径固定为：
 
 - `GET/POST /admin/models`、`GET /admin/models/{model_id}`、`GET/POST /admin/models/{model_id}/versions`、`POST /admin/models/{model_id}/versions/{model_version_id}/conformance`、`POST /admin/models/{model_id}/versions/{model_version_id}/activate`；
-- `GET /admin/tools`、`GET/PATCH /admin/tools/{tool_id}`、`POST /admin/tools/{tool_id}/conformance`；Tool 实现/Schema 只由代码 reconcile，PATCH 只改治理字段；
+- `GET /platform-tools`、`GET/PATCH /platform-tools/{tool_id}`、`POST /platform-tools/reconcile`、`GET /tool-definitions/{tool_id}/versions`；ToolVersion 的输入/输出 Schema、示例、错误目录和实现版本不可变，PATCH 只改展示信息与治理字段；
+- `GET/POST/PATCH /tool-connections`、`POST /tool-connections/{connection_id}/connection-test`、`POST /mcp-servers/{connection_id}/sync`；模型与 Tool 密钥只经 write-only `api_key` 提交，返回值、事件、Trace 和幂等快照均不得包含 Secret；
 - `GET/POST /skills`、`GET /skills/{skill_id}`、`GET/POST /skills/{skill_id}/versions`、`POST /skills/{skill_id}/versions/{skill_version_id}/publish`、Admin `POST /admin/skills/{skill_id}/versions/{skill_version_id}/assessment-decision`；
 - `GET /admin/policies`、`GET /admin/sandbox-profiles`；Policy/Sandbox 版本由代码或签名 GitOps reconcile，对外管理 API 只读；
 - 普通 user/Builder 只经 `/agent-options/{option_type}` 取得当前有权选择的安全投影。
 
-Registry 变更写 PlatformAuditEvent，不进入用户 Session SSE。创建新 immutable version 与把 logical current pointer 指向该版本是两个动作；Model 必须先通过当前 ConformanceRun，Skill 必须满足当前环境的 assessment Gate。Secret 只传 `credential_ref/platform_config_ref`，API 永不返回引用对应的值。
+Registry 变更写 PlatformAuditEvent，不进入用户 Session SSE。创建新 immutable version 与把 logical current pointer 指向该版本是两个动作；Model 必须先通过当前 ConformanceRun，Skill 必须满足当前环境的 assessment Gate。公开模型与 Tool 连接接口要求以 write-only `api_key` 接收完整 Provider 密钥，后端立即用 AES-GCM 加密后落库；查询与幂等响应只返回 configured 状态和 Secret fingerprint，永不返回明文或密文。新 Schema 不接受 `env://` Credential Ref 或把 Secret 塞入公开 config/endpoint。
 
 ## 5. Session、Message 与 Run
 
@@ -335,7 +343,7 @@ Redis bridge 只承载非权威 `message.delta`：
 | `group_member_unavailable` | 本轮快照目标不可执行 |
 | `reporter_unavailable` | 最终 Reporter 需要用户替换 |
 | `permission_mode_denied` | plan_readonly 等策略阻止动作 |
-| `tool_registration_changed` | AgentVersion 固定的 Tool registration hash 与当前实现不兼容 |
+| `tool_version_hash_mismatch` / `connection_revision_missing` / `secret_fingerprint_mismatch` | AgentVersion 固定的 ToolVersion、Connection revision 或 Secret identity 已损坏/不可用；拒绝执行且不漂移 |
 | `sandbox_profile_incompatible` | Agent/Group/Session 固定的 SandboxProfileVersion 无法在当前环境安全运行 |
 | `artifact_unavailable` | Artifact 未完成发布、存储/校验失败或已进入删除流程 |
 | `legal_hold_active` | Legal Hold 阻止为 Artifact 或其他受管记录创建删除意图 |

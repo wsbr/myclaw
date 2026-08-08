@@ -142,7 +142,17 @@ class AgentVersionTool(Base):
     platform_tool_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("platform_tool.id"), primary_key=True
     )
-    tool_registration_hash: Mapped[str | None] = mapped_column(String(64))
+    tool_version_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("tool_version.id")
+    )
+    tool_version_content_hash: Mapped[str | None] = mapped_column(String(64))
+    connection_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("tool_connection.id")
+    )
+    connection_revision_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("tool_connection_revision.id")
+    )
+    secret_fingerprint: Mapped[str | None] = mapped_column(String(64))
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False)
 
 

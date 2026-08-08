@@ -1,14 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Alert, Button, Card, Input, Modal, Select, Space, Spin, Tag, message as toast } from 'antd'
-import { ArrowLeftOutlined, HistoryOutlined, SendOutlined, StopOutlined } from '@ant-design/icons'
+import { Alert, Button, Modal, Select, Space, Tag, Tooltip, message as toast } from 'antd'
+import { HistoryOutlined } from '@ant-design/icons'
+import { Activity, ArrowLeft, GitBranch, MessageSquare, PanelRightOpen, Plus, UsersRound } from 'lucide-react'
 import { agentsApi } from '@/api/agents'
 import { ApprovalAction, Message, ToolConfirmation, sessionsApi, subscribeSessionEvents } from '@/api/sessions'
 import { cn } from '@/lib/utils'
+import MessageThread from './MessageThread'
+import PendingActions from './PendingActions'
 import PlanPanel from './PlanPanel'
 import GroupPanel from './GroupPanel'
+import SessionComposer from './SessionComposer'
 import SessionInspector from './SessionInspector'
+import { isTerminalRun, runStatusMeta } from './runtimeView'
 
 export default function SessionPage() {
   const { agentId, sessionId: routeSessionId } = useParams<{ agentId: string; sessionId?: string }>()
@@ -21,9 +26,13 @@ export default function SessionPage() {
   const [activeRunId, setActiveRunId] = useState<string | null>(null)
   const [connected, setConnected] = useState(true)
   const [liveText, setLiveText] = useState('')
+  const [inspectorOpen, setInspectorOpen] = useState(() => window.innerWidth >= 1280)
+  const [showScrollButton, setShowScrollButton] = useState(false)
   const [clarificationAnswers, setClarificationAnswers] = useState<Record<string, string>>({})
   const [groupRecipient, setGroupRecipient] = useState<string | undefined>()
   const bottomRef = useRef<HTMLDivElement>(null)
+  const messageViewportRef = useRef<HTMLElement>(null)
+  const followOutputRef = useRef(true)
   const latestRunIdRef = useRef<string | null>(null)
 
   const { data: agent } = useQuery({
@@ -42,9 +51,9 @@ export default function SessionPage() {
   })
   const { data: planRuns = [] } = useQuery({
     queryKey: ['session-runs', sessionId, 'plan'], queryFn: () => sessionsApi.getSessionRuns(sessionId!, 'plan'), enabled: !!sessionId,
-    refetchInterval: query => query.state.data?.some(run => !['completed', 'cancelled', 'failed'].includes(run.status)) ? 2500 : false,
+    refetchInterval: query => query.state.data?.some(run => !isTerminalRun(run.status)) ? 2500 : false,
   })
-  const activePlanRun = planRuns.find(run => !['completed', 'cancelled', 'failed'].includes(run.status)) || planRuns[0]
+  const activePlanRun = planRuns.find(run => !isTerminalRun(run.status)) || planRuns[0]
   const { data: groups = [] } = useQuery({
     queryKey: ['groups', sessionId], queryFn: () => sessionsApi.listGroups(sessionId!), enabled: !!sessionId,
   })
@@ -56,9 +65,9 @@ export default function SessionPage() {
   })
   const { data: groupRuns = [] } = useQuery({
     queryKey: ['group-runs', groupId], queryFn: () => sessionsApi.getGroupRuns(groupId!), enabled: !!groupId,
-    refetchInterval: query => query.state.data?.some(item => !['completed', 'cancelled', 'failed'].includes(item.run.status)) ? 2500 : false,
+    refetchInterval: query => query.state.data?.some(item => !isTerminalRun(item.run.status)) ? 2500 : false,
   })
-  const activeGroupRun = groupRuns.find(item => !['completed', 'cancelled', 'failed'].includes(item.run.status)) || groupRuns[0]
+  const activeGroupRun = groupRuns.find(item => !isTerminalRun(item.run.status)) || groupRuns[0]
   const groupIsOpen = activeGroup?.status === 'open'
   const { data: groupMessages = [] } = useQuery({
     queryKey: ['group-messages', groupId],
@@ -97,14 +106,14 @@ export default function SessionPage() {
     || [...messages].reverse().find(item => item.run_id)?.run_id || null
   const { data: activeRun } = useQuery({
     queryKey: ['run', latestRunId], queryFn: () => sessionsApi.getRun(latestRunId!), enabled: !!latestRunId,
-    refetchInterval: query => query.state.data && !['completed', 'cancelled', 'failed'].includes(query.state.data.status) ? 2000 : false,
+    refetchInterval: query => query.state.data && !isTerminalRun(query.state.data.status) ? 2000 : false,
   })
   const { data: workingPlans = [] } = useQuery({
     queryKey: ['working-plans', latestRunId],
     queryFn: () => sessionsApi.getWorkingPlans(latestRunId!), enabled: !!latestRunId,
     refetchInterval: query => {
       if (!latestRunId || query.state.data?.length) return false
-      if (activeRun?.id === latestRunId && ['completed', 'cancelled', 'failed'].includes(activeRun.status)) return false
+      if (activeRun?.id === latestRunId && isTerminalRun(activeRun.status)) return false
       return 1000
     },
   })
@@ -133,6 +142,10 @@ export default function SessionPage() {
   useEffect(() => {
     setSessionId(routeSessionId ?? null)
     setActiveRunId(null)
+    setLiveText('')
+    setClarificationAnswers({})
+    followOutputRef.current = true
+    setShowScrollButton(false)
     setMode(searchParams.get('mode') === 'group' ? 'group' : 'chat')
   }, [routeSessionId, searchParams])
 
@@ -197,6 +210,8 @@ export default function SessionPage() {
       queryClient.invalidateQueries({ queryKey: ['session-inspector-events', sessionId] })
       if ('run_id' in event && event.run_id) {
         queryClient.invalidateQueries({ queryKey: ['run', event.run_id] })
+        queryClient.invalidateQueries({ queryKey: ['run-timeline', event.run_id] })
+        queryClient.invalidateQueries({ queryKey: ['run-runners', event.run_id] })
         queryClient.invalidateQueries({ queryKey: ['session-runs', sessionId] })
       }
       if (['run.completed', 'run.cancelled', 'run.failed'].includes(event.event_type) && 'run_id' in event) {
@@ -211,10 +226,22 @@ export default function SessionPage() {
       queryClient.invalidateQueries({ queryKey: ['groups', sessionId] })
       queryClient.invalidateQueries({ queryKey: ['required-actions'] })
       queryClient.invalidateQueries({ queryKey: ['session-inspector-events', sessionId] })
+      if (latestRunIdRef.current) {
+        queryClient.invalidateQueries({ queryKey: ['run-timeline', latestRunIdRef.current] })
+        queryClient.invalidateQueries({ queryKey: ['run-runners', latestRunIdRef.current] })
+      }
     })
   }, [sessionId, queryClient])
 
-  useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
+  const scrollToBottom = (behavior: ScrollBehavior = 'smooth') => {
+    followOutputRef.current = true
+    setShowScrollButton(false)
+    bottomRef.current?.scrollIntoView({ behavior, block: 'end' })
+  }
+
+  useEffect(() => {
+    if (followOutputRef.current) scrollToBottom(liveText ? 'auto' : 'smooth')
+  }, [messages.length, liveText])
 
   const ensureSession = async () => {
     if (sessionId) return sessionId
@@ -225,6 +252,14 @@ export default function SessionPage() {
     return created.id
   }
 
+  const cacheMessage = (item: Message) => {
+    queryClient.setQueryData<Message[]>(['messages', item.session_id], current => {
+      if (!current?.length) return [item]
+      if (current.some(existing => existing.id === item.id)) return current
+      return [...current, item]
+    })
+  }
+
   const send = useMutation({
     mutationFn: async (content: string) => {
       const id = await ensureSession()
@@ -233,8 +268,8 @@ export default function SessionPage() {
     onSuccess: result => {
       setActiveRunId(result.run.id)
       queryClient.setQueryData(['run', result.run.id], result.run)
+      cacheMessage(result.message)
       setLiveText('')
-      setInput('')
       queryClient.invalidateQueries({ queryKey: ['messages', result.message.session_id] })
     },
     onError: (error: any) => toast.error(error?.response?.data?.error?.message || '消息提交失败'),
@@ -248,7 +283,8 @@ export default function SessionPage() {
     onSuccess: result => {
       setActiveRunId(result.run.id)
       setLiveText('')
-      setInput('')
+      cacheMessage(result.message)
+      queryClient.setQueryData(['run', result.run.id], result.run)
       queryClient.setQueryData(['session', result.session.id], result.session)
       queryClient.invalidateQueries({ queryKey: ['messages', result.session.id] })
       queryClient.invalidateQueries({ queryKey: ['session-runs', result.session.id, 'plan'] })
@@ -267,7 +303,7 @@ export default function SessionPage() {
     },
     onSuccess: result => {
       if (result.kind === 'run') setActiveRunId(result.value.run.id)
-      setInput(''); setLiveText('')
+      setLiveText('')
       queryClient.invalidateQueries({ queryKey: ['group-runs'] })
       queryClient.invalidateQueries({ queryKey: ['group-messages'] })
     },
@@ -283,7 +319,14 @@ export default function SessionPage() {
   }
   const revisePlan = useMutation({
     mutationFn: (instruction: string) => sessionsApi.continuePlanning(activeWorkingPlan!, instruction),
-    onSuccess: result => { setActiveRunId(result.run.id); setInput(''); refreshPlan() },
+    onSuccess: result => {
+      setActiveRunId(result.run.id)
+      cacheMessage(result.message)
+      queryClient.setQueryData(['run', result.run.id], result.run)
+      queryClient.setQueryData(['session', result.session.id], result.session)
+      queryClient.invalidateQueries({ queryKey: ['messages', result.message.session_id] })
+      refreshPlan()
+    },
     onError: (error: any) => toast.error(error?.response?.data?.detail?.code || 'Plan 修改方向失败'),
   })
   const confirmPlan = useMutation({
@@ -369,170 +412,241 @@ export default function SessionPage() {
     onError: (error: any) => toast.error(error?.response?.data?.error?.code || '回答提交失败'),
   })
 
-  const isRunning = Boolean(activeRun && !['completed', 'cancelled', 'failed'].includes(activeRun.status))
+  const isRunning = Boolean(activeRun && !isTerminalRun(activeRun.status))
+  const isActivelyExecuting = Boolean(activeRun && ['active', 'waiting_tool', 'waiting_agent'].includes(activeRun.status))
   const planBusy = sendPlan.isPending || revisePlan.isPending || confirmPlan.isPending
     || rejectPlan.isPending || exitPlan.isPending
   const groupBusy = replaceReporter.isPending || closeGroup.isPending
   const planAlreadyEntered = sessionRecord?.interaction_mode === 'plan'
-  const inputDisabled = send.isPending || sendPlan.isPending || sendGroup.isPending
-    || (isRunning && mode !== 'group')
-    || (mode === 'plan' && Boolean(planAlreadyEntered))
+  const canRevisePlan = Boolean(
+    planAlreadyEntered
+    && sessionRecord?.permission_mode === 'plan_readonly'
+    && activeWorkingPlan
+    && activePlanRun
+    && ['waiting_approval', 'waiting_user'].includes(activePlanRun.status),
+  )
+  const submitting = send.isPending || sendPlan.isPending || sendGroup.isPending || revisePlan.isPending
+  const inputDisabled = submitting
+    || (isRunning && mode !== 'group' && !(mode === 'plan' && canRevisePlan))
+    || (mode !== 'plan' && Boolean(planAlreadyEntered))
+    || (mode === 'plan' && Boolean(planAlreadyEntered) && !canRevisePlan && !isActivelyExecuting)
     || (mode === 'group' && Boolean(!activeGroup || !groupIsOpen))
 
+  const submitComposer = () => {
+    const content = input.trim()
+    if (!content || inputDisabled) return
+    setInput('')
+    const restore = () => setInput(current => current || content)
+    if (mode !== 'group' && canRevisePlan && activeWorkingPlan) {
+      revisePlan.mutate(content, { onError: restore })
+      return
+    }
+    if (mode === 'plan') {
+      sendPlan.mutate(content, { onError: restore })
+      return
+    }
+    if (mode === 'group') sendGroup.mutate(content, { onError: restore })
+    else send.mutate(content, { onError: restore })
+  }
+
+  const requestCancel = () => Modal.confirm({
+    title: '停止本次运行？',
+    content: '停止会阻止后续执行，但不会回滚已经完成的工具调用或外部副作用。',
+    okText: '确认停止',
+    okButtonProps: { danger: true },
+    cancelText: '继续执行',
+    onOk: () => cancel.mutateAsync(),
+  })
+
+  const selectMode = (nextMode: 'chat' | 'plan' | 'group') => {
+    if (nextMode === mode) return
+    if (planAlreadyEntered && nextMode !== 'plan') {
+      toast.info('请先退出当前 Plan，再切换到其他模式')
+      return
+    }
+    setMode(nextMode)
+    setActiveRunId(null)
+    setLiveText('')
+    followOutputRef.current = true
+  }
+
+  const currentRunMeta = activeRun ? runStatusMeta[activeRun.status] : null
+
   return (
-    <div className="bg-background flex h-full min-h-[calc(100vh-0px)]">
-      <aside className="bg-sidebar flex w-60 shrink-0 flex-col border-r border-sidebar-border">
+    <div className="relative flex h-full min-h-0 overflow-hidden bg-background">
+      <aside className="hidden w-56 shrink-0 flex-col border-r border-sidebar-border bg-sidebar lg:flex">
         <div className="space-y-2 border-b p-3">
-          <Button icon={<ArrowLeftOutlined />} block onClick={() => navigate('/agents')}>返回 Agents</Button>
-          <Button type="primary" block onClick={() => navigate(`/agents/${agentId}/chat`)}>新对话</Button>
+          <Button icon={<ArrowLeft className="size-3.5" />} block onClick={() => navigate('/agents')}>返回 Agents</Button>
+          <Button type="primary" icon={<Plus className="size-3.5" />} block onClick={() => navigate(`/agents/${agentId}/chat`)}>新对话</Button>
         </div>
-        <div className="flex-1 overflow-y-auto p-3">
-          <p className="text-muted-foreground mb-2 px-1 text-xs font-medium uppercase tracking-wide">历史会话</p>
+        <div className="min-h-0 flex-1 overflow-y-auto p-3">
+          <div className="mb-2 flex items-center justify-between px-1">
+            <p className="text-xs font-medium uppercase tracking-[0.14em] text-muted-foreground">历史会话</p>
+            <span className="text-[10px] tabular-nums text-muted-foreground">{sessions.length}</span>
+          </div>
           {sessions.map(item => (
             <button key={item.id} type="button" onClick={() => navigate(`/agents/${agentId}/chat/${item.id}`)}
-              className={cn('mb-1 flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-sm', item.id === sessionId ? 'bg-sidebar-accent font-medium' : 'text-muted-foreground hover:bg-sidebar-accent/60')}>
-              <HistoryOutlined /><span className="truncate">{item.title || item.id.slice(0, 12)}</span>
+              className={cn(
+                'mb-1 flex w-full items-center gap-2 rounded-xl px-2.5 py-2.5 text-left text-sm transition-colors',
+                item.id === sessionId ? 'bg-sidebar-accent font-medium text-sidebar-accent-foreground' : 'text-muted-foreground hover:bg-sidebar-accent/60 hover:text-foreground',
+              )}>
+              <HistoryOutlined className="shrink-0" />
+              <span className="min-w-0 flex-1 truncate">{item.title || item.id.slice(0, 12)}</span>
+              {item.interaction_mode === 'plan' && <span className="size-1.5 shrink-0 rounded-full bg-violet-500" title="Plan Session" />}
             </button>
           ))}
         </div>
       </aside>
 
       <main className="flex min-w-0 flex-1 flex-col">
-        <header className="flex h-14 items-center justify-between border-b px-5">
-          <div className="flex items-center gap-2">
-            <span className="font-serif text-lg font-medium">{agent?.name}</span>
-            <Button.Group>
-              <Button type={mode === 'chat' ? 'primary' : 'default'} onClick={() => setMode('chat')}>Chat</Button>
-              <Button type={mode === 'plan' ? 'primary' : 'default'} onClick={() => setMode('plan')}>Plan</Button>
-              {agent?.group_enabled && <Button type={mode === 'group' ? 'primary' : 'default'} onClick={() => setMode('group')}>Group</Button>}
+        <header className="flex h-14 shrink-0 items-center justify-between gap-3 border-b bg-background/85 px-4 backdrop-blur-lg">
+          <div className="flex min-w-0 items-center gap-3">
+            <div className="hidden min-w-0 md:block">
+              <p className="truncate text-sm font-semibold">{agent?.name || 'Agent'}</p>
+              <p className="truncate text-[10px] text-muted-foreground">{sessionRecord?.title || (sessionId ? `Session ${sessionId.slice(0, 8)}` : '新会话')}</p>
+            </div>
+            <Button.Group className="flex">
+              <Button size="small" icon={<MessageSquare className="size-3.5" />} disabled={Boolean(planAlreadyEntered)} type={mode === 'chat' ? 'primary' : 'default'} onClick={() => selectMode('chat')}>Chat</Button>
+              <Button size="small" icon={<GitBranch className="size-3.5" />} type={mode === 'plan' ? 'primary' : 'default'} onClick={() => selectMode('plan')}>Plan</Button>
+              {agent?.group_enabled && <Button size="small" icon={<UsersRound className="size-3.5" />} disabled={Boolean(planAlreadyEntered)} type={mode === 'group' ? 'primary' : 'default'} onClick={() => selectMode('group')}>Group</Button>}
             </Button.Group>
           </div>
-          <Space>
-            {sessionId && <Tag>{`${mode === 'plan' ? 'Plan Owner' : mode === 'group' ? 'Group' : 'Chat'} · ${sessionId.slice(0, 8)}`}</Tag>}
-            {sessionRecord && <Tag color={sessionRecord.permission_mode === 'plan_readonly' ? 'gold' : 'green'}>
+          <Space size={6} className="shrink-0">
+            {sessionRecord && <Tag color={sessionRecord.permission_mode === 'plan_readonly' ? 'gold' : 'green'} className="hidden md:inline-flex">
               {sessionRecord.permission_mode} · r{sessionRecord.permission_revision}
             </Tag>}
-            {isRunning && <Tag color="processing">后台执行中</Tag>}
-            {isRunning && <Button danger size="small" icon={<StopOutlined />} loading={cancel.isPending} onClick={() => Modal.confirm({
-              title: '取消本次 Run？', content: '取消会阻止后续执行，但不会回滚已经完成的 Tool 或外部副作用。',
-              okText: '确认取消', okButtonProps: { danger: true }, cancelText: '继续执行', onOk: () => cancel.mutateAsync(),
-            })}>取消 Run</Button>}
-            {mode === 'group' && groupIsOpen && <Button danger size="small" loading={closeGroup.isPending}
-              onClick={() => Modal.confirm({
-                title: '关闭整个 Group？',
-                content: '所有非终态 GroupRun 会被取消，Group 之后只允许读取历史；此操作不同于仅取消当前 Run。',
-                okText: '关闭 Group', okButtonProps: { danger: true }, onOk: () => closeGroup.mutateAsync(),
-              })}>关闭 Group</Button>}
+            {currentRunMeta && <Tag color={currentRunMeta.tone === 'danger' ? 'red' : currentRunMeta.tone === 'success' ? 'green' : currentRunMeta.tone === 'warning' ? 'orange' : 'blue'}>
+              {currentRunMeta.label}
+            </Tag>}
+            {isRunning && <Button danger size="small" loading={cancel.isPending} onClick={requestCancel}>停止</Button>}
+            {mode === 'group' && groupIsOpen && <Button danger size="small" loading={closeGroup.isPending} onClick={() => Modal.confirm({
+              title: '关闭整个 Group？',
+              content: '所有非终态 GroupRun 会被取消，Group 之后只允许读取历史；此操作不同于仅停止当前 Run。',
+              okText: '关闭 Group', okButtonProps: { danger: true }, onOk: () => closeGroup.mutateAsync(),
+            })}>关闭 Group</Button>}
+            {!inspectorOpen && <Tooltip title="打开运行监控"><Button size="small" aria-label="打开运行监控" icon={<PanelRightOpen className="size-4" />} onClick={() => setInspectorOpen(true)} /></Tooltip>}
           </Space>
         </header>
-        {!connected && <Alert banner type="warning" message="实时事件连接中断，任务仍在后台执行；正在自动重连。" />}
-        {activeRun?.status === 'failed' && <Alert banner type="error"
-          message={`Run 失败：${activeRun.terminal_reason || 'unknown'}`}
-          description="Timeline 保留权限拒绝、超时、失败与迟到结果的权威事件。" />}
-        {activeRun?.status === 'cancelled' && <Alert banner type="warning"
-          message={`Run 已取消：${activeRun.terminal_reason || 'cancelled'}`} />}
 
-        <section className="flex-1 overflow-y-auto px-5 py-6">
-          <div className="mx-auto max-w-3xl">
-            {toolActions.map(action => (
-              <Card key={action.id} size="small" title={<Space><Tag color="warning">需要确认</Tag><span>{action.tool_key}</span></Space>} className="mb-4 border-amber-300">
-                <p className="mb-2 text-sm text-muted-foreground">Agent 请求执行以下精确参数。批准只对本次参数哈希有效。</p>
-                <pre className="mb-3 max-h-48 overflow-auto rounded bg-muted p-3 text-xs">{JSON.stringify(action.arguments, null, 2)}</pre>
-                <Space>
-                  <Button type="primary" loading={decide.isPending} onClick={() => decide.mutate({ action, decision: 'approve' })}>批准</Button>
-                  <Button danger loading={decide.isPending} onClick={() => decide.mutate({ action, decision: 'reject' })}>拒绝</Button>
-                </Space>
-              </Card>
-            ))}
-            {clarificationActions.map(action => (
-              <Card key={action.id} size="small" title={<Space><Tag color="blue">需要补充信息</Tag><span>Agent 提问</span></Space>} className="mb-4 border-blue-300">
-                <p className="mb-3 whitespace-pre-wrap text-sm">{action.question}</p>
-                <Input.TextArea value={clarificationAnswers[action.id] || ''}
-                  onChange={event => setClarificationAnswers(value => ({ ...value, [action.id]: event.target.value }))}
-                  autoSize={{ minRows: 2, maxRows: 6 }} placeholder="输入回答；只会恢复提出该问题的 Work Item" />
-                <Button className="mt-3" type="primary" loading={answerClarification.isPending}
-                  disabled={!clarificationAnswers[action.id]?.trim()}
-                  onClick={() => answerClarification.mutate({ action, answer: clarificationAnswers[action.id].trim() })}>
-                  提交回答
-                </Button>
-              </Card>
-            ))}
-            {mode === 'chat' && activeWorkingPlan && (
-              <Card size="small" title={<Space><Tag color="purple">WorkingPlan</Tag><span>revision {activeWorkingPlan.revision}</span></Space>} className="mb-4 border-purple-200">
-                <p className="mb-2 text-sm text-muted-foreground">{activeWorkingPlan.summary}</p>
-                <div className="space-y-1">
-                  {activeWorkingPlan.items.map((item, index) => (
-                    <div key={`${index}-${item.text}`} className="flex gap-2 text-sm">
-                      <Tag>{item.status}</Tag><span>{item.text}</span>
-                    </div>
-                  ))}
-                </div>
-              </Card>
-            )}
-            {mode === 'plan' && <PlanPanel session={sessionRecord} run={activePlanRun}
-              plan={activeWorkingPlan} collaborators={agentInvocations}
-              approval={planApproval} artifacts={artifacts} busy={planBusy}
-              onContinue={async value => { await revisePlan.mutateAsync(value) }}
-              onApprove={async () => { await confirmPlan.mutateAsync() }}
-              onReject={async reason => { await rejectPlan.mutateAsync(reason) }}
-              onExit={async () => { await exitPlan.mutateAsync() }}
-              onDownload={sessionsApi.downloadArtifact} />}
-            {mode === 'group' && <GroupPanel group={activeGroup} members={groupMembers} runs={groupRuns}
+        {!connected && <Alert banner type="warning" showIcon message="实时连接暂时中断，任务仍在后台执行；正在自动恢复进度。" />}
+        {activeRun?.status === 'failed' && <Alert banner type="error" showIcon
+          message={`运行失败：${activeRun.terminal_reason || 'unknown'}`}
+          description="右侧运行监控保留失败、权限拒绝、超时与迟到结果的可靠事件。" />}
+        {activeRun?.status === 'cancelled' && <Alert banner type="warning" showIcon message={`运行已停止：${activeRun.terminal_reason || 'cancelled'}`} />}
+
+        <section
+          ref={messageViewportRef}
+          className="min-h-0 flex-1 overflow-y-auto scroll-smooth px-4 py-6"
+          onScroll={event => {
+            const node = event.currentTarget
+            const distance = node.scrollHeight - node.scrollTop - node.clientHeight
+            followOutputRef.current = distance < 140
+            setShowScrollButton(distance >= 140)
+          }}
+        >
+          <div className={cn('mx-auto w-full', mode === 'group' ? 'max-w-5xl' : 'max-w-3xl')}>
+            {mode === 'group' ? <GroupPanel group={activeGroup} members={groupMembers} runs={groupRuns}
               messages={groupMessages} graph={interactionGraph} cards={networkCards?.items || []}
               plans={groupPlans} artifacts={artifacts} requiredActions={sessionActions}
               sharedTasks={sharedTasks} busy={groupBusy}
               onOpenNetwork={() => navigate('/network')}
               onReplaceReporter={async value => { await replaceReporter.mutateAsync(value) }}
-              onDownload={sessionsApi.downloadArtifact} />}
-            {mode === 'chat' && <>
-            {historyLoading && <div className="py-20 text-center"><Spin /><p className="mt-3 text-sm text-muted-foreground">恢复持久消息…</p></div>}
-            {!historyLoading && messages.length === 0 && (
-              <div className="py-20 text-center">
-                <div className="mb-3 text-3xl">✦</div>
-                <p className="text-lg font-semibold">开始与 {agent?.name} 协作</p>
-                <p className="mt-2 text-sm text-muted-foreground">提交后即使关闭页面，Run 仍会在后台可靠完成。</p>
-              </div>
-            )}
-            {messages.filter(item => item.role === 'user' || item.role === 'assistant').map((item: Message) => (
-              <div key={item.id} className={cn('mb-4 flex', item.role === 'user' ? 'justify-end' : 'justify-start')}>
-                <div className={cn('max-w-[82%] whitespace-pre-wrap rounded-2xl px-4 py-2.5 text-sm leading-relaxed', item.role === 'user' ? 'rounded-br-md bg-primary text-primary-foreground' : 'rounded-bl-md bg-muted')}>
-                  {item.content}
+              onDownload={sessionsApi.downloadArtifact} /> : <div className="space-y-6">
+              <PendingActions
+                toolActions={toolActions}
+                clarifications={clarificationActions}
+                answers={clarificationAnswers}
+                deciding={decide.isPending}
+                answering={answerClarification.isPending}
+                onAnswerChange={(id, value) => setClarificationAnswers(current => ({ ...current, [id]: value }))}
+                onDecision={(action, decision) => decide.mutate({ action, decision })}
+                onAnswer={(action, answer) => answerClarification.mutate({ action, answer })}
+              />
+
+              {mode === 'plan' && <PlanPanel
+                session={sessionRecord}
+                run={activePlanRun}
+                plan={activeWorkingPlan}
+                collaborators={agentInvocations}
+                approval={planApproval}
+                artifacts={artifacts}
+                busy={planBusy}
+                onApprove={async () => { await confirmPlan.mutateAsync() }}
+                onReject={async reason => { await rejectPlan.mutateAsync(reason) }}
+                onExit={async () => { await exitPlan.mutateAsync() }}
+                onDownload={sessionsApi.downloadArtifact}
+              />}
+
+              {mode === 'chat' && activeWorkingPlan && <details open className="overflow-hidden rounded-2xl border border-violet-200 bg-card shadow-sm">
+                <summary className="flex cursor-pointer list-none items-center justify-between gap-3 bg-violet-50/60 px-4 py-3 dark:bg-violet-950/15">
+                  <span className="flex items-center gap-2"><GitBranch className="size-4 text-violet-500" /><span className="font-semibold">WorkingPlan</span><Tag color="purple">revision {activeWorkingPlan.revision}</Tag></span>
+                  <span className="text-xs text-muted-foreground">{activeWorkingPlan.items.filter(item => item.status === 'completed').length}/{activeWorkingPlan.items.length}</span>
+                </summary>
+                <div className="space-y-2 p-4">
+                  <p className="text-sm leading-6 text-muted-foreground">{activeWorkingPlan.summary}</p>
+                  {activeWorkingPlan.items.map((item, index) => <div key={`${index}-${item.text}`} className="flex items-start gap-2 text-sm">
+                    <span className={cn('mt-2 size-1.5 shrink-0 rounded-full', item.status === 'completed' ? 'bg-emerald-500' : item.status === 'in_progress' ? 'animate-pulse bg-blue-500' : 'bg-slate-300')} />
+                    <span className={item.status === 'completed' ? 'text-muted-foreground' : ''}>{item.text}</span>
+                  </div>)}
                 </div>
-              </div>
-            ))}
-            {isRunning && <div className="mb-4 flex justify-start"><div className="max-w-[82%] whitespace-pre-wrap rounded-2xl rounded-bl-md bg-muted px-4 py-3">{liveText || <><Spin size="small" /> <span className="ml-2 text-sm text-muted-foreground">Agent 正在后台处理…</span></>}</div></div>}
-            </>}
-            <div ref={bottomRef} />
+              </details>}
+
+              <MessageThread
+                agentName={agent?.name}
+                messages={messages}
+                loading={historyLoading}
+                running={isActivelyExecuting}
+                liveText={liveText}
+                showScrollButton={showScrollButton}
+                onScrollToBottom={() => scrollToBottom()}
+              />
+            </div>}
+            <div ref={bottomRef} className="h-1" />
           </div>
         </section>
 
-        <footer className="border-t px-5 py-4">
-          <div className="mx-auto flex max-w-3xl gap-2">
-            {mode === 'group' && activeGroup && <Select
-              className="w-56 shrink-0"
-              value={groupRecipient ?? ''}
-              onChange={value => setGroupRecipient(value || undefined)}
-              disabled={!groupIsOpen}
-              options={[
-                { value: '', label: 'Reporter（默认）' },
-                ...groupMembers.filter(member => member.status === 'joined').map(member => ({
-                  value: member.agent_id,
-                  label: networkCards?.items.find(card => card.agent_id === member.agent_id)?.name || member.agent_id.slice(0, 10),
-                })),
-              ]}
-              aria-label="Group 接收 Agent"
-            />}
-            <Input.TextArea value={input} onChange={event => setInput(event.target.value)} autoSize={{ minRows: 1, maxRows: 6 }}
-              placeholder={mode === 'plan' ? (planAlreadyEntered ? '请在 Plan 面板中继续讨论、修改方向或批准' : '描述需要只读调查与规划的长任务目标') : mode === 'group' ? (activeGroup ? '直接 @所选成员，或开始后续 GroupRun' : '请先从 Agent Network 选择三名成员') : '输入消息；Enter 发送，Shift+Enter 换行'}
+        <footer className="shrink-0 border-t bg-background/90 px-4 pb-4 pt-3 backdrop-blur-lg">
+          <div className="mx-auto max-w-3xl">
+            <SessionComposer
+              mode={mode}
+              value={input}
               disabled={inputDisabled}
-              onPressEnter={event => { if (!event.shiftKey) { event.preventDefault(); if (input.trim()) (mode === 'plan' ? sendPlan : mode === 'group' ? sendGroup : send).mutate(input.trim()) } }} />
-            <Button type="primary" icon={<SendOutlined />} loading={send.isPending || sendPlan.isPending || sendGroup.isPending}
-              disabled={!input.trim() || inputDisabled}
-              onClick={() => (mode === 'plan' ? sendPlan : mode === 'group' ? sendGroup : send).mutate(input.trim())}>{mode === 'plan' ? '进入只读 Plan' : mode === 'group' ? '提交 Group 工作' : '发送'}</Button>
+              submitting={submitting}
+              running={isActivelyExecuting}
+              planEntered={Boolean(planAlreadyEntered)}
+              hasPlan={Boolean(activeWorkingPlan)}
+              planCanRevise={canRevisePlan}
+              groupReady={Boolean(activeGroup && groupIsOpen)}
+              accessory={mode === 'group' && activeGroup ? <Select
+                className="w-48 shrink-0"
+                value={groupRecipient ?? ''}
+                onChange={value => setGroupRecipient(value || undefined)}
+                disabled={!groupIsOpen}
+                options={[
+                  { value: '', label: 'Reporter（默认）' },
+                  ...groupMembers.filter(member => member.status === 'joined').map(member => ({
+                    value: member.agent_id,
+                    label: networkCards?.items.find(card => card.agent_id === member.agent_id)?.name || member.agent_id.slice(0, 10),
+                  })),
+                ]}
+                aria-label="Group 接收 Agent"
+              /> : undefined}
+              onChange={setInput}
+              onSubmit={submitComposer}
+              onStop={requestCancel}
+            />
           </div>
         </footer>
       </main>
-      <SessionInspector sessionId={sessionId} runId={latestRunId} />
+
+      {inspectorOpen && <SessionInspector
+        sessionId={sessionId}
+        runId={latestRunId}
+        run={activeRun}
+        plan={activeWorkingPlan}
+        collaborators={mode === 'plan' ? agentInvocations : []}
+        onClose={() => setInspectorOpen(false)}
+      />}
     </div>
   )
 }

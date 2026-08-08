@@ -32,8 +32,14 @@ def _decode_cursor(value: str) -> tuple[int, int]:
 
 class SearchGroupHistoryTool(BaseTool):
     name = "search_group_history"
-    description = "检索当前 Group 的共享事件，以及明确发给当前节点的 direct 事件；不返回私有运行数据"
+    description = (
+        "WHEN: retrieve prior shared or directly addressed evidence from the current governed Group. "
+        "WHEN NOT: never use outside a Group or to access another member's private runtime data. "
+        "RETURNS: bounded visible messages, Artifacts, events, sequence bounds, and a stable cursor. "
+        "RECOVERY: narrow terms or continue with next_cursor when more evidence remains."
+    )
     input_schema = {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
         "properties": {
             "query": {"type": "string", "minLength": 1, "maxLength": 1000},
@@ -162,9 +168,17 @@ class SearchGroupHistoryTool(BaseTool):
                 "group_run_id": event.group_run_id,
             })
         last_sequence = rows[-1][0].sequence if rows else after
-        return ToolResult(success=True, data={
+        data = {
             "hits": hits,
             "scanned_through_sequence": upper if not has_more else last_sequence,
             "max_sequence": upper,
             "next_cursor": _encode_cursor(last_sequence, upper) if has_more else None,
-        })
+        }
+        return ToolResult(
+            status="succeeded", summary=f"Found {len(hits)} visible Group history items",
+            data=data, content_blocks=[{"type": "json", "value": data}],
+            evidence=[{
+                "kind": "group_history", "group_session_id": context.group_session_id,
+                "scanned_through_sequence": data["scanned_through_sequence"],
+            }],
+        )

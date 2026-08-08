@@ -118,7 +118,10 @@ async def _published_version_response(
     tools = list(await db.execute(
         select(
             AgentVersionTool.platform_tool_id,
-            AgentVersionTool.tool_registration_hash,
+            AgentVersionTool.tool_version_id,
+            AgentVersionTool.tool_version_content_hash,
+            AgentVersionTool.connection_revision_id,
+            AgentVersionTool.secret_fingerprint,
         )
         .where(AgentVersionTool.agent_version_id == version.id)
         .order_by(AgentVersionTool.sort_order)
@@ -148,7 +151,11 @@ async def _published_version_response(
         memory_recall_policy_version_id=version.memory_recall_policy_version_id,
         sandbox_profile_version_id=version.sandbox_profile_version_id,
         tools=[
-            {"tool_id": item[0], "registration_hash": item[1]} for item in tools
+            {
+                "tool_definition_id": item[0], "tool_version_id": item[1],
+                "content_hash": item[2], "connection_revision_id": item[3],
+                "secret_fingerprint": item[4],
+            } for item in tools
         ],
         skills=[
             {"skill_id": item[0], "skill_version_id": item[1], "checksum": item[2]}

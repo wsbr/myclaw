@@ -27,8 +27,8 @@ wait_http() {
 # Infra
 "$ROOT/scripts/wait_for_services.sh"
 
-# Full stack services
-wait_http "Mock LLM" "${MYCLAW_MOCK_LLM_URL:-http://localhost:9090}/health"
+# Full stack services. Agent acceptance is real-provider only; no local model
+# surrogate belongs to this service graph or readiness contract.
 wait_http "API" "${MYCLAW_FULLSTACK_API_URL:-http://localhost:8001}/health"
 wait_http "Frontend" "${MYCLAW_FULLSTACK_UI_URL:-http://localhost:8081}"
 

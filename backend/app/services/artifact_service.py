@@ -81,6 +81,8 @@ async def publish_artifact(db, *, context, args: dict) -> Artifact:
     )
     if not source.is_file():
         raise ArtifactPublishError("source file does not exist")
+    if source.stat().st_size > 50 * 1024 * 1024:
+        raise ArtifactPublishError("Artifact source exceeds the 50 MiB publication limit")
     name = args.get("name") or source.name
     if not isinstance(name, str) or not SAFE_NAME.fullmatch(name):
         raise ArtifactPublishError("Artifact name must be a safe filename")

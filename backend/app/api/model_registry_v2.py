@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
+
 from fastapi import APIRouter, Depends, Header, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.registries_v1 import idem, require_admin, revision
 from app.config import settings
+from app.core.platform_secrets import PlatformSecretError, credential_source
 from app.database import get_db
 from app.deps import CurrentAccount, get_current_account
 from app.models.registry import ConformanceRun, ModelVersion, RegisteredModel
@@ -50,7 +53,8 @@ async def _version_view(db: AsyncSession, version: ModelVersion) -> dict:
         "id": version.id, "model_id": version.model_id,
         "version_no": version.version_no, "provider": version.provider,
         "model_name": version.model_name, "endpoint": version.endpoint,
-        "credential_ref": version.credential_ref,
+        "credential_configured": bool(version.credential_ref),
+        "credential_source": credential_source(version.credential_ref),
         "default_parameters": version.default_parameters,
         "capabilities": version.capabilities,
         "latest_conformance": _conformance_view(
@@ -148,21 +152,29 @@ async def add_version(
     db: AsyncSession = Depends(get_db), current: CurrentAccount = Depends(get_current_account),
 ):
     require_admin(current)
+    values = body.model_dump(mode="json")
+    request_snapshot = dict(values)
+    request_snapshot["api_key"] = hashlib.sha256(body.api_key.encode()).hexdigest()
     record, replay = await idem(
         db, current, "create_model_version_v2", idempotency_key,
-        {"model_id": model_id, **body.model_dump(mode="json")},
+        {"model_id": model_id, **request_snapshot},
     )
     if replay and record.response_snapshot:
         return record.response_snapshot
     try:
         version = await create_model_version(
             db, model_id=model_id, expected_version=revision(if_match),
-            values=body.model_dump(mode="json"), actor_account_id=current.account.id,
+            values=values, actor_account_id=current.account.id,
         )
     except LookupError as error:
         raise HTTPException(status_code=404, detail="Model not found") from error
     except ModelRegistryConflict as error:
         raise HTTPException(status_code=409, detail={"code": "version_conflict", "message": str(error)}) from error
+    except (PlatformSecretError, ValueError) as error:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "invalid_model_credential", "message": str(error)},
+        ) from error
     response = await _version_view(db, version)
     record.resource_type, record.resource_id, record.http_status = "model_version", version.id, 201
     record.response_snapshot = response

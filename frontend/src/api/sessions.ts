@@ -133,6 +133,37 @@ export interface ToolConfirmation {
   decided_at: string | null
 }
 
+export interface ToolInvocationView {
+  id: string
+  tool_key: string
+  tool_definition_id: string
+  tool_version_id: string | null
+  tool_version_no: number | null
+  tool_version_content_hash: string | null
+  provider: string | null
+  connection_revision_id: string | null
+  connection_revision_no: number | null
+  endpoint: string | null
+  secret_fingerprint: string | null
+  status: string
+  arguments: Record<string, unknown>
+  arguments_hash: string
+  attempt_count: number
+  result: {
+    summary?: string; content_blocks?: Array<Record<string, unknown>>
+    evidence?: Array<Record<string, unknown>>; artifact_ids?: string[]
+    timing?: Record<string, unknown>; error?: Record<string, unknown>
+  }
+  attempts: Array<{
+    id: string; attempt_no: number; status: string
+    request: Record<string, unknown>; response: Record<string, unknown> | null
+    retryable: boolean; error_code: string | null
+    started_at: string | null; ended_at: string | null; latency_ms: number | null
+  }>
+  created_at: string
+  updated_at: string
+}
+
 export interface ApprovalAction {
   type: 'tool' | 'session_grant' | 'plan_implementation'
   id: string
@@ -425,6 +456,9 @@ export const sessionsApi = {
   getAgentInvocations: (id: string) => client.get<{ items: AgentInvocation[] }>(
     `/runs/${id}/agent-invocations`,
   ).then(r => r.data.items),
+  getToolInvocations: (id: string) => client.get<{ items: ToolInvocationView[] }>(
+    `/runs/${id}/tool-invocations`,
+  ).then(r => r.data.items),
   getRunTimeline: (id: string, afterSequence = 0) => client.get<{
     items: ExecutionEvent[]; scanned_through_sequence: number; session_high_watermark: number; has_more: boolean
   }>(`/runs/${id}/timeline`, { params: { after_sequence: afterSequence } }).then(r => r.data),
@@ -586,6 +620,11 @@ export function subscribeSessionEvents(
               else if ('event_id' in event && remember(event)) onEvent(event)
             }
           }
+        }
+        if (!controller.signal.aborted) {
+          onConnection(false)
+          await wait(retryDelays[Math.min(retry, retryDelays.length - 1)])
+          retry += 1
         }
       } catch (error: any) {
         if (error?.name === 'AbortError') break

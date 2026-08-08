@@ -6,7 +6,7 @@ from app.database import get_db
 from app.deps import CurrentAccount, get_current_builder
 from app.models.agent_v1 import AgentAssemblyVersion, AgentBlueprint
 from app.models.registry import (
-    PlatformTool,
+    ToolDefinition, ToolGovernance, ToolVersion,
     PolicyDefinition,
     RegisteredModel,
     RegisteredSkill,
@@ -24,8 +24,19 @@ async def models(db: AsyncSession = Depends(get_db), _: CurrentAccount = Depends
 
 @router.get("/platform-tools")
 async def tools(db: AsyncSession = Depends(get_db), _: CurrentAccount = Depends(get_current_builder)):
-    rows = list(await db.scalars(select(PlatformTool).where(PlatformTool.enabled.is_(True)).order_by(PlatformTool.tool_key)))
-    return [{"id": row.id, "key": row.tool_key, "name": row.display_name, "description": row.description, "execution_mode": row.execution_mode} for row in rows]
+    rows = list((await db.execute(
+        select(ToolDefinition, ToolGovernance, ToolVersion)
+        .join(ToolGovernance, ToolGovernance.tool_definition_id == ToolDefinition.id)
+        .join(ToolVersion, ToolVersion.id == ToolDefinition.current_version_id)
+        .where(ToolDefinition.status == "active", ToolGovernance.enabled.is_(True))
+        .order_by(ToolDefinition.tool_key)
+    )).all())
+    return [{
+        "id": definition.id, "key": definition.tool_key,
+        "name": definition.display_name, "description": definition.summary,
+        "execution_mode": version.execution_mode, "tool_version_id": version.id,
+        "namespace": definition.namespace, "origin": definition.origin,
+    } for definition, _, version in rows]
 
 
 @router.get("/skills")

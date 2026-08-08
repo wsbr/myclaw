@@ -4,27 +4,25 @@
 
 本手册只覆盖[第一阶段交付边界](../modules/phase-one-scope.md)内的单机 Docker Compose 拓扑。Kubernetes、多可用区、外部 MQ 与独立 Artifact Store 不在本阶段范围内。单机故障可以导致整个 UAT 不可用；在测量前不声明恢复目标。
 
-本地最终产品验收使用独立的 [`uat_single_node` 操作说明](../../deploy/uat_single_node/README.md)
-和其中的 Compose。它使用 `myclaw-uat-single-node-*` 固定外部命名卷持久化 MySQL、
-Redis 和 Workspace/Artifact 数据，不读取、迁移或删除旧 `myclaw-uat-*` 卷。
-`test/docker-compose.test.yml` 只允许用于 CI/自动化测试，其 MySQL `tmpfs` 不得承载
-产品验收数据。
+本地最终产品验收使用 `deploy/docker-compose.uat.yml` 和 `deploy/uat/destructive-reset.sh`。
+本轮是一次性破坏性 Schema 重置：脚本只操作经过 Compose 标签和仓库路径双重验证的
+`myclaw-uat-*` 精确命名资源，不创建备份、不读取或迁移旧业务数据。`test/docker-compose.test.yml`
+只允许用于确定性门禁和真实外部能力自动化，其数据不得冒充最终产品 UAT。
 
 ## UAT 部署前门禁
 
 1. 固定待发布 Commit SHA，确认工作树为空，并记录 `git rev-parse HEAD`。
-2. 执行 Unit、关键模块 branch coverage、Frontend frozen-lockfile build、生产 Frontend image build、空库 Migration、双 Runtime Worker Mock Full-stack。
-3. 使用 UAT 环境 Secret 注入真实模型 Credential，执行
-   `deploy/uat_single_node/run-acceptance.sh` 的完整 API 与 Chromium 验收。Mock 结果不能
-   替代真实模型 UAT 门禁。
-4. 验证 `alembic heads` 只有一个 Head，并确认数据库备份已完成且校验和可读。
-5. 检查镜像、日志、JUnit、Trace 与测试数据库不存在 API Key；只允许保存 `env://` Credential Ref。
+2. 执行全部 Unit、Frontend frozen-lockfile build、生产 Frontend image build和全新 MySQL 空库 Migration；纯 Schema、安全函数和数据库约束测试不得伪造 Agent 决策结果。
+3. 通过管理员 write-only 接口配置真实主模型、Bocha、Brave 和公共 MCP，执行
+   `deploy/uat/run-acceptance.sh` 的真实模型、真实 Provider、真实 Chromium 和真实 MCP 验收；不存在 Mock fallback。
+4. 验证 `alembic heads` 只有一个 Head，并确认重置过程没有生成或读取备份。
+5. 检查镜像、服务清单、日志、JUnit、Trace 与数据库不存在 API Key；只允许保存 AES-GCM 密文、Secret fingerprint 与 configured 状态。
 
 ## Secret 与配置
 
 - `.env` 只能由部署系统在目标主机生成，权限应为 `0600`，不得提交。
 - `SECRET_KEY`、`ENCRYPTION_KEY`、管理员密码、MySQL/Redis 密码和模型 Key 必须来自 Secret Manager 或受限环境变量。
-- 模型注册只保存 `env://MYCLAW_MODEL_API_KEY` 形式的引用。不得把 Key 放入 URL、命令参数、Compose YAML、日志、Trace attribute 或测试快照。
+- 管理页面和 Model/ToolConnection API 允许一次性提交完整 API Key；API 后端必须立即使用 AES-GCM 加密，查询接口不得回显明文或密文。重置后的 Schema 不保留 `env://` Credential Ref 兼容。不得把 Key 放入 URL、命令参数、Compose YAML、日志、Trace attribute 或测试快照。
 - MySQL 备份工具只读取 `MYSQL_BACKUP_DEFAULTS_FILE` / `MYSQL_RESTORE_DEFAULTS_FILE` 指向的挂载 secret。defaults 文件格式为 `[client]` 下的 `user` 与 `password`，权限必须为 `0600`。
 - UAT 目标进程必须拒绝默认 Secret、默认管理员密码、Debug、非法数据库池和不安全的 Runner heartbeat/lease 组合；是否已经实现以绑定 SHA 的自动测试和启动证据为准。
 - 第一期 `identity_profile=raw_user_id_v1` 时，Agent API 只能暴露给受控内网调用系统；不得把 Agent API Key 下发浏览器、移动端或第三方。网关必须脱敏 Authorization，并记录 api_key_id 与 asserted userId 的安全审计关联。
@@ -32,15 +30,17 @@ Redis 和 Workspace/Artifact 数据，不读取、迁移或删除旧 `myclaw-uat
 ## UAT 部署与回滚
 
 1. `docker compose build` 构建固定 SHA 的镜像；记录镜像 digest。
-2. 先执行备份，再运行 `docker compose run --rm api alembic upgrade head`。
-3. `deploy/uat_single_node/up.sh` 启动 API、Frontend、两个 Runtime Worker、Sandbox Worker、Maintenance Worker、MySQL、Redis 和 Collector。
+2. 停止所有 MyClaw API/Worker/UI，验证精确项目资源后运行 `MYCLAW_CONFIRM_DESTRUCTIVE_RESET=ERASE_MYCLAW_UAT_WITHOUT_BACKUP deploy/uat/destructive-reset.sh`；不可先备份或迁移旧数据。
+3. 脚本从新卷运行 Alembic head、重建管理员，并启动 API、Frontend、两个 Runtime Worker、Sandbox Worker、Connector Worker、Browser Worker、MySQL、Redis 和 Collector。
 4. 验证 `/health`、Frontend `/healthz`、数据库连接、Redis 限流、Worker 心跳、Outbox backlog 和 Collector health。
-5. Schema 迁移只允许前进。应用回滚必须使用与当前 Schema 兼容的已验证镜像；若迁移不可兼容，停止写流量后按恢复演练从备份恢复到新的空数据库，不得在原库试错。该流程只形成 UAT 恢复数据，不等于已承诺生产 RPO/RTO。
+5. 本轮重置没有旧 Schema 或业务数据的回滚路径；失败时只能修复固定 Commit 后再次对精确 MyClaw UAT 资源执行空库重置。企业备份/RPO/RTO 不在本轮范围。
 
-`init-env.sh` 从旧环境只读取真实模型连接信息，生成独立密码并绑定当前 clean SHA；旧 UAT 容器、卷和失败记录不参与新环境写流量。本次受控 UAT 的不可变 ModelVersion 将 `qwen3.5-plus` 固定为 `temperature=0`、`max_tokens=4096`、`extra_body.enable_thinking=true`，使用该混合模型的思考模式与自动 native tool calling。Provider 的思考模式不接受 wire-level 强制 `tool_choice`；因此 ConformanceRun 的普通消息、Tool continuation 和运行时调用保持冻结的思考模式，仅强制 Tool 选择的协议探针切换到同一模型公开支持的 `enable_thinking=false` 兼容变体，并在探针事实中保留该边界，正式 Agent Turn 不覆盖 ModelVersion 参数。同时冻结华北 2（北京）不超过 128K 输入档的公开表价（输入/输出分别为 0.8/4.8 CNY 每百万 Token）、价格生效日期与来源 URL。统计脚本在单次输入越档时直接失败，避免使用错误档位估算成本。
+管理员在新栈启动后重新提交真实模型连接信息；ModelVersion 固定模型参数、能力和 Secret fingerprint。验收脚本不得假定某个模型品牌或用自然语言 marker 强制调用次数，必须用 ToolInvocation、Attempt、引用、Artifact checksum 和数据库冻结事实判断结果。
 
 第一期新建 Group Run 的平台默认 `max_tokens=768000`，并与其余 Run 预算一起写入不可变
-`hard_budget_snapshot`；Chat/Plan 默认仍为 `160000`。该 Group 上限依据同一真实五 Agent、
+`hard_budget_snapshot`；Chat/Plan 默认 `max_tokens=200000`。该单 Agent 上限依据真实 Plan
+容量流程 `153198`、`154653`、`157597`、`158346` Token 的成功观测与 `161542` Token 的
+边界失败重新校准，在保留硬上限的同时避免约 1% 模型输出方差造成合法收口失败；该 Group 上限依据同一真实五 Agent、
 故障注入容量流程的 `406730` 与 `513532` Token 观测重新校准，相对当前观测峰值保留约
 49.6% 方差余量，同时继续受 160 Agent Turn、
 240 Provider Attempt、128 Tool Invocation、64 Agent Invocation、16 Transport Retry 和

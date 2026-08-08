@@ -1,5 +1,13 @@
+x-backend-security: &backend-security
+  user: "10001:10001"
+  init: true
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+
 services:
   api:
+    <<: *backend-security
     build:
       context: ./backend
       dockerfile: Dockerfile
@@ -18,13 +26,13 @@ services:
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
       - DEBUG=${DEBUG:-false}
       - CORS_ORIGINS=${CORS_ORIGINS}
+      - TRUSTED_SYNTHETIC_DNS_CIDRS=${TRUSTED_SYNTHETIC_DNS_CIDRS:-[]}
       - INIT_ADMIN_EMAIL=${INIT_ADMIN_EMAIL}
       - INIT_ADMIN_PASSWORD=${INIT_ADMIN_PASSWORD}
       - RATE_LIMIT_ENABLED=${RATE_LIMIT_ENABLED:-true}
       - RATE_LIMIT_REQUESTS=${RATE_LIMIT_REQUESTS:-600}
       - RATE_LIMIT_UNAUTHENTICATED_REQUESTS=${RATE_LIMIT_UNAUTHENTICATED_REQUESTS:-60}
       - RATE_LIMIT_WINDOW_SECONDS=${RATE_LIMIT_WINDOW_SECONDS:-60}
-      - MYCLAW_MODEL_API_KEY=${MYCLAW_MODEL_API_KEY:-}
       - OTEL_SERVICE_NAME=myclaw-api
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       - OTEL_EXPORTER_OTLP_HEADERS=${OTEL_EXPORTER_OTLP_HEADERS:-}
@@ -55,6 +63,7 @@ services:
     restart: unless-stopped
 
   runtime-worker:
+    <<: *backend-security
     build:
       context: ./backend
       dockerfile: Dockerfile
@@ -72,7 +81,6 @@ services:
       - RUNTIME_OUTBOX_CLAIM_LEASE_SECONDS=${RUNTIME_OUTBOX_CLAIM_LEASE_SECONDS:-30}
       - RUNTIME_RUNNER_LEASE_SECONDS=${RUNTIME_RUNNER_LEASE_SECONDS:-30}
       - RUNTIME_RUNNER_HEARTBEAT_SECONDS=${RUNTIME_RUNNER_HEARTBEAT_SECONDS:-10}
-      - MYCLAW_MODEL_API_KEY=${MYCLAW_MODEL_API_KEY:-}
       - OTEL_SERVICE_NAME=myclaw-runtime-worker
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       - OTEL_EXPORTER_OTLP_HEADERS=${OTEL_EXPORTER_OTLP_HEADERS:-}
@@ -85,6 +93,7 @@ services:
       - myclaw_data:/var/lib/myclaw
 
   delivery-worker:
+    <<: *backend-security
     profiles: ["channel"]
     build:
       context: ./backend
@@ -109,6 +118,7 @@ services:
     restart: unless-stopped
 
   sandbox-worker:
+    <<: *backend-security
     build:
       context: ./backend
       dockerfile: Dockerfile
@@ -135,8 +145,69 @@ services:
     restart: unless-stopped
     volumes:
       - myclaw_data:/var/lib/myclaw
+    networks:
+      - sandbox_internal
+
+  connector-worker:
+    <<: *backend-security
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: python -m app.workers.connector_worker
+    env_file: .env
+    environment:
+      - MYCLAW_ENVIRONMENT=production
+      - DATABASE_URL=${DATABASE_URL}
+      - DATABASE_POOL_SIZE=${DATABASE_POOL_SIZE:-6}
+      - DATABASE_MAX_OVERFLOW=${DATABASE_MAX_OVERFLOW:-6}
+      - REDIS_URL=${REDIS_URL}
+      - SECRET_KEY=${SECRET_KEY}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - SANDBOX_WORKER_POLL_SECONDS=${SANDBOX_WORKER_POLL_SECONDS:-0.5}
+      - SANDBOX_OUTBOX_CLAIM_LEASE_SECONDS=${SANDBOX_OUTBOX_CLAIM_LEASE_SECONDS:-30}
+      - SANDBOX_ATTEMPT_STALE_SECONDS=${SANDBOX_ATTEMPT_STALE_SECONDS:-60}
+      - OTEL_SERVICE_NAME=myclaw-connector-worker
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      - OTEL_EXPORTER_OTLP_HEADERS=${OTEL_EXPORTER_OTLP_HEADERS:-}
+      - MYCLAW_RELEASE=${MYCLAW_RELEASE:-development}
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    volumes:
+      - myclaw_data:/var/lib/myclaw
+
+  browser-worker:
+    <<: *backend-security
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: python -m app.workers.browser_worker
+    env_file: .env
+    environment:
+      - MYCLAW_ENVIRONMENT=production
+      - DATABASE_URL=${DATABASE_URL}
+      - DATABASE_POOL_SIZE=${DATABASE_POOL_SIZE:-6}
+      - DATABASE_MAX_OVERFLOW=${DATABASE_MAX_OVERFLOW:-6}
+      - REDIS_URL=${REDIS_URL}
+      - SECRET_KEY=${SECRET_KEY}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - SANDBOX_WORKER_POLL_SECONDS=${SANDBOX_WORKER_POLL_SECONDS:-0.5}
+      - SANDBOX_OUTBOX_CLAIM_LEASE_SECONDS=${SANDBOX_OUTBOX_CLAIM_LEASE_SECONDS:-30}
+      - SANDBOX_ATTEMPT_STALE_SECONDS=${SANDBOX_ATTEMPT_STALE_SECONDS:-60}
+      - OTEL_SERVICE_NAME=myclaw-browser-worker
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      - OTEL_EXPORTER_OTLP_HEADERS=${OTEL_EXPORTER_OTLP_HEADERS:-}
+      - MYCLAW_RELEASE=${MYCLAW_RELEASE:-development}
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    volumes:
+      - myclaw_data:/var/lib/myclaw
 
   maintenance-worker:
+    <<: *backend-security
     build:
       context: ./backend
       dockerfile: Dockerfile
@@ -180,6 +251,9 @@ services:
       timeout: 5s
       retries: 15
     restart: unless-stopped
+    networks:
+      - default
+      - sandbox_internal
 
   redis:
     image: redis:7-alpine
@@ -205,8 +279,15 @@ services:
       - "4318:4318"
       - "13133:13133"
     restart: unless-stopped
+    networks:
+      - default
+      - sandbox_internal
 
 volumes:
   mysql_data:
   redis_data:
   myclaw_data:
+
+networks:
+  sandbox_internal:
+    internal: true

@@ -528,46 +528,122 @@ paths:
         '200': {description: Current pointer updated only when conformance passed., content: {application/json: {schema: {$ref: '#/components/schemas/Model'}}}}
         default: {$ref: '#/components/responses/Error'}
 
-  /admin/tools:
+  /platform-tools:
     get:
       tags: [Registry]
-      operationId: listPlatformTools
-      parameters: [{$ref: '#/components/parameters/Limit'}, {$ref: '#/components/parameters/Cursor'}]
+      operationId: listToolDefinitions
+      parameters:
+        - {name: enabled, in: query, schema: {type: [boolean, 'null']}}
+        - {name: execution_mode, in: query, schema: {type: [string, 'null']}}
+        - {name: confirmation_policy, in: query, schema: {type: [string, 'null'], enum: [never, per_call, session_grant, null]}}
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/Cursor'}
       responses:
-        '200': {description: Code-reconciled Tool page., content: {application/json: {schema: {$ref: '#/components/schemas/PlatformToolPage'}}}}
+        '200': {description: Immutable ToolDefinition/ToolVersion projections with current governance., content: {application/json: {schema: {$ref: '#/components/schemas/ToolDefinitionPage'}}}}
         default: {$ref: '#/components/responses/Error'}
 
-  /admin/tools/{tool_id}:
+  /platform-tools/reconcile:
+    post:
+      tags: [Registry]
+      operationId: reconcileBuiltinToolVersions
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      responses:
+        '200': {description: Built-in definitions reconciled and changed contracts published as new immutable versions., content: {application/json: {schema: {$ref: '#/components/schemas/ToolReconcileResult'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /platform-tools/{tool_id}:
     get:
       tags: [Registry]
-      operationId: getPlatformTool
+      operationId: getToolDefinition
       parameters: [{$ref: '#/components/parameters/ToolId'}]
       responses:
-        '200': {description: Platform Tool metadata and live governance., content: {application/json: {schema: {$ref: '#/components/schemas/PlatformTool'}}}}
+        '200': {description: Stable ToolDefinition plus exact current ToolVersion and mutable governance., content: {application/json: {schema: {$ref: '#/components/schemas/ToolDefinitionView'}}}}
         default: {$ref: '#/components/responses/Error'}
     patch:
       tags: [Registry]
-      operationId: updatePlatformToolGovernance
+      operationId: updateToolGovernance
       parameters:
         - {$ref: '#/components/parameters/ToolId'}
         - {$ref: '#/components/parameters/IfMatch'}
         - {$ref: '#/components/parameters/IdempotencyKey'}
       requestBody:
         required: true
-        content: {application/json: {schema: {$ref: '#/components/schemas/PlatformToolPatch'}}}
+        content: {application/json: {schema: {$ref: '#/components/schemas/ToolGovernancePatch'}}}
       responses:
-        '200': {description: Only mutable governance fields updated., content: {application/json: {schema: {$ref: '#/components/schemas/PlatformTool'}}}}
+        '200': {description: Only definition display metadata and mutable governance updated; schemas remain immutable., content: {application/json: {schema: {$ref: '#/components/schemas/ToolDefinitionView'}}}}
         default: {$ref: '#/components/responses/Error'}
 
-  /admin/tools/{tool_id}/conformance:
+  /platform-tools/{tool_id}/connection-test:
     post:
       tags: [Registry]
-      operationId: testPlatformToolConformance
+      operationId: testToolPrimaryConnection
+      parameters: [{$ref: '#/components/parameters/ToolId'}]
+      responses:
+        '200': {description: A real request to the Tool's configured external service; unsupported deterministic Tools return 422., content: {application/json: {schema: {$ref: '#/components/schemas/ToolConnectionTestResult'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /tool-definitions/{tool_id}/versions:
+    get:
+      tags: [Registry]
+      operationId: listToolVersions
+      parameters: [{$ref: '#/components/parameters/ToolId'}]
+      responses:
+        '200': {description: Immutable version history including input/output schemas, examples, error catalog and content hash., content: {application/json: {schema: {$ref: '#/components/schemas/ToolVersionPage'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /tool-connections:
+    get:
+      tags: [Registry]
+      operationId: listToolConnections
       parameters:
-        - {$ref: '#/components/parameters/ToolId'}
+        - {name: connection_type, in: query, schema: {type: [string, 'null'], enum: [bocha, brave, mcp, browser, null]}}
+      responses:
+        '200': {description: Typed connection projections; credentials are never returned., content: {application/json: {schema: {$ref: '#/components/schemas/ToolConnectionPage'}}}}
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Registry]
+      operationId: createToolConnection
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/ToolConnectionUpsert'}}}
+      responses:
+        '201': {description: Connection and first immutable revision created; api_key is write-only., content: {application/json: {schema: {$ref: '#/components/schemas/ToolConnectionView'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /tool-connections/{connection_id}:
+    patch:
+      tags: [Registry]
+      operationId: updateToolConnection
+      parameters:
+        - {$ref: '#/components/parameters/ConnectionId'}
+        - {$ref: '#/components/parameters/IfMatch'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/ToolConnectionPatch'}}}
+      responses:
+        '200': {description: Connection pointer updated to an immutable revision; omitted api_key retains the previous encrypted Secret., content: {application/json: {schema: {$ref: '#/components/schemas/ToolConnectionView'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /tool-connections/{connection_id}/connection-test:
+    post:
+      tags: [Registry]
+      operationId: testToolConnection
+      parameters: [{$ref: '#/components/parameters/ConnectionId'}]
+      responses:
+        '200': {description: Real Provider, MCP, or Browser Worker connection test with latency and Provider error code., content: {application/json: {schema: {$ref: '#/components/schemas/ToolConnectionTestResult'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /mcp-servers/{connection_id}/sync:
+    post:
+      tags: [Registry]
+      operationId: syncMcpServerTools
+      parameters:
+        - {$ref: '#/components/parameters/ConnectionId'}
         - {$ref: '#/components/parameters/IdempotencyKey'}
       responses:
-        '202': {description: Tool conformance/connectivity execution accepted., content: {application/json: {schema: {$ref: '#/components/schemas/ConformanceRun'}}}}
+        '200': {description: Remote list_tools synchronized into disabled immutable ToolVersions pending administrator review., content: {application/json: {schema: {$ref: '#/components/schemas/McpSyncResult'}}}}
         default: {$ref: '#/components/responses/Error'}
 
   /skills:
@@ -1507,6 +1583,7 @@ components:
     ModelId: {name: model_id, in: path, required: true, schema: {type: string, format: uuid}}
     ModelVersionId: {name: model_version_id, in: path, required: true, schema: {type: string, format: uuid}}
     ToolId: {name: tool_id, in: path, required: true, schema: {type: string, format: uuid}}
+    ConnectionId: {name: connection_id, in: path, required: true, schema: {type: string, format: uuid}}
     SkillId: {name: skill_id, in: path, required: true, schema: {type: string, format: uuid}}
     SkillVersionId: {name: skill_version_id, in: path, required: true, schema: {type: string, format: uuid}}
     ApiKeyId: {name: key_id, in: path, required: true, schema: {type: string, format: uuid}}
@@ -1998,7 +2075,7 @@ components:
     ModelVersion:
       type: object
       additionalProperties: false
-      required: [id, model_id, version_no, provider, model_name, endpoint, credential_ref, default_parameters, capabilities, latest_conformance, content_hash, published_at]
+      required: [id, model_id, version_no, provider, model_name, endpoint, credential_configured, credential_source, default_parameters, capabilities, latest_conformance, content_hash, published_at]
       properties:
         id: {$ref: '#/components/schemas/Uuid'}
         model_id: {$ref: '#/components/schemas/Uuid'}
@@ -2006,7 +2083,8 @@ components:
         provider: {type: string, minLength: 1, maxLength: 191}
         model_name: {type: string, minLength: 1, maxLength: 191}
         endpoint: {type: string, format: uri}
-        credential_ref: {type: string, minLength: 1, maxLength: 512}
+        credential_configured: {type: boolean}
+        credential_source: {type: [string, 'null'], enum: [encrypted, deployment, external, legacy, null]}
         default_parameters: {$ref: '#/components/schemas/JsonObject'}
         capabilities: {$ref: '#/components/schemas/ModelCapabilities'}
         latest_conformance:
@@ -2018,12 +2096,12 @@ components:
     ModelVersionCreate:
       type: object
       additionalProperties: false
-      required: [provider, model_name, endpoint, credential_ref, default_parameters, capabilities]
+      required: [provider, model_name, endpoint, api_key, default_parameters, capabilities]
       properties:
         provider: {type: string, minLength: 1, maxLength: 191}
         model_name: {type: string, minLength: 1, maxLength: 191}
         endpoint: {type: string, format: uri}
-        credential_ref: {type: string, minLength: 1, maxLength: 512}
+        api_key: {type: string, format: password, writeOnly: true, minLength: 1, maxLength: 256}
         default_parameters: {$ref: '#/components/schemas/JsonObject'}
         capabilities: {$ref: '#/components/schemas/ModelCapabilities'}
     ModelCapabilities:
@@ -2048,46 +2126,169 @@ components:
       type: object
       additionalProperties: false
       required: [id, subject_type, subject_id, suite_version, status]
-      properties: {id: {$ref: '#/components/schemas/Uuid'}, subject_type: {type: string, enum: [model_version, platform_tool, channel_plugin, sandbox_profile_version]}, subject_id: {$ref: '#/components/schemas/Uuid'}, suite_version: {type: string}, status: {type: string, enum: [queued, running, passed, failed]}}
+      properties: {id: {$ref: '#/components/schemas/Uuid'}, subject_type: {type: string, enum: [model_version, tool_version, channel_plugin, sandbox_profile_version]}, subject_id: {$ref: '#/components/schemas/Uuid'}, suite_version: {type: string}, status: {type: string, enum: [queued, running, passed, failed]}}
 
-    PlatformTool:
+    ToolDefinitionView:
       type: object
       additionalProperties: false
-      required: [id, key, name, description, implementation_ref, input_schema, output_schema, execution_mode, side_effect, supports_cancel, supports_status_lookup, registration_hash, enabled, confirmation_policy, config_revision, risk_version, version]
+      required: [id, tool_key, namespace, origin, display_name, description, status, current_version_id, tool_version_id, version_no, input_schema, output_schema, examples, error_catalog, annotations, implementation_ref, implementation_version, execution_mode, side_effect, content_hash, enabled, confirmation_policy, network_policy, workspace_policy, risk_rules, version, config_version]
       properties:
         id: {$ref: '#/components/schemas/Uuid'}
-        key: {type: string}
-        name: {type: string}
+        tool_key: {type: string}
+        namespace: {type: string}
+        origin: {type: string, enum: [builtin, runtime, mcp]}
+        display_name: {type: string}
+        display_name_zh: {type: [string, 'null']}
         description: {type: string}
-        implementation_ref: {type: string}
+        status: {type: string, enum: [active, inactive]}
+        current_version_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        tool_version_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        version_no: {type: [integer, 'null'], minimum: 1}
         input_schema: {$ref: '#/components/schemas/JsonObject'}
         output_schema: {$ref: '#/components/schemas/JsonObject'}
-        execution_mode: {type: string, enum: [inline, durable_async]}
-        side_effect: {type: string, enum: [none, idempotent, non_idempotent]}
-        supports_cancel: {type: boolean}
-        supports_status_lookup: {type: boolean}
-        registration_hash: {$ref: '#/components/schemas/Sha256'}
+        examples: {type: array, items: {$ref: '#/components/schemas/JsonObject'}}
+        error_catalog: {type: array, items: {$ref: '#/components/schemas/JsonObject'}}
+        annotations: {$ref: '#/components/schemas/JsonObject'}
+        implementation_ref: {type: [string, 'null']}
+        implementation_version: {type: [string, 'null']}
+        execution_mode: {type: [string, 'null'], enum: [inline, durable_async, null]}
+        side_effect: {type: [string, 'null'], enum: [none, idempotent, non_idempotent, null]}
+        content_hash: {oneOf: [{$ref: '#/components/schemas/Sha256'}, {type: 'null'}]}
         enabled: {type: boolean}
         confirmation_policy: {type: string, enum: [never, per_call, session_grant]}
-        platform_config_ref: {type: [string, 'null']}
-        config_revision: {type: integer, format: int64, minimum: 1}
-        risk_version: {type: integer, format: int64, minimum: 1}
+        network_policy: {$ref: '#/components/schemas/JsonObject'}
+        workspace_policy: {$ref: '#/components/schemas/JsonObject'}
+        risk_rules: {type: array, items: {$ref: '#/components/schemas/JsonObject'}}
+        usage_count: {type: integer, minimum: 0}
         version: {type: integer, format: int64, minimum: 1}
-    PlatformToolPatch:
+        config_version: {type: integer, format: int64, minimum: 1}
+    ToolGovernancePatch:
       type: object
       additionalProperties: false
       minProperties: 1
       properties:
-        name: {type: string, minLength: 1, maxLength: 191}
-        description: {type: string}
-        enabled: {type: boolean}
-        confirmation_policy: {type: string, enum: [never, per_call, session_grant]}
-        platform_config_ref: {type: [string, 'null']}
-    PlatformToolPage:
+        display_name: {type: [string, 'null'], minLength: 1, maxLength: 200}
+        display_name_zh: {type: [string, 'null'], minLength: 1, maxLength: 200}
+        enabled: {type: [boolean, 'null']}
+        confirmation_policy: {type: [string, 'null'], enum: [never, per_call, session_grant, null]}
+        network_policy: {oneOf: [{$ref: '#/components/schemas/JsonObject'}, {type: 'null'}]}
+        workspace_policy: {oneOf: [{$ref: '#/components/schemas/JsonObject'}, {type: 'null'}]}
+        risk_rules: {type: [array, 'null'], items: {$ref: '#/components/schemas/JsonObject'}}
+    ToolDefinitionPage:
       type: object
       additionalProperties: false
       required: [items, next_cursor]
-      properties: {items: {type: array, items: {$ref: '#/components/schemas/PlatformTool'}}, next_cursor: {type: [string, 'null']}}
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/ToolDefinitionView'}}, next_cursor: {type: [string, 'null']}}
+    ToolVersionView:
+      type: object
+      additionalProperties: false
+      required: [id, version_no, input_schema, output_schema, examples, error_catalog, annotations, implementation_ref, implementation_version, execution_mode, side_effect, content_hash, published_at]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        version_no: {type: integer, minimum: 1}
+        input_schema: {$ref: '#/components/schemas/JsonObject'}
+        output_schema: {$ref: '#/components/schemas/JsonObject'}
+        examples: {type: array, items: {$ref: '#/components/schemas/JsonObject'}}
+        error_catalog: {type: array, items: {$ref: '#/components/schemas/JsonObject'}}
+        annotations: {$ref: '#/components/schemas/JsonObject'}
+        implementation_ref: {type: string}
+        implementation_version: {type: string}
+        execution_mode: {type: string, enum: [inline, durable_async]}
+        side_effect: {type: string, enum: [none, idempotent, non_idempotent]}
+        content_hash: {$ref: '#/components/schemas/Sha256'}
+        published_at: {type: string, format: date-time}
+    ToolVersionPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/ToolVersionView'}}}
+    ToolConnectionUpsert:
+      type: object
+      additionalProperties: false
+      required: [connection_key, display_name, connection_type, endpoint]
+      properties:
+        connection_key: {type: string, pattern: '^[a-z][a-z0-9_.-]*$', maxLength: 191}
+        display_name: {type: string, minLength: 1, maxLength: 200}
+        connection_type: {type: string, enum: [bocha, brave, mcp, browser]}
+        endpoint: {type: string, format: uri}
+        auth_type: {type: string, enum: [none, bearer, x_api_key], default: none}
+        api_key: {type: [string, 'null'], format: password, writeOnly: true, minLength: 1, maxLength: 4096}
+        config: {$ref: '#/components/schemas/JsonObject'}
+        enabled: {type: boolean, default: true}
+        is_primary: {type: boolean, default: false}
+    ToolConnectionPatch:
+      type: object
+      additionalProperties: false
+      required: [display_name, endpoint, auth_type]
+      properties:
+        display_name: {type: string, minLength: 1, maxLength: 200}
+        endpoint: {type: string, format: uri}
+        auth_type: {type: string, enum: [none, bearer, x_api_key]}
+        api_key: {type: [string, 'null'], format: password, writeOnly: true, minLength: 1, maxLength: 4096}
+        config: {$ref: '#/components/schemas/JsonObject'}
+        enabled: {type: boolean, default: true}
+        is_primary: {type: boolean, default: false}
+    ToolConnectionHealth:
+      type: object
+      additionalProperties: false
+      required: [status, checked_at, latency_ms, error_code]
+      properties:
+        status: {type: string, enum: [untested, healthy, unhealthy]}
+        checked_at: {type: [string, 'null'], format: date-time}
+        latency_ms: {type: [integer, 'null'], minimum: 0}
+        error_code: {type: [string, 'null']}
+    ToolConnectionView:
+      type: object
+      additionalProperties: false
+      required: [id, connection_key, display_name, connection_type, auth_type, status, enabled, is_primary, current_revision_id, revision_no, endpoint, secret_configured, secret_fingerprint, config, health, version]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        connection_key: {type: string}
+        display_name: {type: string}
+        connection_type: {type: string, enum: [bocha, brave, mcp, browser]}
+        auth_type: {type: string, enum: [none, bearer, x_api_key]}
+        status: {type: string, enum: [active, inactive]}
+        enabled: {type: boolean}
+        is_primary: {type: boolean}
+        current_revision_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        revision_no: {type: [integer, 'null'], minimum: 1}
+        endpoint: {type: [string, 'null'], format: uri, description: Admin-only projection.}
+        secret_configured: {type: boolean}
+        secret_fingerprint: {oneOf: [{$ref: '#/components/schemas/Sha256'}, {type: 'null'}]}
+        config: {$ref: '#/components/schemas/JsonObject'}
+        health: {$ref: '#/components/schemas/ToolConnectionHealth'}
+        version: {type: integer, format: int64, minimum: 1}
+    ToolConnectionPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/ToolConnectionView'}}}
+    ToolConnectionTestResult:
+      type: object
+      additionalProperties: false
+      required: [ok, provider, latency_ms, provider_error_code]
+      properties:
+        ok: {type: boolean}
+        provider: {type: [string, 'null']}
+        latency_ms: {type: [integer, 'null'], minimum: 0}
+        provider_error_code: {type: [string, 'null']}
+        details: {$ref: '#/components/schemas/JsonObject'}
+    ToolReconcileResult:
+      type: object
+      additionalProperties: false
+      required: [created, updated, registration_missing, audit_event_id]
+      properties:
+        created: {type: integer, minimum: 0}
+        updated: {type: integer, minimum: 0}
+        registration_missing: {type: array, items: {type: string}}
+        audit_event_id: {type: [string, 'null']}
+    McpSyncResult:
+      type: object
+      additionalProperties: true
+      required: [created, updated]
+      properties:
+        created: {type: integer, minimum: 0}
+        updated: {type: integer, minimum: 0}
 
     Skill:
       type: object

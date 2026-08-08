@@ -16,7 +16,21 @@ from app.models.runtime_v1 import RunnerSkillSnapshot, Workspace
 
 
 class WorkspaceFileError(ValueError):
-    pass
+    def __init__(self, message: str, *, code: str | None = None, category: str | None = None):
+        normalized = message.casefold()
+        if category is None:
+            if any(value in normalized for value in ("conflict", "checksum")):
+                category = "conflict"
+            elif any(value in normalized for value in (
+                "escape", "symbolic link", "permitted root", "reserved",
+                "not in this runner", "artifact is unavailable",
+            )):
+                category = "authorization"
+            else:
+                category = "validation"
+        self.code = code or f"workspace_{category}_error"
+        self.category = category
+        super().__init__(message)
 
 
 def _relative_path(value: str, *, allow_dot: bool = False) -> PurePosixPath:
@@ -50,7 +64,13 @@ async def workspace_root(db, *, workspace_id: str | None, session_id: str) -> Pa
     ))
     if workspace is None:
         raise WorkspaceFileError("Workspace is unavailable")
-    root = (Path(settings.sandbox_root).resolve() / session_id).resolve()
+    if not session_id or "/" in session_id or "\\" in session_id:
+        raise WorkspaceFileError("Workspace Session identity is invalid")
+    base = Path(settings.sandbox_root).resolve()
+    candidate = base / session_id
+    if candidate.is_symlink():
+        raise WorkspaceFileError("Workspace root must not be a symbolic link")
+    root = _inside(base, candidate)
     root.mkdir(parents=True, exist_ok=True)
     return root
 
@@ -121,6 +141,14 @@ async def resolve_workspace_path(
 
 
 async def resolve_read_path(db, *, context, value: str) -> tuple[Path, str]:
+    if value.startswith("artifact://"):
+        artifact_id = value.removeprefix("artifact://")
+        if not artifact_id or "/" in artifact_id:
+            raise WorkspaceFileError("Artifact URI is invalid")
+        path, artifact = await resolve_artifact_storage_path(
+            db, context=context, artifact_id=artifact_id,
+        )
+        return path, f"artifact://{artifact.id}"
     if value.startswith("skill://"):
         without_scheme = value.removeprefix("skill://")
         parsed = _relative_path(without_scheme)
@@ -136,14 +164,21 @@ async def resolve_read_path(db, *, context, value: str) -> tuple[Path, str]:
         ))
         if snapshot is None:
             raise WorkspaceFileError("Skill URI is not in this Runner's frozen catalog")
-        root = (Path(settings.shared_skill_root) / skill_id / checksum).resolve()
+        skill_base = Path(settings.shared_skill_root).resolve()
+        root = _inside(skill_base, skill_base / skill_id / checksum)
+        if root.is_symlink():
+            raise WorkspaceFileError("Skill root must not be a symbolic link")
         candidate = _inside(root, root.joinpath(*tail))
+        if candidate.is_symlink():
+            raise WorkspaceFileError("symbolic links are not readable Tool inputs")
         return candidate, value
     _, candidate, relative = await resolve_workspace_path(
         db, workspace_id=context.workspace_id, session_id=context.session_id,
         relative_path=value, agent_id=context.agent_id,
         group_session_id=context.group_session_id,
     )
+    if candidate.is_symlink():
+        raise WorkspaceFileError("symbolic links are not readable Tool inputs")
     return candidate, relative
 
 
