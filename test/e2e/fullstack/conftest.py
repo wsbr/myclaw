@@ -142,6 +142,17 @@ def assembled_world(phase_api: MyClawAPI):
     model = api.request("POST", "/api/v1/admin/models", idem=True, json={
         "key": f"real-uat-{suffix}", "name": f"Real UAT {suffix}",
     }).json()
+    default_parameters = _json_env(
+        "MYCLAW_REAL_LLM_PARAMETERS", {"temperature": 0, "max_tokens": 4096},
+    )
+    # DashScope Qwen thinking models default to thinking mode. Freeze that
+    # fact explicitly so conformance can use the documented non-thinking
+    # variant only for forced tool_choice probes, while Agent turns retain the
+    # exact immutable runtime mode.
+    if env["MYCLAW_REAL_LLM_MODEL"].casefold().startswith("qwen"):
+        default_parameters.setdefault("extra_body", {}).setdefault(
+            "enable_thinking", True,
+        )
     version = api.request(
         "POST", f"/api/v1/admin/models/{model['id']}/versions", idem=True,
         headers={"If-Match": f'W/"{model["version"]}"'},
@@ -150,9 +161,7 @@ def assembled_world(phase_api: MyClawAPI):
             "model_name": env["MYCLAW_REAL_LLM_MODEL"],
             "endpoint": env["MYCLAW_REAL_LLM_ENDPOINT"],
             "api_key": env["MYCLAW_REAL_LLM_API_KEY"],
-            "default_parameters": _json_env(
-                "MYCLAW_REAL_LLM_PARAMETERS", {"temperature": 0, "max_tokens": 4096},
-            ),
+            "default_parameters": default_parameters,
             "capabilities": _json_env("MYCLAW_REAL_LLM_CAPABILITIES", {
                 "streaming": True, "native_tool_calling": True,
                 "parallel_tool_calling": False, "tool_result_continuation": True,

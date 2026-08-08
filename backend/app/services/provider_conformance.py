@@ -490,7 +490,13 @@ async def execute_conformance_run(
             "passed": False,
             "probes": [{
                 "name": "suite_execution", "passed": False,
-                "details": {"error_code": type(error).__name__},
+                "details": {
+                    "error_code": getattr(error, "code", type(error).__name__),
+                    "retryable": bool(getattr(error, "retryable", False)),
+                    "received_payload": bool(
+                        getattr(error, "received_payload", False)
+                    ),
+                },
             }],
         }
     run.ended_at = utcnow()
