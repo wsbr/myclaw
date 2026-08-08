@@ -1,9 +1,13 @@
 """Phase-one Run budget profile invariants."""
 
+import pytest
+
 from app.services.run_reliability_service import (
     default_run_budget,
     normalize_run_budget,
 )
+
+pytestmark = pytest.mark.unit
 
 
 def test_group_budget_has_bounded_peer_collaboration_headroom():
