@@ -486,8 +486,11 @@ class RuntimeWorker:
                         "When the user requires exact, literal, verbatim, or byte-contiguous text in "
                         "a file or Artifact, preserve every required sequence contiguously: do not "
                         "insert Markdown emphasis, code delimiters, typographic substitutions, or "
-                        "other characters inside it. Before publishing, read the source file, check "
-                        "each named literal, and correct any mismatch."
+                        "other characters inside it. Never split, abbreviate, translate, or replace "
+                        "an exact identifier with separate label/value fields; a required name.v1 "
+                        "must appear literally as name.v1, not only as name plus a v1 field. Before "
+                        "publishing, you MUST read the source file, check every named literal byte "
+                        "for byte, and correct any mismatch."
                     )
                 elif run.mode == "group":
                     platform_rules = (

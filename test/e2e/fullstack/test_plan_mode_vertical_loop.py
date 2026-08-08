@@ -469,7 +469,9 @@ def test_plan_proposals_are_readable_30_of_30_and_adapt_5_of_5(
             "total_capacity_hours, 0)、total_capacity_hours > 0、committed_hours >= 0 以及 "
             "T01-T09；test_report.md 必须包含"
             "9/9、argv、stdout、stderr、exit code 和 T01-T09；acceptance_report.md 必须包含"
-            "capacity_risk.v1、accepted、9/9 及四个 Artifact 文件名。批准后 WorkingPlan 已冻结，"
+            "下列连续 token，且不得翻译、缩写、拆分为名称和版本字段或用单独 v1 替代："
+            "capacity_risk.v1、accepted、9/9、requirements.md、capacity_risk.py、"
+            "test_report.md、acceptance_report.md。批准后 WorkingPlan 已冻结，"
             "direct 阶段不得调用 update_plan；第四个 Artifact 发布成功后立即用普通消息结束，"
             "不得再调用任何 Tool。",
         )
