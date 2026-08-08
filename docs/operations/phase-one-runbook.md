@@ -39,12 +39,13 @@ Redis 和 Workspace/Artifact 数据，不读取、迁移或删除旧 `myclaw-uat
 
 `init-env.sh` 从旧环境只读取真实模型连接信息，生成独立密码并绑定当前 clean SHA；旧 UAT 容器、卷和失败记录不参与新环境写流量。本次受控 UAT 的不可变 ModelVersion 将 `qwen3.5-plus` 固定为 `temperature=0`、`max_tokens=4096`、`extra_body.enable_thinking=true`，使用该混合模型的思考模式与自动 native tool calling。Provider 的思考模式不接受 wire-level 强制 `tool_choice`；因此 ConformanceRun 的普通消息、Tool continuation 和运行时调用保持冻结的思考模式，仅强制 Tool 选择的协议探针切换到同一模型公开支持的 `enable_thinking=false` 兼容变体，并在探针事实中保留该边界，正式 Agent Turn 不覆盖 ModelVersion 参数。同时冻结华北 2（北京）不超过 128K 输入档的公开表价（输入/输出分别为 0.8/4.8 CNY 每百万 Token）、价格生效日期与来源 URL。统计脚本在单次输入越档时直接失败，避免使用错误档位估算成本。
 
-第一期新建 Group Run 的平台默认 `max_tokens=512000`，并与其余 Run 预算一起写入不可变
-`hard_budget_snapshot`；Chat/Plan 默认仍为 `160000`。该 Group 上限依据真实五 Agent
-容量流程观测峰值 `406730` Token 校准，保留约 25.9% 余量，同时继续受 160 Agent Turn、
+第一期新建 Group Run 的平台默认 `max_tokens=768000`，并与其余 Run 预算一起写入不可变
+`hard_budget_snapshot`；Chat/Plan 默认仍为 `160000`。该 Group 上限依据同一真实五 Agent、
+故障注入容量流程的 `406730` 与 `513532` Token 观测重新校准，相对当前观测峰值保留约
+49.6% 方差余量，同时继续受 160 Agent Turn、
 240 Provider Attempt、128 Tool Invocation、64 Agent Invocation、16 Transport Retry 和
 1800 秒 active time 的硬上限约束。修改默认值不得回写已有 Run；历史 `400000` 快照及其
-`budget_exhausted` 失败事实必须原样保留。
+`budget_exhausted` 失败事实、以及后续 `512000` 快照及其失败事实都必须原样保留。
 
 最终演练调用 `deployment-drill.sh <previous-compatible-clean-sha>`：先生成备份，再临时切到
 声明与 `0029` 兼容的上一镜像，除健康检查外必须真实登录并通过 Run ORM 列表查询；随后

@@ -51,7 +51,7 @@ def default_run_budget(mode: str) -> dict[str, int]:
             "max_tool_invocations": 128,
             "max_agent_invocations": 64,
             "max_transport_retries": 16,
-            "max_tokens": 512_000,
+            "max_tokens": 768_000,
             "max_active_seconds": 1_800,
             "no_progress_turns": 4,
         }

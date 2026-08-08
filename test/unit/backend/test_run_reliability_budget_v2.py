@@ -14,7 +14,7 @@ def test_group_budget_has_bounded_peer_collaboration_headroom():
     group = default_run_budget("group")
     direct = default_run_budget("chat")
 
-    assert group["max_tokens"] == 512_000
+    assert group["max_tokens"] == 768_000
     assert group["max_tokens"] > direct["max_tokens"]
     assert group["max_agent_turns"] == 160
     assert group["max_provider_attempts"] == 240
@@ -23,8 +23,10 @@ def test_group_budget_has_bounded_peer_collaboration_headroom():
 
 
 def test_existing_run_budget_snapshot_is_not_rewritten_by_new_default():
-    historical = normalize_run_budget({"max_tokens": 400_000}, mode="group")
+    historical_400k = normalize_run_budget({"max_tokens": 400_000}, mode="group")
+    historical_512k = normalize_run_budget({"max_tokens": 512_000}, mode="group")
     invalid = normalize_run_budget({"max_tokens": 0}, mode="group")
 
-    assert historical["max_tokens"] == 400_000
-    assert invalid["max_tokens"] == 512_000
+    assert historical_400k["max_tokens"] == 400_000
+    assert historical_512k["max_tokens"] == 512_000
+    assert invalid["max_tokens"] == 768_000
