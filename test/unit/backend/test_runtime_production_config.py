@@ -111,6 +111,7 @@ def test_uat_single_node_uses_isolated_persistent_volumes_and_sha_bound_operatio
     assert "MYCLAW_REAL_LLM_API_KEY:" not in compose
     assert "MYCLAW_BOCHA_API_KEY:" not in compose
     assert "MYCLAW_BRAVE_API_KEY:" not in compose
+    assert 'TRUSTED_SYNTHETIC_DNS_CIDRS:-["198.18.0.0/15"]' in compose
     assert "deploy:\n      replicas: 2" in compose
     assert "--no-tablespaces" in (uat / "backup.sh").read_text()
     assert "MYCLAW_REAL_LLM_API_KEY=\n" in example
