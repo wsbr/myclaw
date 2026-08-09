@@ -3,7 +3,11 @@ FROM node:20-alpine AS builder
 WORKDIR /app
 RUN corepack enable && corepack prepare pnpm@10.15.0 --activate
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-RUN pnpm install --frozen-lockfile
+RUN --mount=type=cache,id=myclaw-frontend-pnpm-store,target=/pnpm/store \
+    pnpm config set store-dir /pnpm/store \
+    && pnpm config set fetch-retries 5 \
+    && pnpm config set fetch-timeout 60000 \
+    && pnpm install --frozen-lockfile
 COPY . .
 
 # Vite bakes this in at build time

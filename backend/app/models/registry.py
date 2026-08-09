@@ -185,7 +185,7 @@ class ToolConnection(Base, TimestampMixin, VersionMixin):
     __tablename__ = "tool_connection"
     __table_args__ = (
         CheckConstraint(
-            "connection_type IN ('bocha','brave','mcp','browser')",
+            "connection_type IN ('bocha','brave','bailian','mcp','browser')",
             name="ck_tool_connection_type",
         ),
         CheckConstraint(
@@ -358,6 +358,8 @@ class SkillVersion(Base):
     checksum: Mapped[str] = mapped_column(String(64), nullable=False)
     manifest: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     content_hash: Mapped[str] = mapped_column(String(64), default="", nullable=False)
+    package_size: Mapped[int | None] = mapped_column(BigInteger)
+    archive_type: Mapped[str | None] = mapped_column(String(20))
     manifest_name: Mapped[str] = mapped_column(String(200), nullable=False)
     manifest_description: Mapped[str] = mapped_column(Text, nullable=False)
     validation_error: Mapped[str | None] = mapped_column(Text)

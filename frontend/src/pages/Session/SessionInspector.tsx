@@ -107,7 +107,7 @@ function ArtifactList({ artifacts, deleting, onDelete }: {
         {artifact.checksum.slice(0, 16)}…
       </Typography.Text>
       <div className="mt-3 flex gap-1">
-        <Button size="small" icon={<Download className="size-3.5" />} disabled={artifact.status !== 'published'} onClick={() => sessionsApi.downloadArtifact(artifact)}>下载</Button>
+        <Button aria-label="下载" size="small" icon={<Download className="size-3.5" />} disabled={artifact.status !== 'published'} onClick={() => sessionsApi.downloadArtifact(artifact)}>下载</Button>
         <Button size="small" danger icon={<Trash2 className="size-3.5" />} disabled={artifact.status === 'deleted'} loading={deleting} onClick={() => onDelete(artifact)}>删除引用</Button>
       </div>
     </div>)}

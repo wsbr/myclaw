@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.tool_registry.base import RuntimeContext
 from app.models.common import utcnow, uuid7
 from app.models.runtime_v1 import (
-    AgentTurn, CapabilitySnapshot, ProviderAttempt, RunnerCheckpoint,
+    AgentTurn, CapabilitySnapshot, DurableRunner, ProviderAttempt, RunnerCheckpoint,
 )
 from app.runtime.action_dispatcher import ActionDispatcher, DispatchResult
 from app.runtime.context_assembler import ContextPackage
@@ -26,6 +26,7 @@ from app.runtime.protocol import (
     ProviderRequest,
     StopReason,
 )
+from app.runtime.token_counting import count_provider_request
 from app.services.run_reliability_service import (
     BudgetExceeded, assert_post_provider_budget, assert_turn_budget,
     record_progress,
@@ -143,6 +144,8 @@ class AgentLoopCoordinator:
             if item.get("tool_version_id")
         }
         continuation_start = len(messages)
+        history_start = context.history_start
+        history_count = context.history_count
         turns: list[NormalizedTurnResult] = []
         dispatches: list[DispatchResult] = []
         schema_repairs = 0
@@ -168,6 +171,55 @@ class AgentLoopCoordinator:
                         budget_state.remaining_transport_retries,
                         provider_remaining,
                     )
+            request_count = None
+            history_before_count = history_count
+            if context.hard_input_limit is not None:
+                provider_type = (
+                    identity.provider if identity is not None
+                    else type(self.adapter.provider).__name__.removesuffix("LLM").lower()
+                )
+                request_count = await count_provider_request(
+                    self.adapter.provider, provider_type=provider_type,
+                    messages=messages, tools=presented_definitions,
+                    parameters=model_parameters,
+                )
+                while (
+                    context.soft_input_target is not None
+                    and request_count.tokens > context.soft_input_target
+                    and history_count > 0
+                ):
+                    messages.pop(history_start)
+                    history_count -= 1
+                    request_count = await count_provider_request(
+                        self.adapter.provider, provider_type=provider_type,
+                        messages=messages, tools=presented_definitions,
+                        parameters=model_parameters,
+                    )
+                if request_count.tokens > context.hard_input_limit:
+                    raise AgentLoopError(
+                        "The immutable request exceeds the model Context Window",
+                        code="context_window_exceeded",
+                    )
+            if turn_index == 1:
+                continuation_start = len(messages)
+            if db is not None:
+                if request_count is not None:
+                    active_runner = await db.get(DurableRunner, identity.runner_id)
+                    if active_runner is not None:
+                        prompt_manifest = dict(active_runner.prompt_manifest or {})
+                        prompt_manifest.update({
+                            "count_method": request_count.method,
+                            "count_degraded": request_count.degraded,
+                            "soft_input_target": context.soft_input_target,
+                            "hard_input_limit": context.hard_input_limit,
+                            "pre_call_count": request_count.tokens,
+                            "compaction_reason": (
+                                "provider_count_above_soft_target"
+                                if history_count < history_before_count
+                                else prompt_manifest.get("compaction_reason")
+                            ),
+                        })
+                        active_runner.prompt_manifest = prompt_manifest
                 previous = await db.scalar(select(func.max(AgentTurn.turn_no)).where(
                     AgentTurn.runner_id == identity.runner_id
                 )) or 0
@@ -189,7 +241,21 @@ class AgentLoopCoordinator:
                         }
                         for item in presented_definitions
                     ], ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
-                    context_manifest=list(context.manifest),
+                    context_manifest=[
+                        *list(context.manifest),
+                        *([{
+                            "source": "request_token_count",
+                            "count_method": request_count.method,
+                            "pre_call_count": request_count.tokens,
+                            "soft_input_target": context.soft_input_target,
+                            "hard_input_limit": context.hard_input_limit,
+                            "degraded": request_count.degraded,
+                            "soft_target_unmet": bool(
+                                context.soft_input_target is not None
+                                and request_count.tokens > context.soft_input_target
+                            ),
+                        }] if request_count is not None else []),
+                    ],
                     input_hash=hashlib.sha256(json.dumps(
                         messages, ensure_ascii=False, sort_keys=True, default=str
                     ).encode()).hexdigest(),
@@ -258,6 +324,46 @@ class AgentLoopCoordinator:
                 item.text for item in result.assistant_messages
             )
             tool_calls = list(result.tool_calls)
+            invalid_stop_code = None
+            if result.stop_reason == StopReason.MAX_TOKENS:
+                invalid_stop_code = "provider_output_truncated"
+            elif result.stop_reason == StopReason.CONTENT_FILTER:
+                invalid_stop_code = "provider_content_filtered"
+            elif result.stop_reason == StopReason.ERROR:
+                invalid_stop_code = "provider_invalid_stop_reason"
+            elif result.stop_reason == StopReason.TOOL_USE and not tool_calls:
+                invalid_stop_code = "provider_invalid_stop_reason"
+            elif not tool_calls and (
+                result.stop_reason not in {StopReason.END_TURN, StopReason.UNKNOWN}
+                or not result.assistant_messages
+            ):
+                invalid_stop_code = "provider_invalid_stop_reason"
+            if invalid_stop_code is not None:
+                if persisted_turn is not None:
+                    persisted_turn.status = "failed"
+                    persisted_turn.error_code = invalid_stop_code
+                    persisted_turn.ended_at = utcnow()
+                    if self.reliability_enabled:
+                        await record_progress(
+                            db, run_id=identity.run_id,
+                            work_item_id=identity.work_item_id,
+                            runner_id=identity.runner_id,
+                            agent_turn_id=persisted_turn.id,
+                            made_progress=False,
+                            payload={
+                                "assistant_text_hash": hashlib.sha256(
+                                    assistant_text.encode()
+                                ).hexdigest(),
+                                "stop_reason": result.stop_reason.value,
+                                "error_code": invalid_stop_code,
+                            },
+                            reason_code=invalid_stop_code,
+                        )
+                    await db.flush()
+                raise AgentLoopError(
+                    f"Provider returned incomplete output: {result.stop_reason.value}",
+                    code=invalid_stop_code,
+                )
             if tool_calls:
                 messages.append({
                     "role": "assistant", "content": assistant_text,
@@ -472,7 +578,8 @@ class AgentLoopCoordinator:
                     turns=tuple(turns), dispatches=tuple(dispatches),
                     messages=tuple(messages),
                 )
-            if result.stop_reason in {StopReason.MAX_TOKENS, StopReason.CONTENT_FILTER}:
-                raise AgentLoopError(f"Provider stopped without a final message: {result.stop_reason}")
-            raise AgentLoopError("Provider returned no Tool Call and no assistant message")
+            raise AgentLoopError(
+                "Provider returned no Tool Call and no assistant message",
+                code="provider_invalid_stop_reason",
+            )
         raise AgentLoopError("Agent turn budget exhausted", code="budget_exhausted")

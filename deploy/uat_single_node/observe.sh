@@ -35,11 +35,11 @@ mysql_query() {
 }
 count_logs() {
   local pattern="$1"
-  compose logs --no-color --since "${started_at}" api runtime-worker sandbox-worker 2>&1 \
+  compose logs --no-color --since "${started_at}" api runtime-worker sandbox-worker skill-sync-worker 2>&1 \
     | grep -Eic "${pattern}" || true
 }
 
-for service in api frontend runtime-worker sandbox-worker maintenance-worker mysql redis otel-collector; do
+for service in api frontend runtime-worker sandbox-worker skill-sync-worker maintenance-worker mysql redis otel-collector; do
   [[ -n "$(compose ps -q "${service}" | head -n 1)" ]] || {
     echo "${service} is not running" >&2
     exit 2

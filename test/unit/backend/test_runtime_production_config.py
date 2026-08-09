@@ -48,6 +48,14 @@ def test_sandbox_heartbeat_must_be_shorter_than_attempt_lease():
         )
 
 
+def test_maintenance_heartbeat_must_be_shorter_than_command_lease():
+    with pytest.raises(ValidationError, match="MAINTENANCE_COMMAND_HEARTBEAT_SECONDS"):
+        _production_settings(
+            maintenance_command_claim_lease_seconds=10,
+            maintenance_command_heartbeat_seconds=10,
+        )
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -68,7 +76,13 @@ def test_sandbox_heartbeat_must_be_shorter_than_attempt_lease():
         ("rate_limit_unauthenticated_requests", 0),
         ("rate_limit_window_seconds", 0),
         ("maintenance_poll_seconds", 0),
+        ("maintenance_command_poll_seconds", 0),
+        ("maintenance_command_claim_lease_seconds", 0),
+        ("maintenance_command_heartbeat_seconds", 0),
         ("maintenance_batch_size", 0),
+        ("skill_catalog_max_tokens", 0),
+        ("skill_sync_worker_poll_seconds", 0),
+        ("skill_sync_claim_lease_seconds", 0),
     ],
 )
 def test_worker_and_pool_tuning_rejects_non_positive_values(field: str, value: int):
@@ -111,14 +125,18 @@ def test_uat_single_node_uses_isolated_persistent_volumes_and_sha_bound_operatio
     assert "MYCLAW_REAL_LLM_API_KEY:" not in compose
     assert "MYCLAW_BOCHA_API_KEY:" not in compose
     assert "MYCLAW_BRAVE_API_KEY:" not in compose
+    assert "MYCLAW_BAILIAN_API_KEY:" not in compose
     assert 'TRUSTED_SYNTHETIC_DNS_CIDRS:-["198.18.0.0/15"]' in compose
     assert "deploy:\n      replicas: 2" in compose
+    assert "skill-sync-worker:" in compose
+    assert "python -m app.workers.skill_sync_worker" in compose
     assert "--no-tablespaces" in (uat / "backup.sh").read_text()
     assert "MYCLAW_REAL_LLM_API_KEY=\n" in example
     assert "MYCLAW_BOCHA_API_KEY=\n" in example
     assert "MYCLAW_BRAVE_API_KEY=\n" in example
-    assert ': "${MYCLAW_BOCHA_API_KEY:?Bocha API key is required for UAT}"' in acceptance
-    assert ': "${MYCLAW_BRAVE_API_KEY:?Brave API key is required for UAT}"' in acceptance
+    assert "MYCLAW_BAILIAN_API_KEY=\n" in example
+    assert "MYCLAW_REAL_SEARCH_PROVIDER=bailian" in example
+    assert ': "${MYCLAW_BAILIAN_API_KEY:?Bailian API key is required for UAT}"' in acceptance
     assert "MYCLAW_PRICING_TIER_MAX_INPUT_TOKENS=128000" in example
     assert "Refusing to reuse existing UAT volume" in init_env
     assert "Refusing to accept a dirty workspace" in acceptance
@@ -133,6 +151,17 @@ def test_uat_single_node_uses_isolated_persistent_volumes_and_sha_bound_operatio
     assert "chown -R" not in compose
     assert "path: /var/lib/myclaw/otel/uat-otel-traces.jsonl" in collector
     assert "exporters: [debug, file]" in collector
+
+
+def test_skill_storage_configuration_is_fail_closed():
+    with pytest.raises(ValidationError, match="SKILL_STORAGE_BACKEND"):
+        _production_settings(skill_storage_backend="database")
+    with pytest.raises(ValidationError, match="missing S3 Skill storage settings"):
+        _production_settings(
+            skill_storage_backend="s3",
+            skill_s3_access_key_id=None,
+            skill_s3_secret_access_key=None,
+        )
 
 
 @pytest.mark.parametrize(

@@ -208,7 +208,7 @@ async def test_mysql_tool_contract_schema_and_immutability_triggers():
         db.add(ToolConnection(
             id=uuid7(), connection_key=f"second-primary.{suffix}",
             display_name="Second Primary Search",
-            connection_type="bocha", auth_type="bearer",
+            connection_type="bailian", auth_type="bearer",
             status="active", is_primary=True,
             next_revision_no=1, health_status="untested",
         ))

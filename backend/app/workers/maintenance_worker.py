@@ -1,4 +1,4 @@
-"""Single-leader periodic retention maintenance process."""
+"""Retention leader plus durable History/Memory maintenance consumers."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import engine
 from app.models.common import uuid7
 from app.services.retention_service import run_retention_cleanup
+from app.services.maintenance_command_service import MaintenanceCommandWorker
 
 
 logger = logging.getLogger(__name__)
@@ -42,13 +43,29 @@ async def run_once() -> bool:
                 await connection.commit()
 
 
-async def main() -> None:
+async def _retention_loop() -> None:
     while True:
         try:
             await run_once()
         except Exception:
             logger.exception("retention cleanup failed")
         await asyncio.sleep(settings.maintenance_poll_seconds)
+
+
+async def _command_loop() -> None:
+    worker = MaintenanceCommandWorker()
+    while True:
+        try:
+            worked = await worker.run_once()
+        except Exception:
+            logger.exception("maintenance command iteration failed")
+            worked = False
+        if not worked:
+            await asyncio.sleep(settings.maintenance_command_poll_seconds)
+
+
+async def main() -> None:
+    await asyncio.gather(_retention_loop(), _command_loop())
 
 
 if __name__ == "__main__":

@@ -46,9 +46,21 @@ class Settings(BaseSettings):
     sandbox_root: str = "/var/lib/myclaw/workspaces"
     skill_package_root: str = "/var/lib/myclaw/skill-packages"
     shared_skill_root: str = "/var/lib/myclaw/shared-skills"
+    skill_storage_backend: str = "local"
+    skill_s3_endpoint_url: str | None = None
+    skill_s3_region: str = "us-east-1"
+    skill_s3_bucket: str = "myclaw-skills"
+    skill_s3_access_key_id: str | None = None
+    skill_s3_secret_access_key: str | None = None
+    skill_s3_force_path_style: bool = True
     skill_max_package_bytes: int = 20 * 1024 * 1024
     skill_max_files: int = 2000
     skill_max_unpacked_bytes: int = 100 * 1024 * 1024
+    skill_manifest_max_bytes: int = Field(default=256 * 1024, gt=0, le=1024 * 1024)
+    skill_catalog_max_tokens: int = Field(default=600, ge=64, le=4096)
+    skill_sync_worker_poll_seconds: float = Field(default=1.0, gt=0)
+    skill_sync_claim_lease_seconds: int = Field(default=30, gt=0)
+    skill_sync_reconcile_seconds: int = Field(default=3600, gt=0)
 
     # Durable worker production tuning. Heartbeats must remain comfortably
     # below the Runner lease so a transient scheduling pause does not fence a
@@ -74,6 +86,9 @@ class Settings(BaseSettings):
     # Retention maintenance. Authoritative Session/Run/Event/Artifact rows are
     # not deleted by this job; only disposable operational records are pruned.
     maintenance_poll_seconds: int = Field(default=3600, gt=0)
+    maintenance_command_poll_seconds: float = Field(default=1.0, gt=0)
+    maintenance_command_claim_lease_seconds: int = Field(default=300, gt=0)
+    maintenance_command_heartbeat_seconds: int = Field(default=30, gt=0)
     maintenance_batch_size: int = Field(default=500, gt=0, le=5000)
     outbox_completed_retention_days: int = Field(default=30, ge=30)
     outbox_dead_retention_days: int = Field(default=180, ge=180)
@@ -87,6 +102,20 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_production_safety(self):
+        storage_backend = self.skill_storage_backend.casefold()
+        if storage_backend not in {"local", "s3"}:
+            raise ValueError("SKILL_STORAGE_BACKEND must be local or s3")
+        self.skill_storage_backend = storage_backend
+        if storage_backend == "s3":
+            missing = [
+                name for name, value in {
+                    "SKILL_S3_BUCKET": self.skill_s3_bucket,
+                    "SKILL_S3_ACCESS_KEY_ID": self.skill_s3_access_key_id,
+                    "SKILL_S3_SECRET_ACCESS_KEY": self.skill_s3_secret_access_key,
+                }.items() if not value
+            ]
+            if missing:
+                raise ValueError(f"missing S3 Skill storage settings: {', '.join(missing)}")
         for cidr in self.trusted_synthetic_dns_cidrs:
             try:
                 network = ipaddress.ip_network(cidr, strict=True)
@@ -102,6 +131,14 @@ class Settings(BaseSettings):
             raise ValueError("RUNTIME_RUNNER_HEARTBEAT_SECONDS must be below RUNTIME_RUNNER_LEASE_SECONDS")
         if self.sandbox_attempt_heartbeat_seconds >= self.sandbox_attempt_lease_seconds:
             raise ValueError("SANDBOX_ATTEMPT_HEARTBEAT_SECONDS must be below SANDBOX_ATTEMPT_LEASE_SECONDS")
+        if (
+            self.maintenance_command_heartbeat_seconds
+            >= self.maintenance_command_claim_lease_seconds
+        ):
+            raise ValueError(
+                "MAINTENANCE_COMMAND_HEARTBEAT_SECONDS must be below "
+                "MAINTENANCE_COMMAND_CLAIM_LEASE_SECONDS"
+            )
         if self.myclaw_environment.lower() == "production":
             unsafe = {
                 "SECRET_KEY": self.secret_key.startswith("change-me"),

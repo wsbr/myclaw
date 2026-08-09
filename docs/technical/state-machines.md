@@ -22,14 +22,15 @@ AgentVersion：可编辑 `draft`；publish 时复制为不可变 `published`；`
 其他 Registry 版本的准入状态：
 
 ```text
-SkillVersion: uploaded → published | quarantined
+SkillVersion: uploaded → validating | published | rejected | quarantined
+              validating → published | rejected | quarantined
               published → deprecated | quarantined
               deprecated → quarantined
 PolicyVersion: published → deprecated
 SandboxProfileVersion: published → deprecated
 ```
 
-`deprecated` 和 `quarantined` 都是不可逆状态终点；恢复使用必须发布新版本。依赖版本的 `deprecated` 只阻止新 AgentVersion 选择/发布，不改变已发布 AgentVersion 的精确依赖；AgentVersion 自身 `deprecated` 后不得解析到新 Run/Invocation，已创建工作仍按快照恢复；SkillVersion `quarantined` 在新 Runner 启动前强制失败。上述迁移只能改变状态、治理 CAS 版本和审计元数据，不能改变 payload、依赖或 `content_hash`。ModelVersion 无独立可变状态；其新准入由 Model logical status/current pointer 与 ConformanceRun 共同决定。
+`rejected`、`deprecated` 和 `quarantined` 都是不可逆状态终点；恢复使用必须上传并发布新版本。依赖版本的 `deprecated` 只阻止新 AgentVersion 选择/发布，不改变已发布 AgentVersion 的精确依赖；AgentVersion 自身 `deprecated` 后不得解析到新 Run/Invocation，已创建工作仍按快照恢复；SkillVersion `quarantined` 在新 Runner 启动前强制失败。上述迁移只能改变状态、治理 CAS 版本和审计元数据，不能改变 payload、依赖或 `content_hash`。ModelVersion 无独立可变状态；其新准入由 Model logical status/current pointer 与 ConformanceRun 共同决定。
 
 迁移发起者也是固定的：新 Agent/Skill 版本发布事务 CAS 更新 logical current pointer，并可在同事务把旧 current 从 published 迁移为 deprecated；Policy/Sandbox 由签名 GitOps reconcile 执行等价操作；Skill quarantine 只能由安全评估服务或有权管理命令依据精确 assessment 事实推进。所有迁移均写 PlatformAuditEvent，不从 UI 文字或扫描器临时返回值直接改状态。
 

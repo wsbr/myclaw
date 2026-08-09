@@ -69,7 +69,7 @@ if not body.get("items"):
 PY
 }
 
-for service in api frontend runtime-worker sandbox-worker maintenance-worker; do
+for service in api frontend runtime-worker sandbox-worker skill-sync-worker maintenance-worker; do
   [[ -n "$(service_id "${service}")" ]] || { echo "${service} is not running" >&2; exit 2; }
 done
 curl --fail --silent --show-error "http://127.0.0.1:${UAT_API_PORT}/health" >/dev/null
@@ -78,6 +78,7 @@ api_ref="$(image_ref api)"; api_final="$(image_id api)"
 frontend_ref="$(image_ref frontend)"; frontend_final="$(image_id frontend)"
 runtime_ref="$(image_ref runtime-worker)"; runtime_final="$(image_id runtime-worker)"
 sandbox_ref="$(image_ref sandbox-worker)"; sandbox_final="$(image_id sandbox-worker)"
+skill_sync_ref="$(image_ref skill-sync-worker)"; skill_sync_final="$(image_id skill-sync-worker)"
 maintenance_ref="$(image_ref maintenance-worker)"; maintenance_final="$(image_id maintenance-worker)"
 temp_root="$(mktemp -d)"
 source_tree="${temp_root}/source"
@@ -93,9 +94,10 @@ restore_final_images() {
   docker tag "${frontend_final}" "${frontend_ref}" >/dev/null
   docker tag "${runtime_final}" "${runtime_ref}" >/dev/null
   docker tag "${sandbox_final}" "${sandbox_ref}" >/dev/null
+  docker tag "${skill_sync_final}" "${skill_sync_ref}" >/dev/null
   docker tag "${maintenance_final}" "${maintenance_ref}" >/dev/null
   compose up -d --no-build --force-recreate \
-    api frontend runtime-worker sandbox-worker maintenance-worker >/dev/null
+    api frontend runtime-worker sandbox-worker skill-sync-worker maintenance-worker >/dev/null
   restored=1
 }
 cleanup() {
@@ -118,7 +120,7 @@ docker build \
   --build-arg "VITE_API_BASE_URL=http://localhost:${UAT_API_PORT}" \
   -t "${rollback_frontend}" "${source_tree}/frontend" >/dev/null
 
-compose stop api frontend runtime-worker sandbox-worker maintenance-worker >/dev/null
+compose stop api frontend runtime-worker sandbox-worker skill-sync-worker maintenance-worker >/dev/null
 docker tag "${rollback_backend}" "${api_ref}"
 docker tag "${rollback_backend}" "${runtime_ref}"
 docker tag "${rollback_backend}" "${sandbox_ref}"

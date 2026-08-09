@@ -38,15 +38,15 @@ MYCLAW_ACCEPTANCE_COMMIT_SHA="$(git rev-parse HEAD)" \
 export MYCLAW_REAL_LLM_ENDPOINT=https://provider.example/v1
 export MYCLAW_REAL_LLM_MODEL=real-model-id
 read -r -s MYCLAW_REAL_LLM_API_KEY && export MYCLAW_REAL_LLM_API_KEY
-read -r -s MYCLAW_BOCHA_API_KEY && export MYCLAW_BOCHA_API_KEY
-read -r -s MYCLAW_BRAVE_API_KEY && export MYCLAW_BRAVE_API_KEY
+export MYCLAW_REAL_SEARCH_PROVIDER=bailian
+read -r -s MYCLAW_BAILIAN_API_KEY && export MYCLAW_BAILIAN_API_KEY
 MYCLAW_ACCEPTANCE_COMMIT_SHA="$(git rev-parse HEAD)" \
   ./scripts/run_ci_gates.sh real
 ```
 
-真实门禁构建并运行 MySQL、Redis、API、两个 Runtime Worker、Sandbox Worker、Connector Worker、Browser Worker、Frontend 和 OTel Collector。测试通过管理员 write-only API 配置真实模型、Bocha、Brave 与公开 OpenAI Developer Docs MCP，然后完成：
+真实门禁构建并运行 MySQL、Redis、API、两个 Runtime Worker、Sandbox Worker、Connector Worker、Browser Worker、Frontend 和 OTel Collector。测试通过管理员 write-only API 配置真实模型、所选真实 Search Provider 与公开 OpenAI Developer Docs MCP，然后完成：
 
-- Bocha/Brave 中英文与 freshness 搜索，真实 HTML/PDF Fetch；
+- Bailian 原生结构化 Web Search（或兼容的 Bocha/Brave 双 Provider 模式）中英文与 freshness 搜索，真实 HTML/PDF Fetch；
 - 30 个自然语言盲测与五类多步任务；
 - Workspace→Execute→Artifact、Search→Fetch→引用、Browser 精确审批、跨 Session Memory、动态 MCP；
 - Chat、Plan、Group 自然停止、批准前零副作用、批准后实施与 Worker 重启恢复；

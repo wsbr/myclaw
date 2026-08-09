@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
 import re
@@ -13,6 +14,9 @@ from sqlalchemy import select
 from app.config import settings
 from app.models.artifact_v1 import Artifact
 from app.models.runtime_v1 import RunnerSkillSnapshot, Workspace
+from app.models.registry import SkillVersion
+from app.services.skill_cache_service import SkillCacheError, SkillCacheService
+from app.services.skill_storage_service import SkillStorageError
 
 
 class WorkspaceFileError(ValueError):
@@ -164,6 +168,28 @@ async def resolve_read_path(db, *, context, value: str) -> tuple[Path, str]:
         ))
         if snapshot is None:
             raise WorkspaceFileError("Skill URI is not in this Runner's frozen catalog")
+        version = await db.get(SkillVersion, snapshot.skill_version_id)
+        if (
+            version is None
+            or version.skill_id != skill_id
+            or version.checksum != checksum
+        ):
+            raise WorkspaceFileError(
+                "Skill version is unavailable for this Runner",
+                code="skill_version_unavailable",
+                category="authorization",
+            )
+        try:
+            await asyncio.to_thread(
+                SkillCacheService().ensure,
+                skill_id=skill_id,
+                checksum=checksum,
+                package_uri=version.package_uri,
+            )
+        except (SkillCacheError, SkillStorageError) as error:
+            raise WorkspaceFileError(
+                str(error), code="skill_package_unavailable", category="provider",
+            ) from error
         skill_base = Path(settings.shared_skill_root).resolve()
         root = _inside(skill_base, skill_base / skill_id / checksum)
         if root.is_symlink():

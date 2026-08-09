@@ -20,7 +20,7 @@ type ToolDefinition = {
 
 type ToolConnection = {
   id: string; connection_key: string; display_name: string
-  connection_type: 'bocha' | 'brave' | 'mcp' | 'browser'
+  connection_type: 'bocha' | 'brave' | 'bailian' | 'mcp' | 'browser'
   auth_type: 'none' | 'bearer' | 'x_api_key'; status: string; enabled: boolean
   is_primary: boolean; endpoint: string; secret_configured: boolean
   secret_fingerprint: string | null; config: Record<string, unknown>
@@ -117,7 +117,7 @@ export default function ToolsTab() {
       { title: '健康', render: (_, item: ToolConnection) => <Tag color={item.health.status === 'healthy' ? 'green' : item.health.status === 'unhealthy' ? 'red' : 'default'}>{item.health.status}{item.health.latency_ms != null ? ` · ${item.health.latency_ms}ms` : ''}</Tag> },
       { title: '操作', render: (_, item: ToolConnection) => <Space>
         <Button size="small" icon={<EditOutlined />} onClick={() => openConnection(item)}>配置</Button>
-        <Button size="small" icon={<ApiOutlined />} onClick={async () => {
+        <Button size="small" icon={<ApiOutlined />} aria-label="真实测试" onClick={async () => {
           const result = await client.post(`/tool-connections/${item.id}/connection-test`).then(r => r.data)
           message[result.ok ? 'success' : 'error'](result.ok ? `真实连接成功 · ${result.latency_ms}ms` : result.provider_error_code)
           queryClient.invalidateQueries({ queryKey: ['tool-connections'] })
@@ -133,14 +133,14 @@ export default function ToolsTab() {
 
   const toolTab = <>
     <div className="mb-3 flex justify-end"><Button icon={<SyncOutlined />} loading={reconcile.isPending} onClick={() => reconcile.mutate()}>发布代码 ToolVersion</Button></div>
-    <Table rowKey="id" loading={tools.isLoading} dataSource={tools.data || []} columns={[
+    <Table rowKey="id" loading={tools.isLoading} dataSource={tools.data || []} pagination={false} columns={[
       { title: 'Tool', render: (_, item: ToolDefinition) => <><div>{item.display_name_zh || item.display_name}</div><code className="text-xs">{item.tool_key}</code></> },
       { title: '来源', render: (_, item: ToolDefinition) => <Tag color={item.origin === 'mcp' ? 'purple' : 'blue'}>{item.namespace}</Tag> },
       { title: '版本', render: (_, item: ToolDefinition) => <span>v{item.version_no} <code>{item.content_hash?.slice(0, 8)}</code></span> },
       { title: '执行/风险', render: (_, item: ToolDefinition) => <Space direction="vertical" size={0}><Tag>{item.execution_mode}</Tag><Tag>{item.side_effect}</Tag></Space> },
       { title: '确认', dataIndex: 'confirmation_policy', render: value => <Tag color={value === 'per_call' ? 'orange' : value === 'session_grant' ? 'gold' : 'default'}>{value}</Tag> },
       { title: '状态', dataIndex: 'enabled', render: value => <Tag color={value ? 'green' : 'default'}>{value ? '已启用' : '待审核/停用'}</Tag> },
-      { title: '操作', render: (_, item: ToolDefinition) => <Space><Button size="small" onClick={() => openTool(item)}>治理</Button><Button size="small" onClick={() => setDetails(item)}>合同</Button></Space> },
+      { title: '操作', render: (_, item: ToolDefinition) => <Space><Button size="small" onClick={() => openTool(item)}>治理</Button><Button size="small" aria-label={`查看 ${item.tool_key} 合同`} onClick={() => setDetails(item)}>合同</Button></Space> },
     ]} />
   </>
 
@@ -175,15 +175,26 @@ export default function ToolsTab() {
       <Form form={connectionForm} layout="vertical" onValuesChange={changed => {
         if (connection === 'new' && changed.connection_type) {
           const type = changed.connection_type
+          const searchProvider = ['bocha', 'brave', 'bailian'].includes(type)
+          const providerDefaults: Record<string, { endpoint: string; config: string }> = {
+            bocha: { endpoint: 'https://api.bochaai.com/v1/web-search', config: '{}' },
+            brave: { endpoint: 'https://api.search.brave.com/res/v1/web/search', config: '{}' },
+            bailian: {
+              endpoint: 'https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation',
+              config: JSON.stringify({ model: 'qwen-plus', search_strategy: 'turbo' }, null, 2),
+            },
+            mcp: { endpoint: '', config: '{}' },
+          }
           connectionForm.setFieldsValue({
-            auth_type: type === 'bocha' ? 'bearer' : type === 'brave' ? 'x_api_key' : 'none',
-            is_primary: type === 'bocha' || type === 'brave' ? connectionForm.getFieldValue('is_primary') : false,
+            auth_type: type === 'brave' ? 'x_api_key' : type === 'bocha' || type === 'bailian' ? 'bearer' : 'none',
+            is_primary: searchProvider ? connectionForm.getFieldValue('is_primary') : false,
+            ...(providerDefaults[type] || {}),
           })
         }
       }} onFinish={values => connection && saveConnection.mutate({ current: connection, values })}>
-        {connection === 'new' && <Form.Item name="connection_key" label="稳定 Key" rules={[{ required: true }]}><Input placeholder="search.brave.primary" /></Form.Item>}
+        {connection === 'new' && <Form.Item name="connection_key" label="稳定 Key" rules={[{ required: true }]}><Input placeholder="search.bailian.primary" /></Form.Item>}
         <Form.Item name="display_name" label="显示名" rules={[{ required: true }]}><Input /></Form.Item>
-        {connection === 'new' && <Form.Item name="connection_type" label="类型"><Select options={['bocha', 'brave', 'mcp'].map(value => ({ value }))} /></Form.Item>}
+        {connection === 'new' && <Form.Item name="connection_type" label="类型"><Select options={['bocha', 'brave', 'bailian', 'mcp'].map(value => ({ value }))} /></Form.Item>}
         <Form.Item name="endpoint" label="HTTPS Endpoint" rules={[{ required: true }]}><Input /></Form.Item>
         <Form.Item name="auth_type" label="认证"><Select options={['none', 'bearer', 'x_api_key'].map(value => ({ value }))} /></Form.Item>
         <Form.Item name="api_key" label="API Key（write-only）" extra={(connection as ToolConnection)?.secret_configured ? '留空保留当前加密 Secret；输入新值会创建新 revision 并轮换。' : undefined}><Input.Password autoComplete="new-password" /></Form.Item>

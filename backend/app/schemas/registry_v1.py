@@ -124,7 +124,7 @@ class PlatformToolPatch(BaseModel):
 class ToolConnectionUpsert(BaseModel):
     connection_key: str = Field(min_length=1, max_length=191, pattern=r"^[a-z][a-z0-9_.-]*$")
     display_name: str = Field(min_length=1, max_length=200)
-    connection_type: Literal["bocha", "brave", "mcp", "browser"]
+    connection_type: Literal["bocha", "brave", "bailian", "mcp", "browser"]
     endpoint: str
     auth_type: Literal["none", "bearer", "x_api_key"] = "none"
     api_key: str | None = Field(

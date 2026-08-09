@@ -13,7 +13,7 @@
 
 1. 固定待发布 Commit SHA，确认工作树为空，并记录 `git rev-parse HEAD`。
 2. 执行全部 Unit、Frontend frozen-lockfile build、生产 Frontend image build和全新 MySQL 空库 Migration；纯 Schema、安全函数和数据库约束测试不得伪造 Agent 决策结果。
-3. 通过管理员 write-only 接口配置真实主模型、Bocha、Brave 和公共 MCP，执行
+3. 通过管理员 write-only 接口配置真实主模型、显式选择的 Search Provider（Bailian 或 Bocha/Brave）和公共 MCP，执行
    `deploy/uat/run-acceptance.sh` 的真实模型、真实 Provider、真实 Chromium 和真实 MCP 验收；不存在 Mock fallback。
 4. 验证 `alembic heads` 只有一个 Head，并确认重置过程没有生成或读取备份。
 5. 检查镜像、服务清单、日志、JUnit、Trace 与数据库不存在 API Key；只允许保存 AES-GCM 密文、Secret fingerprint 与 configured 状态。

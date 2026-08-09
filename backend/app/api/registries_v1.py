@@ -475,6 +475,7 @@ async def test_platform_tool_connection(
             _, provider = await web_search(
                 provider=connection.connection_type, endpoint=revision_row.endpoint,
                 api_key=secret, query="OpenAI", count=1, freshness=None, country=None,
+                config=revision_row.config,
             )
             return {"ok": True, "provider": provider["name"], "latency_ms": provider["latency_ms"], "provider_error_code": None}
         except (ToolConnectionError, WebToolError) as error:
@@ -614,13 +615,22 @@ async def test_tool_connection(
     provider = connection.connection_type
     details = {}
     try:
-        if connection.connection_type in {"bocha", "brave"}:
+        if connection.connection_type in {"bocha", "brave", "bailian"}:
             _, _, secret = await resolve_connection_revision(db, revision_id=revision_row.id)
             items, provider_info = await web_search(
                 provider=connection.connection_type, endpoint=revision_row.endpoint,
                 api_key=secret, query="OpenAI", count=1, freshness=None, country=None,
+                config=revision_row.config,
             )
-            details = {"result_count": len(items), "request_id": provider_info.get("request_id")}
+            details = {
+                "result_count": len(items),
+                "request_id": provider_info.get("request_id"),
+                **({
+                    "model": provider_info.get("model"),
+                    "search_strategy": provider_info.get("search_strategy"),
+                    "usage": provider_info.get("usage", {}),
+                } if connection.connection_type == "bailian" else {}),
+            }
         elif connection.connection_type == "mcp":
             server, tools = await mcp_initialize_and_list(db, connection=connection, revision=revision_row)
             details = {"server": server, "tool_count": len(tools)}

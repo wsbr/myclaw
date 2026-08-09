@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from urllib.parse import urlsplit
 
 from sqlalchemy import select, update
@@ -55,6 +56,22 @@ def _assert_public_config(value: object, *, path: str = "config") -> None:
             _assert_public_config(item, path=f"{path}[{index}]")
 
 
+def _validate_connection_config(connection_type: str, config: dict) -> None:
+    if connection_type != "bailian":
+        return
+    unknown = set(config) - {"model", "search_strategy"}
+    if unknown:
+        raise ToolConnectionError(
+            "Bailian config contains unsupported fields: " + ", ".join(sorted(unknown))
+        )
+    model = config.get("model", "qwen-plus")
+    if not isinstance(model, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,190}", model):
+        raise ToolConnectionError("Bailian config.model is invalid")
+    strategy = config.get("search_strategy", "turbo")
+    if strategy not in {"turbo", "max"}:
+        raise ToolConnectionError("Bailian config.search_strategy must be turbo or max")
+
+
 async def _assert_public_endpoint(endpoint: str, *, connection_type: str) -> None:
     if connection_type == "browser":
         return
@@ -91,25 +108,30 @@ async def create_or_update_connection(
 ) -> tuple[ToolConnection, ToolConnectionRevision, bool]:
     endpoint = validate_connection_endpoint(endpoint, connection_type=connection_type)
     _assert_public_config(config)
+    _validate_connection_config(connection_type, config)
     await _assert_public_endpoint(endpoint, connection_type=connection_type)
-    required_auth = {"bocha": "bearer", "brave": "x_api_key", "browser": "none"}
+    required_auth = {
+        "bocha": "bearer", "brave": "x_api_key",
+        "bailian": "bearer", "browser": "none",
+    }
     if connection_type in required_auth and auth_type != required_auth[connection_type]:
         raise ToolConnectionError(
             f"{connection_type} connections require auth_type={required_auth[connection_type]}"
         )
-    if is_primary and connection_type not in {"bocha", "brave"}:
+    search_providers = {"bocha", "brave", "bailian"}
+    if is_primary and connection_type not in search_providers:
         raise ToolConnectionError("only a Search Provider connection may be primary")
     if auth_type == "none" and api_key:
         raise ToolConnectionError("anonymous connections must not include api_key")
     if auth_type != "none" and connection is None and not api_key:
         raise ToolConnectionError("api_key is required for an authenticated connection")
-    if is_primary and connection_type in {"bocha", "brave"}:
+    if is_primary and connection_type in search_providers:
         # Serialize primary selection with all Search connection updates. This
         # keeps the provider switch atomic even when two administrators submit
         # conflicting requests at the same time.
         list(await db.scalars(
             select(ToolConnection.id).where(
-                ToolConnection.connection_type.in_(["bocha", "brave"]),
+                ToolConnection.connection_type.in_(search_providers),
             ).with_for_update()
         ))
     if connection is None:
@@ -175,10 +197,10 @@ async def create_or_update_connection(
     connection.health_latency_ms = None
     connection.health_error_code = None
     connection.version += 1
-    if is_primary and connection_type in {"bocha", "brave"}:
+    if is_primary and connection_type in search_providers:
         await db.execute(update(ToolConnection).where(
             ToolConnection.id != connection.id,
-            ToolConnection.connection_type.in_(["bocha", "brave"]),
+            ToolConnection.connection_type.in_(search_providers),
             ToolConnection.is_primary.is_(True),
         ).values(is_primary=False, version=ToolConnection.version + 1))
     await db.flush()
@@ -193,7 +215,7 @@ async def resolve_connection_revision(
         connection = await db.get(ToolConnection, revision.connection_id) if revision else None
     elif primary_search:
         connection = await db.scalar(select(ToolConnection).where(
-            ToolConnection.connection_type.in_(["bocha", "brave"]),
+            ToolConnection.connection_type.in_(["bocha", "brave", "bailian"]),
             ToolConnection.is_primary.is_(True), ToolConnection.status == "active",
         ))
         revision = await db.get(ToolConnectionRevision, connection.current_revision_id) if connection else None

@@ -18,6 +18,7 @@ from app.models.runtime_v1 import (
 )
 from app.models.verification_v1 import LateResultObservation, RunProgressMark
 from app.persistence.reliable_writes import ExecutionEventWriter
+from app.services.run_followup_service import enqueue_run_terminal_followups
 
 
 TERMINAL_RUN_STATUSES = {"completed", "cancelled", "failed"}
@@ -165,17 +166,19 @@ async def assert_turn_budget(db, run_id: str) -> RunBudgetState:
 
 
 async def assert_post_provider_budget(db, run_id: str) -> RunBudgetState:
-    """Reject overage observed only after a provider response arrived.
+    """Reject non-token overage observed after a provider response arrived.
 
-    The response remains an immutable Attempt fact, but no Tool/Agent side
-    effect may be dispatched from a Turn that crossed the hard token/time cap.
+    Token usage is authoritative only after the provider returns.  A Turn that
+    started below the token limit is therefore allowed to finish and consume
+    its complete result even when that result crosses the limit.  The next
+    provider call is rejected by ``assert_turn_budget`` using the persisted
+    actual usage.  Other provider/time limits retain their immediate guard.
     """
 
     state = await load_run_budget_state(db, run_id)
     for dimension, limit_key in (
         ("provider_attempts", "max_provider_attempts"),
         ("transport_retries", "max_transport_retries"),
-        ("tokens", "max_tokens"),
         ("active_seconds", "max_active_seconds"),
     ):
         if float(state.usage[dimension]) > float(state.limits[limit_key]):
@@ -411,7 +414,7 @@ async def expire_one_run_deadline(db, *, actor_id: str) -> bool:
     run.terminal_reason = "run_deadline_exceeded"
     run.completed_at = now
     run.version += 1
-    await ExecutionEventWriter(db).append(
+    failed = await ExecutionEventWriter(db).append(
         session_id=run.session_id, run_id=run.id,
         event_type="run.failed",
         event_dedupe_key=f"run:{run.id}:deadline:{run.deadline_at.isoformat()}",
@@ -426,5 +429,15 @@ async def expire_one_run_deadline(db, *, actor_id: str) -> bool:
             ),
         },
         correlation_id=run.id,
+    )
+    followup_runner = await db.scalar(select(DurableRunner).where(
+        DurableRunner.run_id == run.id,
+        *(
+            (DurableRunner.work_item_id == run.root_work_item_id,)
+            if run.root_work_item_id else ()
+        ),
+    ).order_by(DurableRunner.created_at.desc(), DurableRunner.id.desc()).limit(1))
+    await enqueue_run_terminal_followups(
+        db, run=run, runner=followup_runner, completion_event=failed,
     )
     return True

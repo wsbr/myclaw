@@ -59,8 +59,20 @@ done
 : "${MYCLAW_REAL_LLM_API_KEY:?real model key is required for UAT}"
 : "${MYCLAW_REAL_LLM_ENDPOINT:?real model endpoint is required for UAT}"
 : "${MYCLAW_REAL_LLM_MODEL:?real model id is required for UAT}"
-: "${MYCLAW_BOCHA_API_KEY:?Bocha API key is required for UAT}"
-: "${MYCLAW_BRAVE_API_KEY:?Brave API key is required for UAT}"
+export MYCLAW_REAL_SEARCH_PROVIDER="${MYCLAW_REAL_SEARCH_PROVIDER:-bocha_brave}"
+case "${MYCLAW_REAL_SEARCH_PROVIDER}" in
+  bailian)
+    : "${MYCLAW_BAILIAN_API_KEY:?Bailian API key is required for UAT}"
+    ;;
+  bocha_brave)
+    : "${MYCLAW_BOCHA_API_KEY:?Bocha API key is required for UAT}"
+    : "${MYCLAW_BRAVE_API_KEY:?Brave API key is required for UAT}"
+    ;;
+  *)
+    echo "MYCLAW_REAL_SEARCH_PROVIDER must be bailian or bocha_brave" >&2
+    exit 2
+    ;;
+esac
 export MYCLAW_FULLSTACK_API_URL="http://127.0.0.1:${UAT_API_PORT}"
 export MYCLAW_FULLSTACK_UI_URL="http://127.0.0.1:${UAT_UI_PORT}"
 export MYCLAW_TEST_ADMIN_EMAIL="${INIT_ADMIN_EMAIL}"

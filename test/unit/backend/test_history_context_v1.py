@@ -10,7 +10,7 @@ from app.models.common import utcnow, uuid7
 from app.models.foundation import OutboxCommand, PlatformAccount, UserIdentity, UserSession
 from app.models.group_v1 import GroupMembership, GroupSession
 from app.models.history_v1 import HistorySummary
-from app.models.registry import PolicyDefinition, RegisteredModel
+from app.models.registry import PolicyDefinition, PolicyVersion, RegisteredModel
 from app.models.runtime_v1 import DurableRunner, Message, Run, WorkItem
 from app.services.history_service import select_history
 
@@ -78,11 +78,21 @@ async def test_group_history_is_membership_scoped_and_summary_is_namespaced():
         policy = PolicyDefinition(id=uuid7(), policy_key="history.summary_recent", policy_type="history",
             name="Summary", description="Summary", implementation_ref="x", implementation_version="1",
             default_parameters={}, parameter_version=3, enabled=True)
-        db.add(policy)
+        policy_version = PolicyVersion(
+            id=uuid7(), policy_definition_id=policy.id, version_no=3,
+            implementation_ref="x:v3", parameters={
+                "token_budget": 100, "max_messages": 80,
+                "summary_trigger_tokens": 1, "summary_recent_token_budget": 3,
+            },
+            content_hash="3" * 64, status="published", published_at=utcnow(),
+        )
+        policy.current_version_id = policy_version.id
+        db.add_all([policy, policy_version])
         await db.flush()
         selection = await select_history(db, run=run, runner=runner, policy=policy,
             parameters={"token_budget": 100, "max_messages": 80, "summary_trigger_tokens": 1,
-                        "summary_recent_token_budget": 3}, model_id=model_id)
+                        "summary_recent_token_budget": 3}, model_id=model_id,
+            policy_version=policy_version, model_version_id="summary-model-version")
         # Until the asynchronous summary is ready, summary_recent safely
         # degrades to history.recent within the same membership projection.
         assert selection.manifest["selected_message_ids"] == [
@@ -99,6 +109,13 @@ async def test_group_history_is_membership_scoped_and_summary_is_namespaced():
         assert summary.group_session_id == group_id
         assert summary.group_membership_id == node_1
         assert summary.through_message_id == own_result.id
+        assert command.payload_ref == {
+            "history_summary_id": summary.id,
+            "policy_definition_id": policy.id,
+            "policy_version_id": policy_version.id,
+            "model_id": model_id,
+            "model_version_id": "summary-model-version",
+        }
     await engine.dispose()
 
 

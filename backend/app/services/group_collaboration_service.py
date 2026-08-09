@@ -329,6 +329,10 @@ async def _create_native_group_run_graph(
         sequence_no=await _next_group_message_sequence(db, group.id),
     )
     db.add(message)
+    runner.input_snapshot = {
+        **dict(runner.input_snapshot or {}),
+        "message_id": message.id,
+    }
     await db.flush()
 
     events = ExecutionEventWriter(db)
@@ -531,6 +535,10 @@ async def create_user_group_message(
         sequence_no=await _next_group_message_sequence(db, group.id),
     )
     db.add(message)
+    runner.input_snapshot = {
+        **dict(runner.input_snapshot or {}),
+        "message_id": message.id,
+    }
     summary_requests = list(await db.scalars(select(GroupSummaryRequest).where(
         GroupSummaryRequest.group_run_id == group_run.id,
         GroupSummaryRequest.status.in_(("queued", "running")),

@@ -25,10 +25,12 @@ redis==5.2.1
 # LLM SDKs
 anthropic==0.40.0
 openai==1.57.4
+tiktoken==0.12.0
 
 # HTTP clients
 httpx==0.28.1
 httpx-sse==0.4.0
+boto3==1.40.75
 
 # Platform tools
 mcp==2.0.0
@@ -42,6 +44,7 @@ cryptography==44.0.0
 # Utils
 python-dotenv==1.0.1
 PyMySQL==1.1.1
+PyYAML==6.0.3
 
 # OpenTelemetry (optional OTLP export is enabled by OTEL_* environment variables)
 opentelemetry-sdk==1.44.0

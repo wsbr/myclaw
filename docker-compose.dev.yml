@@ -21,6 +21,14 @@ services:
     volumes:
       - ./backend:/app
 
+  skill-sync-worker:
+    volumes:
+      - ./backend:/app
+
+  maintenance-worker:
+    volumes:
+      - ./backend:/app
+
   frontend:
     image: node:20-alpine
     working_dir: /app

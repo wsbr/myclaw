@@ -38,6 +38,7 @@ class WebSearchTool(BaseTool):
                 provider=connection.connection_type, endpoint=revision.endpoint,
                 api_key=secret, query=args["query"], count=int(args.get("count", 10)),
                 freshness=args.get("freshness"), country=args.get("country"),
+                config=revision.config,
             )
         except (ToolConnectionError, WebToolError) as error:
             return ToolResult(

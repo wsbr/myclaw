@@ -45,8 +45,8 @@ Collector 健康端口默认为 `http://127.0.0.1:13135/`。
 
 不要把 CI 的 `test/docker-compose.test.yml` 用作产品验收环境。CI 的 MySQL 使用 `tmpfs`，停止容器后数据即消失。UAT 的 `myclaw-uat-mysql-data`、`myclaw-uat-redis-data` 和 `myclaw-uat-app-data` 是 Compose 外部卷，即使误执行 `down -v` 也不会由 Compose 删除。
 
-Tool v3 是一次性破坏性重构，只允许使用 `deploy/uat/destructive-reset.sh` 清空这三个精确卷。脚本会先核对所有挂载容器的 Compose project、working directory 和 config file，拒绝非本仓库 MyClaw 资源；它不会创建备份，并要求显式设置 `MYCLAW_CONFIRM_DESTRUCTIVE_RESET=ERASE_MYCLAW_UAT_WITHOUT_BACKUP`。清空后脚本运行新 Alembic head、重建 bootstrap 管理员；模型、Bocha、Brave 与 MCP 密钥必须由管理员重新通过 write-only 字段提交。
+Tool v3 是一次性破坏性重构，只允许使用 `deploy/uat/destructive-reset.sh` 清空这三个精确卷。脚本会先核对所有挂载容器的 Compose project、working directory 和 config file，拒绝非本仓库 MyClaw 资源；它不会创建备份，并要求显式设置 `MYCLAW_CONFIRM_DESTRUCTIVE_RESET=ERASE_MYCLAW_UAT_WITHOUT_BACKUP`。清空后脚本运行新 Alembic head、重建 bootstrap 管理员；模型、所选 Search Provider 与 MCP 密钥必须由管理员重新通过 write-only 字段提交。
 
-重置完成后，对同一套 `myclaw-uat` 服务执行 `deploy/uat/run-acceptance.sh`。脚本拒绝脏工作树或不匹配的固定 Commit，并要求真实主模型、Bocha、Brave、公共 OpenAI Docs MCP 与隔离 Chromium 全部可用；发布证据写入被 Git 忽略的 `deploy/uat/evidence/<commit>/`。
+重置完成后，对同一套 `myclaw-uat` 服务执行 `deploy/uat/run-acceptance.sh`。脚本拒绝脏工作树或不匹配的固定 Commit，并要求真实主模型、显式选择的 Bailian 或 Bocha/Brave Search 模式、公共 OpenAI Docs MCP 与隔离 Chromium 全部可用；发布证据写入被 Git 忽略的 `deploy/uat/evidence/<commit>/`。
 
 默认只绑定本机回环地址。如需让同一局域网的另一台设备访问，必须同时调整 `UAT_BIND_HOST`、`UAT_API_PUBLIC_URL` 与 `CORS_ORIGINS`，然后重建 Frontend，不能只开放端口。

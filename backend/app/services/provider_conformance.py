@@ -63,8 +63,8 @@ class _ZeroPayloadOnce(BaseLLM):
         async for chunk in self.downstream.stream(messages, tools, params):
             yield chunk
 
-    async def count_tokens(self, messages):
-        return await self.downstream.count_tokens(messages)
+    async def count_tokens(self, messages, tools=None, params=None):
+        return await self.downstream.count_tokens(messages, tools, params)
 
 
 class _PayloadThenError(BaseLLM):
@@ -81,7 +81,7 @@ class _PayloadThenError(BaseLLM):
         yield LLMChunk(type="transport_payload")
         raise RuntimeError("transport failed after provider payload")
 
-    async def count_tokens(self, messages):
+    async def count_tokens(self, messages, tools=None, params=None):
         return 0
 
 

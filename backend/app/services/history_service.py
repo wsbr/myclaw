@@ -11,7 +11,7 @@ from sqlalchemy import select
 from app.models.common import uuid7
 from app.models.foundation import ExecutionEvent, UserSession
 from app.models.history_v1 import HistorySummary
-from app.models.registry import PolicyDefinition
+from app.models.registry import PolicyDefinition, PolicyVersion
 from app.models.runtime_v1 import DurableRunner, Message, Run
 from app.persistence.reliable_writes import OutboxWriter
 from app.services.visible_events import VisibleEventProjection
@@ -111,12 +111,18 @@ def _scope_predicates(scope_type: str, group_session_id: str | None, group_membe
 async def select_history(
     db, *, run: Run, runner: DurableRunner, policy: PolicyDefinition | None,
     parameters: dict | None, model_id: str,
+    policy_version: PolicyVersion | None = None,
+    exclude_message_ids: set[str] | None = None,
+    model_version_id: str | None = None,
 ) -> HistorySelection:
     policy_key = policy.policy_key if policy and policy.enabled else "history.recent"
     merged = {**DEFAULT_HISTORY_PARAMETERS, **dict(parameters or {})}
     token_budget = max(1, min(int(merged["token_budget"]), 100_000))
     max_messages = max(1, min(int(merged["max_messages"]), 200))
     visible = await VisibleRecordRepository(db).messages_for_runner(run=run, runner=runner)
+    excluded = set(exclude_message_ids or ())
+    if excluded:
+        visible = [message for message in visible if message.id not in excluded]
     scope_type, group_session_id, group_membership_id = _scope_values(run, runner)
     ready: HistorySummary | None = None
     prefix_count = 0
@@ -176,7 +182,10 @@ async def select_history(
                         group_session_id=group_session_id, group_membership_id=group_membership_id,
                         through_message_id=through.id, through_event_sequence=event_sequence,
                         source_hash=source_hash(prefix), status="pending", model_id=model_id,
-                        parameter_version=policy.parameter_version if policy else 1,
+                        parameter_version=(
+                            int(policy_version.version_no)
+                            if policy_version else (policy.parameter_version if policy else 1)
+                        ),
                     )
                     db.add(pending)
                     await db.flush()
@@ -185,7 +194,13 @@ async def select_history(
                         aggregate_type="history_summary", aggregate_id=pending.id,
                         partition_key=run.session_id,
                         dedupe_key=f"history_summary:{pending.id}",
-                        payload_ref={"history_summary_id": pending.id},
+                        payload_ref={
+                            "history_summary_id": pending.id,
+                            "policy_definition_id": policy.id if policy else None,
+                            "policy_version_id": policy_version.id if policy_version else None,
+                            "model_id": model_id,
+                            "model_version_id": model_version_id,
+                        },
                     )
 
     return HistorySelection(
@@ -193,7 +208,10 @@ async def select_history(
         summary=ready.summary if ready else None,
         manifest={
             "policy_key": policy_key,
-            "policy_version": policy.parameter_version if policy else None,
+            "policy_definition_id": policy.id if policy else None,
+            "policy_version_id": policy_version.id if policy_version else None,
+            "policy_version_no": policy_version.version_no if policy_version else None,
+            "policy_content_hash": policy_version.content_hash if policy_version else None,
             "parameters": merged,
             "projection": {
                 "scope_type": scope_type,
@@ -201,6 +219,7 @@ async def select_history(
                 "group_membership_id": group_membership_id,
             },
             "selected_message_ids": [item.id for item in selected],
+            "excluded_message_ids": sorted(excluded),
             "summary_id": ready.id if ready else None,
             "trimmed_count": trimmed_count,
             "token_estimate": selected_tokens + (estimate_tokens(ready.summary) if ready and ready.summary else 0),

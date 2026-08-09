@@ -10,7 +10,7 @@ from sqlalchemy import select
 
 from app.models.artifact_v1 import Artifact
 from app.models.foundation import UserSession
-from app.models.registry import PolicyDefinition
+from app.models.registry import PolicyDefinition, PolicyVersion
 from app.models.runtime_v1 import DurableRunner, Run, RunnerCheckpoint, WorkItem
 from app.services.history_service import estimate_tokens
 
@@ -26,7 +26,7 @@ class ContextSelection:
 
 async def assemble_standard_context(
     db, *, run: Run, runner: DurableRunner, policy: PolicyDefinition | None,
-    parameters: dict | None,
+    parameters: dict | None, policy_version: PolicyVersion | None = None,
 ) -> ContextSelection:
     policy_key = policy.policy_key if policy and policy.enabled else "context.standard"
     if policy_key != "context.standard":
@@ -85,7 +85,10 @@ async def assemble_standard_context(
         raise RuntimeError("prompt_too_large: context.standard exceeds its token budget")
     return ContextSelection(content=content, manifest={
         "policy_key": policy_key,
-        "policy_version": policy.parameter_version if policy else None,
+        "policy_definition_id": policy.id if policy else None,
+        "policy_version_id": policy_version.id if policy_version else None,
+        "policy_version_no": policy_version.version_no if policy_version else None,
+        "policy_content_hash": policy_version.content_hash if policy_version else None,
         "parameters": merged,
         "source_ids": {
             "session_id": session.id,

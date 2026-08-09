@@ -116,14 +116,17 @@ def test_real_browser_admin_chat_browser_plan_and_inspector(
     # Provider configuration, encrypted-credential state and a genuine request are visible in UI.
     page.goto(f"{ui_url}/tools", wait_until="domcontentloaded")
     expect(page.get_by_role("heading", name="Tool 管理", exact=True)).to_be_visible()
-    for connection in (assembled_world["bocha"], assembled_world["brave"], assembled_world["mcp"]):
+    for connection in (*assembled_world["search_connections"], assembled_world["mcp"]):
         expect(page.get_by_text(connection["connection_key"], exact=True)).to_be_visible()
-    bocha_row = page.locator("tr").filter(has_text=assembled_world["bocha"]["connection_key"])
-    bocha_row.get_by_role("button", name="真实测试", exact=True).click()
+    search_row = page.locator("tr").filter(
+        has_text=assembled_world["search_connections"][0]["connection_key"]
+    )
+    search_row.get_by_role("button", name="真实测试", exact=True).click()
     expect(page.get_by_text(re.compile(r"真实连接成功 · \d+ms"))).to_be_visible(timeout=60_000)
     page.get_by_role("tab", name="Tool Catalog", exact=True).click()
-    fetch_row = page.locator("tr").filter(has_text="web_fetch")
-    fetch_row.get_by_role("button", name="合同", exact=True).click()
+    fetch_contract = page.get_by_role("button", name="查看 web_fetch 合同", exact=True)
+    expect(fetch_contract).to_be_visible(timeout=30_000)
+    fetch_contract.click()
     expect(page.get_by_text("Output Schema", exact=True)).to_be_visible()
     tool_shot = _screenshot(page, evidence_root, "02-tool-contract")
     page.get_by_role("button", name="Close", exact=True).click()
@@ -158,7 +161,9 @@ def test_real_browser_admin_chat_browser_plan_and_inspector(
     page.get_by_role("tab", name="运行", exact=True).click()
     browser_prompt = (
         "在隔离浏览器打开 https://httpbin.org/forms/post，观察后在 custname 输入 Real Browser UAT；"
-        "提交表单前等待我的精确确认，确认后提交并保存页面截图作为证据。"
+        "然后必须使用最新 browser_observe 中名为 Submit order 的 element_ref 发起 "
+        "browser_interact click。不要用聊天文字询问确认；让平台为这个精确 click 显示批准操作，"
+        "在我从页面批准后继续提交，并保存提交结果页面截图作为证据。"
     )
     page.get_by_role("textbox", name="消息输入", exact=True).fill(browser_prompt)
     page.get_by_role("button", name="发送", exact=True).click()
@@ -172,6 +177,17 @@ def test_real_browser_admin_chat_browser_plan_and_inspector(
     browser_calls = api.invocations(browser_run_id)
     browser_keys = {item["tool_key"] for item in browser_calls}
     assert {"browser_navigate", "browser_observe", "browser_interact", "browser_screenshot"} <= browser_keys
+    submitted = [
+        item for item in browser_calls
+        if item["tool_key"] == "browser_interact"
+        and item["status"] == "succeeded"
+        and item["arguments"].get("action") == "click"
+    ]
+    assert submitted, browser_calls
+    assert any(
+        str((item["result"].get("data") or {}).get("url") or "").endswith("/post")
+        for item in submitted
+    ), submitted
     assert any(item["result"]["artifact_ids"] for item in browser_calls if item["tool_key"] == "browser_screenshot")
     page.get_by_role("tab", name=re.compile(r"^Tool\s+\d+")).click()
     expect(page.get_by_text("browser_screenshot", exact=True)).to_be_visible(timeout=15_000)

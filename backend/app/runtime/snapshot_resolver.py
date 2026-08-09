@@ -18,10 +18,15 @@ from app.models.registry import (
     ToolGovernance, ToolVersion,
 )
 from app.models.runtime_v1 import (
-    BrowserSessionState, CapabilitySnapshot, DurableRunner, RunnerToolSnapshot,
+    BrowserSessionState, CapabilitySnapshot, DurableRunner, RunnerSkillSnapshot,
+    RunnerToolSnapshot,
 )
 from app.runtime.coordination_tools import RUNTIME_COORDINATION_DEFINITIONS
 from app.services.agent_directory_service import discover_agent_cards
+from app.services.runtime_policy_service import (
+    FrozenRuntimePolicy,
+    resolve_frozen_runtime_policies,
+)
 
 
 class SnapshotResolutionError(RuntimeError):
@@ -35,6 +40,7 @@ class ResolvedRuntimeSnapshot:
     capability: CapabilitySnapshot
     tool_definitions: tuple[dict[str, Any], ...]
     skill_versions: tuple[SkillVersion, ...]
+    policies: dict[str, FrozenRuntimePolicy]
 
 
 def _hash(value: object) -> str:
@@ -82,6 +88,10 @@ class SnapshotResolver:
         model_version = await db.get(ModelVersion, assembly.model_version_id)
         if model_version is None:
             raise SnapshotResolutionError("AgentVersion ModelVersion is missing")
+        try:
+            policies = await resolve_frozen_runtime_policies(db, assembly)
+        except RuntimeError as error:
+            raise SnapshotResolutionError(str(error)) from error
 
         frozen_tools = list(await db.scalars(
             select(AgentVersionTool)
@@ -214,8 +224,16 @@ class SnapshotResolver:
         skill_versions: list[SkillVersion] = []
         for frozen in frozen_skills:
             version = await db.get(SkillVersion, frozen.skill_version_id)
-            if version is None or version.checksum != frozen.checksum:
+            if (
+                version is None
+                or version.skill_id != frozen.skill_id
+                or version.checksum != frozen.checksum
+            ):
                 raise SnapshotResolutionError("frozen SkillVersion checksum mismatch")
+            if version.status not in {"published", "deprecated"}:
+                raise SnapshotResolutionError(
+                    f"frozen SkillVersion is not executable: {version.status}"
+                )
             skill_versions.append(version)
 
         tool_schema_bundle_hash = _hash([{
@@ -293,6 +311,28 @@ class SnapshotResolver:
                 frozen.secret_fingerprint,
             ) != expected:
                 raise SnapshotResolutionError("Runner ToolVersion snapshot changed during execution")
+        for sort_order, version in enumerate(skill_versions):
+            identity = {"runner_id": runner.id, "skill_id": version.skill_id}
+            path_uri = f"skill://{version.skill_id}/{version.checksum}/"
+            frozen = await db.get(RunnerSkillSnapshot, identity)
+            expected = (version.id, version.checksum, path_uri, sort_order)
+            if frozen is None:
+                db.add(RunnerSkillSnapshot(
+                    **identity,
+                    skill_version_id=version.id,
+                    checksum=version.checksum,
+                    path_uri=path_uri,
+                    sort_order=sort_order,
+                ))
+            elif (
+                frozen.skill_version_id,
+                frozen.checksum,
+                frozen.path_uri,
+                frozen.sort_order,
+            ) != expected:
+                raise SnapshotResolutionError(
+                    "Runner SkillVersion snapshot changed during execution"
+                )
         await db.flush()
         runner.capability_snapshot_id = capability.id
         runner.assembly_snapshot = {
@@ -311,4 +351,5 @@ class SnapshotResolver:
         return ResolvedRuntimeSnapshot(
             assembly=assembly, model_version=model_version, capability=capability,
             tool_definitions=tuple(definitions), skill_versions=tuple(skill_versions),
+            policies=policies,
         )

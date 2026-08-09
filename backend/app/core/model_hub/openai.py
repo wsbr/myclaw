@@ -234,5 +234,36 @@ class OpenAILLM(BaseLLM):
             provider_request_id=provider_request_id,
         )
 
-    async def count_tokens(self, messages: list[dict]) -> int:
-        return sum(len(str(m.get("content", ""))) // 4 for m in messages)
+    async def count_tokens(
+        self, messages: list[dict], tools: list[dict] | None = None,
+        params: dict | None = None,
+    ) -> int:
+        """Count the complete request with OpenAI's model tokenizer."""
+
+        import tiktoken
+
+        params = dict(params or {})
+        model = str(params.get("model_id") or "gpt-4o")
+        try:
+            encoding = tiktoken.encoding_for_model(model)
+        except KeyError:
+            encoding = tiktoken.get_encoding("o200k_base")
+        normalized = normalize_messages_for_openai(messages)
+        if params.get("system"):
+            normalized = [{"role": "system", "content": params["system"]}, *normalized]
+        token_count = 3
+        for message in normalized:
+            token_count += 3 + len(encoding.encode(json.dumps(
+                message, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            )))
+        if tools:
+            token_count += len(encoding.encode(json.dumps(
+                to_openai_tools(tools, strict=self.tool_strict),
+                ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            ))) + 12
+        if params.get("response_format"):
+            token_count += len(encoding.encode(json.dumps(
+                params["response_format"], ensure_ascii=False, sort_keys=True,
+                separators=(",", ":"),
+            )))
+        return max(1, token_count)

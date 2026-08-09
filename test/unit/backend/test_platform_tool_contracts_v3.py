@@ -37,8 +37,10 @@ from app.services.tool_connection_service import (
     ToolConnectionError,
     _assert_public_config,
     _assert_public_endpoint,
+    _validate_connection_config,
     validate_connection_endpoint,
 )
+from app.services import web_tool_service
 from app.services.web_tool_service import (
     WebToolError, _public_address, _trusted_synthetic_address, _validate_url,
 )
@@ -413,6 +415,122 @@ def test_connection_public_config_cannot_hide_plaintext_credentials(config: dict
 
 def test_connection_public_config_allows_non_secret_token_budgets():
     _assert_public_config({"max_tokens": 1000, "protocol_version": "2026-07-28"})
+
+
+def test_bailian_connection_config_is_typed_and_bounded():
+    _validate_connection_config("bailian", {"model": "qwen-plus", "search_strategy": "turbo"})
+    _validate_connection_config("bailian", {})
+    with pytest.raises(ToolConnectionError, match="unsupported fields"):
+        _validate_connection_config("bailian", {"enable_search": True})
+    with pytest.raises(ToolConnectionError, match="search_strategy"):
+        _validate_connection_config("bailian", {"search_strategy": "unbounded"})
+
+
+@pytest.mark.asyncio
+async def test_bailian_search_uses_forced_native_search_and_only_structured_evidence(monkeypatch):
+    captured = {}
+
+    async def public_dns(_hostname, _port):
+        return ["203.0.113.20"]
+
+    async def bounded(_client, method, url, **kwargs):
+        captured.update({"method": method, "url": url, **kwargs})
+        return ({
+            "request_id": "req-bailian-real",
+            "output": {
+                "choices": [{"message": {"content": "Generated prose is not evidence."}}],
+                "search_info": {"search_results": [{
+                    "title": "Official result", "url": "https://example.com/source",
+                    "content": "Structured provider snippet", "publish_time": "2026-08-10",
+                }]},
+            },
+            "usage": {"input_tokens": 12, "output_tokens": 7, "total_tokens": 19},
+        }, SimpleNamespace(headers={"x-request-id": "header-request"}))
+
+    monkeypatch.setattr(web_tool_service, "_resolve_public", public_dns)
+    monkeypatch.setattr(web_tool_service, "_bounded_json_response", bounded)
+    items, provider = await web_tool_service.web_search(
+        provider="bailian",
+        endpoint="https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation",
+        api_key="write-only-test-key", query="current public evidence", count=5,
+        freshness="pw", country=None,
+        config={"model": "qwen-plus", "search_strategy": "turbo"},
+    )
+
+    request = captured["json"]
+    assert captured["method"] == "POST"
+    assert request["parameters"]["enable_search"] is True
+    assert request["parameters"]["max_tokens"] == 64
+    assert request["parameters"]["temperature"] == 0
+    assert request["parameters"]["search_options"] == {
+        "forced_search": True, "enable_source": True,
+        "search_strategy": "turbo", "freshness": 7,
+    }
+    assert items == [{
+        "title": "Official result", "url": "https://example.com/source",
+        "snippet": "Structured provider snippet", "published_at": "2026-08-10",
+    }]
+    assert "Generated prose" not in json.dumps(items)
+    assert provider == {
+        "name": "bailian", "request_id": "req-bailian-real",
+        "latency_ms": provider["latency_ms"], "model": "qwen-plus",
+        "search_strategy": "turbo",
+        "usage": {"input_tokens": 12, "output_tokens": 7, "total_tokens": 19},
+    }
+
+
+@pytest.mark.asyncio
+async def test_bailian_past_day_uses_query_constraint_not_unsupported_numeric_freshness(monkeypatch):
+    captured = {}
+
+    async def public_dns(_hostname, _port):
+        return ["203.0.113.20"]
+
+    async def bounded(_client, _method, _url, **kwargs):
+        captured.update(kwargs)
+        return ({
+            "output": {"search_info": {"search_results": [{
+                "title": "Recent result", "url": "https://example.com/recent",
+            }]}},
+            "usage": {"total_tokens": 1},
+        }, SimpleNamespace(headers={"x-request-id": "req-pd"}))
+
+    monkeypatch.setattr(web_tool_service, "_resolve_public", public_dns)
+    monkeypatch.setattr(web_tool_service, "_bounded_json_response", bounded)
+    await web_tool_service.web_search(
+        provider="bailian",
+        endpoint="https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation",
+        api_key="write-only-test-key", query="Chromium update", count=5,
+        freshness="pd", country=None,
+        config={"model": "qwen-plus", "search_strategy": "turbo"},
+    )
+
+    request = captured["json"]
+    assert "freshness" not in request["parameters"]["search_options"]
+    assert "过去24小时" in request["input"]["messages"][0]["content"]
+    assert "Chromium update" in request["input"]["messages"][0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_bailian_search_rejects_successful_model_answer_without_search_evidence(monkeypatch):
+    async def public_dns(_hostname, _port):
+        return ["203.0.113.20"]
+
+    async def bounded(_client, _method, _url, **_kwargs):
+        return ({
+            "output": {"choices": [{"message": {"content": "plausible but ungrounded"}}]},
+        }, SimpleNamespace(headers={}))
+
+    monkeypatch.setattr(web_tool_service, "_resolve_public", public_dns)
+    monkeypatch.setattr(web_tool_service, "_bounded_json_response", bounded)
+    with pytest.raises(WebToolError) as observed:
+        await web_tool_service.web_search(
+            provider="bailian",
+            endpoint="https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation",
+            api_key="write-only-test-key", query="current public evidence", count=5,
+            freshness=None, country=None, config={},
+        )
+    assert observed.value.code == "provider_search_not_executed"
 
 
 @pytest.mark.asyncio

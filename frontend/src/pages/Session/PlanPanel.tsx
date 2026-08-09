@@ -162,7 +162,7 @@ export default function PlanPanel({
           {artifacts.length === 0 ? <p className="text-sm text-muted-foreground">批准实施后，产物会在这里出现。</p> : <div className="space-y-2">
             {artifacts.slice(0, 4).map(artifact => <div key={artifact.id} className="flex items-center justify-between gap-2 text-sm">
               <span className="min-w-0 truncate">{artifact.name}</span>
-              <Button size="small" disabled={artifact.status !== 'published'} onClick={() => onDownload(artifact)}>下载</Button>
+              <Button aria-label="下载" size="small" disabled={artifact.status !== 'published'} onClick={() => onDownload(artifact)}>下载</Button>
             </div>)}
           </div>}
         </section>

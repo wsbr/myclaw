@@ -1,5 +1,3 @@
-import MonacoEditor from '@monaco-editor/react'
-
 interface Props {
   value?: string
   onChange?: (v: string) => void
@@ -9,21 +7,14 @@ interface Props {
 
 export default function PromptEditor({ value, onChange, height = 200, language = 'markdown' }: Props) {
   return (
-    <div style={{ border: '1px solid #d9d9d9', borderRadius: 6, overflow: 'hidden' }}>
-      <MonacoEditor
-        height={height}
-        language={language}
-        value={value}
-        onChange={(v) => onChange?.(v || '')}
-        options={{
-          minimap: { enabled: false },
-          lineNumbers: 'off',
-          wordWrap: 'on',
-          scrollBeyondLastLine: false,
-          fontSize: 13,
-          padding: { top: 8, bottom: 8 },
-        }}
-        theme="vs"
+    <div className="overflow-hidden rounded-md border border-border bg-background">
+      <textarea
+        aria-label={`${language === 'markdown' ? 'Markdown' : language} 编辑器`}
+        className="block w-full resize-none bg-transparent p-3 font-mono text-[13px] leading-6 text-foreground outline-none"
+        style={{ height }}
+        spellCheck={false}
+        value={value || ''}
+        onChange={event => onChange?.(event.target.value)}
       />
     </div>
   )

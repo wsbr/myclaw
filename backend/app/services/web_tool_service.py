@@ -259,9 +259,11 @@ async def safe_fetch(
 async def web_search(
     *, provider: str, endpoint: str, api_key: str, query: str,
     count: int, freshness: str | None, country: str | None,
+    config: dict | None = None,
 ) -> tuple[list[dict], dict]:
     started = time.perf_counter()
     headers = {"Accept": "application/json"}
+    provider_config = dict(config or {})
     try:
         hostname, scheme, port = _validate_url(endpoint)
         addresses = await _resolve_public(hostname, port)
@@ -274,7 +276,8 @@ async def web_search(
         ))
         headers["Host"] = parsed_endpoint.netloc
         tls_extensions = {"sni_hostname": hostname}
-        async with httpx.AsyncClient(timeout=20, trust_env=False) as client:
+        timeout_seconds = 60 if provider == "bailian" else 20
+        async with httpx.AsyncClient(timeout=timeout_seconds, trust_env=False) as client:
             if provider == "brave":
                 headers["X-Subscription-Token"] = api_key
                 params = {"q": query, "count": count}
@@ -356,6 +359,86 @@ async def web_search(
                     "snippet": str(item.get("summary") or item.get("snippet") or "")[:4000],
                     "published_at": str(item.get("datePublished") or "")[:200] or None,
                 } for item in source[:count] if isinstance(item, dict)]
+            elif provider == "bailian":
+                if country:
+                    raise WebToolError(
+                        "Bailian does not support country filtering",
+                        code="provider_parameter_unsupported", category="validation",
+                    )
+                headers["Authorization"] = f"Bearer {api_key}"
+                search_options = {
+                    "forced_search": True,
+                    "enable_source": True,
+                    "search_strategy": provider_config.get("search_strategy", "turbo"),
+                }
+                bailian_query = query
+                if freshness == "pd":
+                    # DashScope turbo documents only 7/30/180/365 as numeric
+                    # freshness values. Preserve the platform's 24-hour
+                    # semantics without sending the invalid value 1.
+                    bailian_query = (
+                        "仅检索过去24小时内发布的来源（严格时效约束）。\n" + query
+                    )
+                elif freshness:
+                    search_options["freshness"] = {
+                        "pw": 7, "pm": 30, "py": 365,
+                    }[freshness]
+                request = {
+                    "model": provider_config.get("model", "qwen-plus"),
+                    "input": {"messages": [{"role": "user", "content": bailian_query}]},
+                    "parameters": {
+                        "enable_search": True,
+                        "search_options": search_options,
+                        # The generated answer is intentionally discarded; cap
+                        # it tightly while preserving structured search_info.
+                        "max_tokens": 64,
+                        "temperature": 0,
+                        "result_format": "message",
+                    },
+                }
+                payload, response = await _bounded_json_response(
+                    client, "POST", pinned_endpoint, json=request,
+                    headers=headers, extensions=tls_extensions,
+                )
+                business_code = payload.get("code")
+                if business_code not in {None, 0, 200, "0", "200"}:
+                    raise WebToolError(
+                        "Bailian returned a Provider business error",
+                        code=f"provider_business_{str(business_code)[:32]}",
+                        category="provider", retryable=False,
+                    )
+                output = payload.get("output")
+                if not isinstance(output, dict):
+                    raise WebToolError(
+                        "Bailian returned an invalid result shape",
+                        code="search_response_invalid_shape", category="provider",
+                    )
+                search_info = output.get("search_info")
+                if not isinstance(search_info, dict):
+                    # A successful model response without search_info can be a
+                    # fluent hallucination. Never publish it as Search evidence.
+                    raise WebToolError(
+                        "Bailian did not execute the forced web search",
+                        code="provider_search_not_executed", category="provider",
+                    )
+                source = search_info.get("search_results")
+                if not isinstance(source, list):
+                    raise WebToolError(
+                        "Bailian returned an invalid search result shape",
+                        code="search_response_invalid_shape", category="provider",
+                    )
+                items = [{
+                    "title": str(item.get("title") or "")[:500],
+                    "url": str(item.get("url") or "")[:2000],
+                    "snippet": str(
+                        item.get("snippet") or item.get("content")
+                        or item.get("summary") or ""
+                    )[:4000],
+                    "published_at": str(
+                        item.get("publish_time") or item.get("published_at")
+                        or item.get("date") or ""
+                    )[:200] or None,
+                } for item in source[:count] if isinstance(item, dict)]
             else:
                 raise WebToolError(
                     "unsupported Search Provider", code="search_provider_unsupported",
@@ -378,7 +461,21 @@ async def web_search(
             continue
         validated_items.append(item)
     items = validated_items
+    usage_payload = payload.get("usage") if provider == "bailian" else None
+    safe_usage = {
+        key: value for key, value in (
+            usage_payload.items() if isinstance(usage_payload, dict) else []
+        )
+        if key in {"input_tokens", "output_tokens", "total_tokens"}
+        and isinstance(value, int) and value >= 0
+    }
     return items, {
         "name": provider, "request_id": response.headers.get("x-request-id"),
         "latency_ms": round((time.perf_counter() - started) * 1000),
+        **({
+            "request_id": payload.get("request_id") or response.headers.get("x-request-id"),
+            "model": provider_config.get("model", "qwen-plus"),
+            "search_strategy": provider_config.get("search_strategy", "turbo"),
+            "usage": safe_usage,
+        } if provider == "bailian" else {}),
     }

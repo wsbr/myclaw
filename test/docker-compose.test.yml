@@ -215,6 +215,56 @@ services:
     volumes:
       - myclaw-test-data:/var/lib/myclaw
 
+  skill-sync-worker-test:
+    <<: *backend-security
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+      labels:
+        org.opencontainers.image.revision: ${MYCLAW_ACCEPTANCE_COMMIT_SHA:-unbound}
+    command: python -m app.workers.skill_sync_worker
+    env_file: .env.test
+    environment:
+      DATABASE_URL: mysql+aiomysql://myclaw:mypassword@mysql-test:3306/myclaw_test
+      REDIS_URL: redis://:redispassword@redis-test:6379/0
+      SKILL_SYNC_WORKER_POLL_SECONDS: "0.1"
+      SKILL_SYNC_CLAIM_LEASE_SECONDS: "5"
+      OTEL_SERVICE_NAME: myclaw-skill-sync-worker-test
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector-test:4318
+    depends_on:
+      api-test:
+        condition: service_healthy
+    profiles:
+      - fullstack
+    volumes:
+      - myclaw-test-data:/var/lib/myclaw
+
+  maintenance-worker-test:
+    <<: *backend-security
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+      labels:
+        org.opencontainers.image.revision: ${MYCLAW_ACCEPTANCE_COMMIT_SHA:-unbound}
+    command: python -m app.workers.maintenance_worker
+    env_file: .env.test
+    environment:
+      DATABASE_URL: mysql+aiomysql://myclaw:mypassword@mysql-test:3306/myclaw_test
+      REDIS_URL: redis://:redispassword@redis-test:6379/0
+      MAINTENANCE_POLL_SECONDS: "3600"
+      MAINTENANCE_COMMAND_POLL_SECONDS: "0.1"
+      MAINTENANCE_COMMAND_CLAIM_LEASE_SECONDS: "30"
+      MAINTENANCE_COMMAND_HEARTBEAT_SECONDS: "5"
+      OTEL_SERVICE_NAME: myclaw-maintenance-worker-test
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector-test:4318
+    depends_on:
+      api-test:
+        condition: service_healthy
+    profiles:
+      - fullstack
+    volumes:
+      - myclaw-test-data:/var/lib/myclaw
+
   frontend-test:
     build:
       context: ../frontend

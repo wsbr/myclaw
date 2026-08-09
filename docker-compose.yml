@@ -206,6 +206,35 @@ services:
     volumes:
       - myclaw_data:/var/lib/myclaw
 
+  skill-sync-worker:
+    <<: *backend-security
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: python -m app.workers.skill_sync_worker
+    env_file: .env
+    environment:
+      - MYCLAW_ENVIRONMENT=production
+      - DATABASE_URL=${DATABASE_URL}
+      - DATABASE_POOL_SIZE=${DATABASE_POOL_SIZE:-4}
+      - DATABASE_MAX_OVERFLOW=${DATABASE_MAX_OVERFLOW:-4}
+      - REDIS_URL=${REDIS_URL}
+      - SECRET_KEY=${SECRET_KEY}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - SKILL_SYNC_WORKER_POLL_SECONDS=${SKILL_SYNC_WORKER_POLL_SECONDS:-1}
+      - SKILL_SYNC_CLAIM_LEASE_SECONDS=${SKILL_SYNC_CLAIM_LEASE_SECONDS:-30}
+      - SKILL_SYNC_RECONCILE_SECONDS=${SKILL_SYNC_RECONCILE_SECONDS:-3600}
+      - OTEL_SERVICE_NAME=myclaw-skill-sync-worker
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      - OTEL_EXPORTER_OTLP_HEADERS=${OTEL_EXPORTER_OTLP_HEADERS:-}
+      - MYCLAW_RELEASE=${MYCLAW_RELEASE:-development}
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    volumes:
+      - myclaw_data:/var/lib/myclaw
+
   maintenance-worker:
     <<: *backend-security
     build:
@@ -222,6 +251,9 @@ services:
       - SECRET_KEY=${SECRET_KEY}
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
       - MAINTENANCE_POLL_SECONDS=${MAINTENANCE_POLL_SECONDS:-3600}
+      - MAINTENANCE_COMMAND_POLL_SECONDS=${MAINTENANCE_COMMAND_POLL_SECONDS:-1}
+      - MAINTENANCE_COMMAND_CLAIM_LEASE_SECONDS=${MAINTENANCE_COMMAND_CLAIM_LEASE_SECONDS:-300}
+      - MAINTENANCE_COMMAND_HEARTBEAT_SECONDS=${MAINTENANCE_COMMAND_HEARTBEAT_SECONDS:-30}
       - MAINTENANCE_BATCH_SIZE=${MAINTENANCE_BATCH_SIZE:-500}
       - OUTBOX_COMPLETED_RETENTION_DAYS=${OUTBOX_COMPLETED_RETENTION_DAYS:-30}
       - OUTBOX_DEAD_RETENTION_DAYS=${OUTBOX_DEAD_RETENTION_DAYS:-180}

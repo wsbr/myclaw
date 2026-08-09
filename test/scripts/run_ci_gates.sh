@@ -62,6 +62,22 @@ wait_for_mysql() {
   return 1
 }
 
+wait_for_mysql_network() {
+  local backend_image="$1"
+  local mysql_host="$2"
+  for _ in $(seq 1 30); do
+    if docker run --rm \
+      --network "${COMPOSE_PROJECT_NAME}_default" \
+      "$backend_image" \
+      python -c "import socket; connection = socket.create_connection(('${mysql_host}', 3306), 3); connection.close()"; then
+      return 0
+    fi
+    sleep 1
+  done
+  echo "MySQL was healthy but not reachable from the Compose network" >&2
+  return 1
+}
+
 run_unit_gate() {
   echo "==> Pure Tool contract and security gates (no model surrogate)"
   (
@@ -92,6 +108,7 @@ run_migration_gate() {
     "$ROOT/backend"
   compose run -d --service-ports --no-deps --name "$mysql_container" mysql-test >/dev/null
   wait_for_mysql "$mysql_container"
+  wait_for_mysql_network "$backend_image" "$mysql_container"
   docker run --rm \
     --network "${COMPOSE_PROJECT_NAME}_default" \
     --env DATABASE_URL="$database_url" \
@@ -129,17 +146,30 @@ run_migration_gate() {
      WHERE TABLE_SCHEMA='myclaw_test' AND IS_NULLABLE='NO' AND (
        (TABLE_NAME='tool_invocation' AND COLUMN_NAME IN ('tool_version_id','tool_version_content_hash')) OR
        (TABLE_NAME='runner_tool_snapshot' AND COLUMN_NAME IN ('tool_version_id','tool_version_content_hash')));
+    SELECT CONCAT('immutable_skill_triggers=', COUNT(*))
+      FROM information_schema.TRIGGERS
+     WHERE TRIGGER_SCHEMA='myclaw_test' AND TRIGGER_NAME IN (
+       'trg_skill_version_immutable_update','trg_skill_version_immutable_delete');
+    SELECT CONCAT('skill_runtime_columns=', COUNT(*))
+      FROM information_schema.COLUMNS
+     WHERE TABLE_SCHEMA='myclaw_test' AND TABLE_NAME='skill_version'
+       AND COLUMN_NAME IN ('manifest','content_hash','package_size','archive_type');
   " | tee "$RESULTS_ROOT/schema-contract.txt"
   grep -qx 'tool_contract_tables=7' "$RESULTS_ROOT/schema-contract.txt"
   grep -qx 'legacy_tool_columns=0' "$RESULTS_ROOT/schema-contract.txt"
   grep -qx 'immutable_tool_triggers=8' "$RESULTS_ROOT/schema-contract.txt"
   grep -qx 'exact_nonnull_columns=4' "$RESULTS_ROOT/schema-contract.txt"
+  grep -qx 'immutable_skill_triggers=2' "$RESULTS_ROOT/schema-contract.txt"
+  grep -qx 'skill_runtime_columns=4' "$RESULTS_ROOT/schema-contract.txt"
   echo "==> Real MySQL Tool contract and trigger verification"
   (
     cd "$TEST_ROOT"
     PYTHONPATH="$ROOT/backend" \
       MYCLAW_V3_ACCEPTANCE_DATABASE_URL="mysql+aiomysql://myclaw:mypassword@127.0.0.1:3307/myclaw_test" \
-      "$PYTEST_BIN" integration/test_platform_tool_v3_mysql.py -m integration -v --tb=short \
+      "$PYTEST_BIN" \
+        integration/test_platform_tool_v3_mysql.py \
+        integration/test_skill_runtime_mysql.py \
+        -m integration -v --tb=short \
       --junitxml="$RESULTS_ROOT/mysql-tool-contracts.xml"
   )
   cleanup_stack
@@ -160,6 +190,7 @@ run_fullstack_gate() {
 }
 
 mkdir -p "$RESULTS_ROOT"
+browser_checksum_file=""
 require_clean_fixed_commit
 require_runner
 trap cleanup_stack EXIT
@@ -174,19 +205,60 @@ case "$MODE" in
     : "${MYCLAW_REAL_LLM_API_KEY:?MYCLAW_REAL_LLM_API_KEY must be injected as a secret}"
     : "${MYCLAW_REAL_LLM_ENDPOINT:?MYCLAW_REAL_LLM_ENDPOINT is required}"
     : "${MYCLAW_REAL_LLM_MODEL:?MYCLAW_REAL_LLM_MODEL is required}"
-    : "${MYCLAW_BOCHA_API_KEY:?MYCLAW_BOCHA_API_KEY must be injected as a secret}"
-    : "${MYCLAW_BRAVE_API_KEY:?MYCLAW_BRAVE_API_KEY must be injected as a secret}"
+    export MYCLAW_REAL_SEARCH_PROVIDER="${MYCLAW_REAL_SEARCH_PROVIDER:-bocha_brave}"
+    case "$MYCLAW_REAL_SEARCH_PROVIDER" in
+      bailian)
+        : "${MYCLAW_BAILIAN_API_KEY:?MYCLAW_BAILIAN_API_KEY must be injected as a secret}"
+        ;;
+      bocha_brave)
+        : "${MYCLAW_BOCHA_API_KEY:?MYCLAW_BOCHA_API_KEY must be injected as a secret}"
+        : "${MYCLAW_BRAVE_API_KEY:?MYCLAW_BRAVE_API_KEY must be injected as a secret}"
+        ;;
+      *)
+        echo "MYCLAW_REAL_SEARCH_PROVIDER must be bailian or bocha_brave" >&2
+        exit 2
+        ;;
+    esac
     echo "==> Real-model Docker API and Chromium acceptance"
     export MYCLAW_RUNTIME_WORKER_REPLICAS=2
+    rm -rf "$RESULTS_ROOT/real-browser"
+    export MYCLAW_BROWSER_EVIDENCE_DIR="$RESULTS_ROOT/real-browser"
     run_fullstack_gate real-model-fullstack.xml
+    find "$RESULTS_ROOT/real-browser" -type f -name '*.png' -print0 \
+      | sort -z \
+      | xargs -0 shasum -a 256 \
+      > "$RESULTS_ROOT/real-browser-checksums.txt"
+    test -s "$RESULTS_ROOT/real-browser-checksums.txt"
+    browser_checksum_file="$RESULTS_ROOT/real-browser-checksums.txt"
+    ;;
+  minimal-real)
+    : "${MYCLAW_REAL_LLM_API_KEY:?MYCLAW_REAL_LLM_API_KEY must be injected as a secret}"
+    : "${MYCLAW_REAL_LLM_ENDPOINT:?MYCLAW_REAL_LLM_ENDPOINT is required}"
+    : "${MYCLAW_REAL_LLM_MODEL:?MYCLAW_REAL_LLM_MODEL is required}"
+    echo "==> Minimal real-model LLM, Skill, maintenance and Chromium acceptance"
+    export MYCLAW_RUNTIME_WORKER_REPLICAS=2
+    export MYCLAW_FULLSTACK_SCOPE=minimal
+    rm -rf "$RESULTS_ROOT/minimal-browser"
+    export MYCLAW_BROWSER_EVIDENCE_DIR="$RESULTS_ROOT/minimal-browser"
+    run_fullstack_gate minimal-real-fullstack.xml
+    find "$RESULTS_ROOT/minimal-browser" -type f -name '*.png' -print0 \
+      | sort -z \
+      | xargs -0 shasum -a 256 \
+      > "$RESULTS_ROOT/minimal-browser-checksums.txt"
+    test -s "$RESULTS_ROOT/minimal-browser-checksums.txt"
+    browser_checksum_file="$RESULTS_ROOT/minimal-browser-checksums.txt"
     ;;
   *)
-    echo "Usage: $0 {standard|real}" >&2
+    echo "Usage: $0 {standard|minimal-real|real}" >&2
     exit 2
     ;;
 esac
 
+browser_checksum_manifest_sha=""
+if [ -n "$browser_checksum_file" ] && [ -s "$browser_checksum_file" ]; then
+  browser_checksum_manifest_sha="$(shasum -a 256 "$browser_checksum_file" | awk '{print $1}')"
+fi
 printf '%s\n' \
-  "{\"schema\":\"myclaw.ci_gate.v1\",\"mode\":\"${MODE}\",\"status\":\"passed\",\"commit_sha\":\"${COMMIT_SHA}\",\"started_at\":\"${STARTED_AT}\",\"completed_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" \
+  "{\"schema\":\"myclaw.ci_gate.v1\",\"mode\":\"${MODE}\",\"status\":\"passed\",\"commit_sha\":\"${COMMIT_SHA}\",\"started_at\":\"${STARTED_AT}\",\"completed_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"search_provider\":\"${MYCLAW_REAL_SEARCH_PROVIDER:-}\",\"browser_checksum_manifest_sha256\":\"${browser_checksum_manifest_sha}\"}" \
   > "${RESULTS_ROOT}/${MODE}-gates.json"
 echo "All $MODE CI gates passed for $COMMIT_SHA."

@@ -37,6 +37,10 @@ from app.models.registry import (
     SkillVersion,
 )
 from app.persistence.reliable_writes import PlatformAuditWriter
+from app.services.skill_catalog_service import (
+    SkillCatalogOverflow,
+    build_skill_catalog_sections,
+)
 
 
 class AgentDraftConflict(RuntimeError):
@@ -438,7 +442,7 @@ async def check_publish_capabilities(
                 connection_id = version.default_connection_id
                 if definition.tool_key == "web_search" and connection_id is None:
                     connection = await db.scalar(select(ToolConnection).where(
-                        ToolConnection.connection_type.in_(["bocha", "brave"]),
+                        ToolConnection.connection_type.in_(["bocha", "brave", "bailian"]),
                         ToolConnection.is_primary.is_(True), ToolConnection.status == "active",
                     ))
                 elif connection_id:
@@ -470,6 +474,14 @@ async def check_publish_capabilities(
                     issues.append(f"skill {skill_id} has no published immutable version")
                     continue
                 skills.append((skill, version))
+    if skills:
+        try:
+            build_skill_catalog_sections(
+                [version for _, version in skills],
+                max_tokens=settings.skill_catalog_max_tokens,
+            )
+        except SkillCatalogOverflow as error:
+            issues.append(str(error))
     if issues or model_version is None or sandbox_version is None or len(policy_versions) != 4:
         return issues, None
     return issues, ResolvedAssembly(

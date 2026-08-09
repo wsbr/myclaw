@@ -150,7 +150,7 @@ Registry reconcile 以代码注册为来源校验 key/implementation/schema/regi
 ### `skill`、`skill_version`
 
 - `skill`：`id PK`、`tenant_id FK`、`owner_account_id`、`name`、`description`、`current_version_id FK NULL`、`status active|inactive`、`next_version_no`、`version`；复合 FK `(tenant_id,owner_account_id)`；
-- `skill_version`：`id PK`、`skill_id FK`、`version_no`、`package_uri`、`checksum`、`manifest_json`、`status uploaded|published|deprecated|quarantined`、`content_hash`、`published_at`、`published_by_account_id FK`、`version`；内容只追加，唯一 `(skill_id,version_no)` 和 `(skill_id,checksum)`。
+- `skill_version`：`id PK`、`skill_id FK`、`version_no`、`package_uri`、`checksum`、`manifest_json`、`package_size`、`archive_type`、`status uploaded|validating|published|rejected|deprecated|quarantined`、`content_hash`、`published_at`、`published_by_account_id FK`；内容只追加，唯一 `(skill_id,version_no)` 和 `(skill_id,checksum)`。数据库 Trigger 禁止内容 UPDATE 和整行 DELETE，只允许固定状态迁移。
 
 AgentVersionSkill 只能引用 published/deprecated SkillVersion；quarantined 阻止新的装配和执行，但不删除历史包与引用。
 

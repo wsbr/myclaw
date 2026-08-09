@@ -153,17 +153,18 @@ class ProviderSchemaError(ProviderError):
 
 
 def normalize_stop_reason(value: str | None, *, has_tool_calls: bool = False) -> StopReason:
-    if has_tool_calls:
-        return StopReason.TOOL_USE
     normalized = (value or "").lower()
-    if normalized in {"stop", "end_turn", "end", "completed"}:
-        return StopReason.END_TURN
-    if normalized in {"tool_calls", "tool_use", "function_call"}:
-        return StopReason.TOOL_USE
+    # Terminal provider failures take precedence over observing a Tool Call.
+    # A truncated Tool payload is not a valid action and must never be
+    # dispatched as if the provider had completed it.
     if normalized in {"length", "max_tokens", "max_output_tokens"}:
         return StopReason.MAX_TOKENS
     if normalized in {"content_filter", "safety", "blocked"}:
         return StopReason.CONTENT_FILTER
     if normalized in {"error", "failed"}:
         return StopReason.ERROR
+    if has_tool_calls or normalized in {"tool_calls", "tool_use", "function_call"}:
+        return StopReason.TOOL_USE
+    if normalized in {"stop", "end_turn", "end", "completed"}:
+        return StopReason.END_TURN
     return StopReason.UNKNOWN

@@ -17,6 +17,7 @@ from app.models.memory_v1 import (
 )
 from app.models.runtime_v1 import Message
 from app.persistence.reliable_writes import ExecutionEventWriter
+from app.services.history_service import estimate_tokens
 
 
 class MemoryConflict(ValueError):
@@ -196,7 +197,10 @@ async def apply_memory_candidate(db, candidate_id: str) -> MemoryWriteCandidate:
     return candidate
 
 
-async def recall_memories(db, *, runner_id: str, user_id: str, agent_id: str, policy_key: str) -> list[MemoryRecord]:
+async def recall_memories(
+    db, *, runner_id: str, user_id: str, agent_id: str, policy_key: str,
+    parameters: dict | None = None,
+) -> list[MemoryRecord]:
     snapshots = list(await db.scalars(select(RunnerMemorySnapshot).where(
         RunnerMemorySnapshot.runner_id == runner_id,
     ).order_by(RunnerMemorySnapshot.rank)))
@@ -206,6 +210,11 @@ async def recall_memories(db, *, runner_id: str, user_id: str, agent_id: str, po
         ))}
         return [by_id[snapshot.memory_id] for snapshot in snapshots if snapshot.memory_id in by_id]
     if policy_key == "memory_recall.none":
+        return []
+    merged = {"max_items": 20, "token_budget": 4_000, **dict(parameters or {})}
+    max_items = max(0, min(int(merged["max_items"]), 100))
+    token_budget = max(0, min(int(merged["token_budget"]), 100_000))
+    if max_items == 0 or token_budget == 0:
         return []
     statement = select(MemoryRecord).where(
         MemoryRecord.user_id == user_id, MemoryRecord.status == "active",
@@ -224,11 +233,17 @@ async def recall_memories(db, *, runner_id: str, user_id: str, agent_id: str, po
     ).limit(40)))
     chosen = []
     seen = set()
+    used_tokens = 0
     for memory in sorted(candidates, key=lambda item: (item.scope != "user_agent", -item.updated_at.timestamp(), item.id)):
         if memory.fact_key in seen:
             continue
-        seen.add(memory.fact_key); chosen.append(memory)
-        if len(chosen) >= 20:
+        token_cost = estimate_tokens(memory.content)
+        if chosen and used_tokens + token_cost > token_budget:
+            continue
+        seen.add(memory.fact_key)
+        chosen.append(memory)
+        used_tokens += token_cost
+        if len(chosen) >= max_items:
             break
     db.add_all([
         RunnerMemorySnapshot(runner_id=runner_id, memory_id=memory.id,

@@ -43,8 +43,8 @@ export default function PendingActions({
             <pre className="max-h-48 overflow-auto border-t p-3 text-xs leading-5">{JSON.stringify(action.arguments, null, 2)}</pre>
           </details>}
           <div className="mt-4 flex gap-2">
-            <Button type="primary" loading={deciding} onClick={() => onDecision(action, 'approve')}>批准</Button>
-            <Button danger loading={deciding} onClick={() => onDecision(action, 'reject')}>拒绝</Button>
+            <Button aria-label="批准" type="primary" loading={deciding} onClick={() => onDecision(action, 'approve')}>批准</Button>
+            <Button aria-label="拒绝" danger loading={deciding} onClick={() => onDecision(action, 'reject')}>拒绝</Button>
           </div>
         </div>
       </div>

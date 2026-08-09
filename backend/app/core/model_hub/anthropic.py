@@ -167,9 +167,22 @@ class AnthropicLLM(BaseLLM):
             provider_request_id=getattr(final_message, "id", None),
         )
 
-    async def count_tokens(self, messages: list[dict]) -> int:
-        resp = await self.client.messages.count_tokens(
-            model="claude-haiku-4-5-20251001",
-            messages=messages,
+    async def count_tokens(
+        self, messages: list[dict], tools: list[dict] | None = None,
+        params: dict | None = None,
+    ) -> int:
+        params = dict(params or {})
+        message_system, normalized_messages = normalize_messages_for_anthropic(messages)
+        system = "\n\n".join(
+            part for part in (params.get("system"), message_system) if part
         )
+        kwargs = {
+            "model": params.get("model_id", "claude-sonnet-4-6"),
+            "messages": normalized_messages,
+        }
+        if system:
+            kwargs["system"] = system
+        if tools:
+            kwargs["tools"] = to_anthropic_tools(tools, strict=self.tool_strict)
+        resp = await self.client.messages.count_tokens(**kwargs)
         return resp.input_tokens

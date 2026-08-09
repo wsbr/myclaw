@@ -596,7 +596,7 @@ paths:
       tags: [Registry]
       operationId: listToolConnections
       parameters:
-        - {name: connection_type, in: query, schema: {type: [string, 'null'], enum: [bocha, brave, mcp, browser, null]}}
+        - {name: connection_type, in: query, schema: {type: [string, 'null'], enum: [bocha, brave, bailian, mcp, browser, null]}}
       responses:
         '200': {description: Typed connection projections; credentials are never returned., content: {application/json: {schema: {$ref: '#/components/schemas/ToolConnectionPage'}}}}
         default: {$ref: '#/components/responses/Error'}
@@ -2209,7 +2209,7 @@ components:
       properties:
         connection_key: {type: string, pattern: '^[a-z][a-z0-9_.-]*$', maxLength: 191}
         display_name: {type: string, minLength: 1, maxLength: 200}
-        connection_type: {type: string, enum: [bocha, brave, mcp, browser]}
+        connection_type: {type: string, enum: [bocha, brave, bailian, mcp, browser]}
         endpoint: {type: string, format: uri}
         auth_type: {type: string, enum: [none, bearer, x_api_key], default: none}
         api_key: {type: [string, 'null'], format: password, writeOnly: true, minLength: 1, maxLength: 4096}
@@ -2245,7 +2245,7 @@ components:
         id: {$ref: '#/components/schemas/Uuid'}
         connection_key: {type: string}
         display_name: {type: string}
-        connection_type: {type: string, enum: [bocha, brave, mcp, browser]}
+        connection_type: {type: string, enum: [bocha, brave, bailian, mcp, browser]}
         auth_type: {type: string, enum: [none, bearer, x_api_key]}
         status: {type: string, enum: [active, inactive]}
         enabled: {type: boolean}
@@ -2316,10 +2316,15 @@ components:
         skill_id: {$ref: '#/components/schemas/Uuid'}
         version_no: {type: integer, format: int64, minimum: 1}
         checksum: {$ref: '#/components/schemas/Sha256'}
-        status: {type: string, enum: [uploaded, published, deprecated, quarantined]}
+        status: {type: string, enum: [uploaded, validating, published, rejected, deprecated, quarantined]}
+        package_uri: {type: string}
+        package_size: {type: [integer, 'null'], format: int64, minimum: 0}
+        archive_type: {type: [string, 'null'], enum: [zip, tar.gz, null]}
+        manifest: {$ref: '#/components/schemas/JsonObject'}
         latest_assessment_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
         assessment_status: {type: string, enum: [pending, trusted, unknown, quarantined]}
         content_hash: {$ref: '#/components/schemas/Sha256'}
+        published_at: {oneOf: [{$ref: '#/components/schemas/Timestamp'}, {type: 'null'}]}
         created_at: {$ref: '#/components/schemas/Timestamp'}
         version: {type: integer, format: int64, minimum: 1}
     SkillPage:

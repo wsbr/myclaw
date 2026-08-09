@@ -35,11 +35,17 @@ SkillVersion
 ├── skill_id
 ├── package_uri
 ├── checksum
+├── content_hash
+├── manifest
+├── package_size
+├── archive_type
 ├── created_at
 └── status
 ```
 
-包源可以是文件存储或对象存储，数据库保存元数据和索引。当前阶段允许使用服务端文件系统作为包源，但逻辑模型不应把数据库大字段当作逐次执行载体。
+上传接受根目录包含 `SKILL.md` 的 `.skill`、`.zip`、`.tar.gz` 或 `.tgz` 包。YAML front matter 至少包含字符串 `name` 和 `description`；其他声明元数据原样规范化保存在 `manifest.declared_metadata`，但不能扩大 Tool、Agent 或数据权限。`SKILL.md` 有独立大小上限且不接受 YAML alias，避免元数据解析成为资源耗尽入口；大型资料应放入 `references/` 等按需文件。
+
+包源通过 `SkillPackageStore` 抽象访问。`local` 适配器用于单机开发/UAT；多节点使用 S3 兼容对象存储，数据库只保存不可变 URI、checksum、manifest 和索引，不保存或逐次传输包体大字段。对象键包含 `skill_id + skill_version_id + checksum`，同一 SkillVersion 的对象地址和内容不可改写。
 
 ## 共享 Skill Workspace
 
@@ -56,11 +62,13 @@ shared-skills/
 同步触发包括：
 
 - 服务启动；
-- Skill 上传或发布；
+- Skill 发布；
 - 周期性对账；
 - 管理员手动同步。
 
-同步采用校验和与原子切换，避免 Runner 读取半更新目录。Session 不复制 Skill 文件；模型或脚本生成的产物必须写入 Session 工作区，不能修改共享 Skill。
+发布事务写 `sync_skill` Outbox，由独立 `skill-sync-worker` 消费并预热缓存。每个真正读取 Skill 的 Tool 节点仍执行按需 `ensure`；因此轮询、启动预热和 Outbox 只优化延迟，不承担正确性。节点可以丢弃全部本地缓存，再从数据库固定的 `package_uri + checksum` 重建。
+
+同步重新验证归档路径和文件类型、校验压缩包 SHA-256、计算解压树哈希，并在 checksum 级跨进程锁内通过临时目录和原子切换发布只读缓存。缓存损坏会重新拉取；对象包校验失败则拒绝读取。Session 不复制 Skill 文件；模型或脚本生成的产物必须写入 Session 工作区，不能修改共享 Skill。
 
 ## Runtime 加载
 
@@ -74,7 +82,7 @@ description
 path
 ```
 
-完整 `SKILL.md` 及其引用内容由 Agent 按需通过已装配的 `read_file` 渐进读取。平台不会因为 Agent 选择了 Skill 而自动添加 `read_file`；未选择该 Tool 时，Agent 只能使用初始 Catalog 信息。
+Catalog 有独立的总 token 上限；当固定元数据本身超过上限时发布/运行失败，不允许静默省略已绑定 Skill。完整 `SKILL.md` 及其引用内容由 Agent 按需通过已装配的 `read_file` 渐进读取，并作为 Tool Result 返回，不能提升为 system role。`read_file` 首先校验 `RunnerSkillSnapshot`，再在当前执行节点按 checksum 自愈缓存；未绑定的 `skill://` URI 始终拒绝。平台不会因为 Agent 选择了 Skill 而自动添加 `read_file`；未选择该 Tool 时，Agent 只能使用初始 Catalog 信息。
 
 ## 更新语义
 
@@ -89,6 +97,8 @@ path
 Skill 包允许携带脚本。当前阶段采用可信 Skill 模型，不在上传时判断脚本安全性、依赖完整性或业务合理性。
 
 脚本能否执行取决于 Agent 是否显式装配 `execute` 以及所选 Sandbox。第一阶段所有 Skill 脚本默认可信，可以在 `local` Sandbox 中执行，以支持通用 Skill 和项目测试。Skill 加载本身不会启动脚本。
+
+`execute.argv` 中只有完整、已冻结的 `skill://<skill-id>/<checksum>/<file>` 参数会被解析为本节点缓存路径；任意物理宿主路径不会获得访问权。Sandbox 把对应 checksum 根加入只读 Landlock 规则，当前工作目录和所有输出仍限制在 Session Workspace。建议通过显式解释器运行只读脚本，例如 `python skill://.../scripts/check.py`。
 
 `local` 只承诺会话目录隔离与执行生命周期管理，不是不可信代码安全边界。完整规则见 [Sandbox、Workspace 与 Artifact](sandbox-artifact.md)。
 

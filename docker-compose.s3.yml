@@ -1,0 +1,76 @@
+# Multi-node-compatible Skill package storage overlay.
+# Usage: docker compose -f docker-compose.yml -f docker-compose.s3.yml up -d
+
+x-skill-s3-environment: &skill-s3-environment
+  SKILL_STORAGE_BACKEND: s3
+  SKILL_S3_ENDPOINT_URL: http://minio:9000
+  SKILL_S3_REGION: ${SKILL_S3_REGION:-us-east-1}
+  SKILL_S3_BUCKET: ${SKILL_S3_BUCKET:-myclaw-skills}
+  SKILL_S3_ACCESS_KEY_ID: ${SKILL_S3_ACCESS_KEY_ID:-myclaw-minio}
+  SKILL_S3_SECRET_ACCESS_KEY: ${SKILL_S3_SECRET_ACCESS_KEY}
+  SKILL_S3_FORCE_PATH_STYLE: "true"
+
+services:
+  api:
+    environment:
+      <<: *skill-s3-environment
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+
+  runtime-worker:
+    environment:
+      <<: *skill-s3-environment
+
+  sandbox-worker:
+    environment:
+      <<: *skill-s3-environment
+
+  connector-worker:
+    environment:
+      <<: *skill-s3-environment
+
+  browser-worker:
+    environment:
+      <<: *skill-s3-environment
+
+  skill-sync-worker:
+    environment:
+      <<: *skill-s3-environment
+
+  minio:
+    image: minio/minio:RELEASE.2025-07-23T15-54-02Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${SKILL_S3_ACCESS_KEY_ID:-myclaw-minio}
+      MINIO_ROOT_PASSWORD: ${SKILL_S3_SECRET_ACCESS_KEY}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  minio-init:
+    image: minio/mc:RELEASE.2025-07-21T05-28-08Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${SKILL_S3_ACCESS_KEY_ID:-myclaw-minio}
+      MINIO_ROOT_PASSWORD: ${SKILL_S3_SECRET_ACCESS_KEY}
+      SKILL_S3_BUCKET: ${SKILL_S3_BUCKET:-myclaw-skills}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        mc alias set myclaw http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}" &&
+        mc mb --ignore-existing "myclaw/$${SKILL_S3_BUCKET}" &&
+        mc anonymous set none "myclaw/$${SKILL_S3_BUCKET}"
+
+volumes:
+  minio_data:

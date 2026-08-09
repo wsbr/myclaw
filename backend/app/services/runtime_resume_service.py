@@ -104,6 +104,7 @@ async def queue_work_item_resume(
     db, *, work: WorkItem, run: Run, source_runner: DurableRunner,
     pending_results: list[dict], reason: str, caused_by_event_id: str,
     actor_id: str, principal_snapshot_updates: dict | None = None,
+    replace_system_notice_prefix: str | None = None,
 ) -> DurableRunner:
     if work.active_runner_id is not None:
         raise RuntimeError("WorkItem already has an active Runner")
@@ -124,9 +125,18 @@ async def queue_work_item_resume(
     current_runner_results = list(
         (latest_checkpoint.state_snapshot or {}).get("pending_results") or []
     ) if latest_checkpoint is not None else []
-    cumulative_results = [
-        *prior_results, *current_runner_results, *pending_results,
-    ]
+    cumulative_results = [*prior_results, *current_runner_results]
+    if replace_system_notice_prefix:
+        cumulative_results = [
+            item for item in cumulative_results
+            if not (
+                item.get("role") == "system"
+                and str(item.get("content") or "").startswith(
+                    replace_system_notice_prefix
+                )
+            )
+        ]
+    cumulative_results.extend(pending_results)
     work.execution_epoch += 1
     work.attempt_no += 1
     work.status = "queued"

@@ -14,12 +14,13 @@ from pathlib import Path
 
 from sqlalchemy import select
 
+from app.config import settings
 from app.core.tool_registry.base import BaseTool, RuntimeContext, ToolResult
 from app.database import AsyncSessionLocal
 from app.models.runtime_v1 import ToolInvocation
 from app.services.workspace_file_service import (
-    execution_workspace_root, resolve_workspace_path, sandbox_environment,
-    sha256_file,
+    execution_workspace_root, resolve_read_path, resolve_workspace_path,
+    sandbox_environment, sha256_file,
 )
 
 
@@ -122,8 +123,8 @@ def _deny_network_syscalls() -> None:
         library.seccomp_release(context)
 
 
-def _landlock_restrict(workspace_root: str) -> None:
-    """Confine filesystem access to system runtime files and one Workspace."""
+def _landlock_restrict(workspace_root: str, readonly_roots: tuple[str, ...] = ()) -> None:
+    """Confine filesystem access to runtime files, Workspace, and frozen Skills."""
 
     libc = ctypes.CDLL(None, use_errno=True)
     libc.syscall.restype = ctypes.c_long
@@ -181,6 +182,7 @@ def _landlock_restrict(workspace_root: str) -> None:
             ("/dev/null", read_file | write_file),
             ("/dev/urandom", read_file),
         ]
+        allowed_paths.extend((path, readonly) for path in readonly_roots)
         open_flags = getattr(os, "O_PATH", os.O_RDONLY) | os.O_CLOEXEC
         for value, access in allowed_paths:
             if not Path(value).exists():
@@ -211,7 +213,10 @@ def _landlock_restrict(workspace_root: str) -> None:
         os.close(ruleset_fd)
 
 
-def _resource_limits(*, cpu_seconds: int, workspace_root: str) -> None:
+def _resource_limits(
+    *, cpu_seconds: int, workspace_root: str,
+    readonly_roots: tuple[str, ...] = (),
+) -> None:
     """Install limits that are safe to apply in the forked Python child.
 
     RLIMIT_AS cannot be lowered here: the child temporarily retains the
@@ -224,7 +229,7 @@ def _resource_limits(*, cpu_seconds: int, workspace_root: str) -> None:
     resource.setrlimit(resource.RLIMIT_FSIZE, (50 * 1024 * 1024, 50 * 1024 * 1024))
     if hasattr(resource, "RLIMIT_NPROC"):
         resource.setrlimit(resource.RLIMIT_NPROC, (64, 64))
-    _landlock_restrict(workspace_root)
+    _landlock_restrict(workspace_root, readonly_roots)
     _deny_network_syscalls()
 
 
@@ -246,10 +251,33 @@ async def _watch_cancellation(invocation_id: str) -> bool:
             return True
 
 
+async def _resolve_frozen_skill_argv(db, context, argv: list[str]):
+    execution_argv = list(argv)
+    readonly_skill_roots: set[str] = set()
+    skill_inputs: dict[str, Path] = {}
+    for index, value in enumerate(argv):
+        if not value.startswith("skill://"):
+            continue
+        path, display_path = await resolve_read_path(
+            db, context=context, value=value,
+        )
+        if not path.is_file():
+            raise ValueError("Skill execution arguments must identify files")
+        parsed = value.removeprefix("skill://").split("/")
+        skill_root = (
+            Path(settings.shared_skill_root) / parsed[0] / parsed[1]
+        ).resolve()
+        readonly_skill_roots.add(str(skill_root))
+        execution_argv[index] = str(path)
+        skill_inputs[display_path] = path
+    return execution_argv, readonly_skill_roots, skill_inputs
+
+
 class ExecuteTool(BaseTool):
     name = "execute"
     description = (
-        "WHEN: run a non-interactive process with explicit argv inside the current isolated Workspace. "
+        "WHEN: run a non-interactive process with explicit argv inside the current isolated Workspace; "
+        "an exact frozen skill:// file may be supplied as a read-only argv item. "
         "WHEN NOT: never pass shell syntax or use it for Browser/network actions. "
         "RETURNS: exit status, bounded stdout/stderr, consumed checksums, and changed-file evidence. "
         "RECOVERY: narrow argv/timeout and inspect stderr; timed-out process trees are killed."
@@ -297,6 +325,19 @@ class ExecuteTool(BaseTool):
         if not isinstance(stdin, str) or len(stdin.encode("utf-8")) > 1024 * 1024:
             return ToolResult(success=False, error="stdin exceeds the 1 MiB limit")
         root = await execution_workspace_root(db, context=context)
+        try:
+            execution_argv, readonly_skill_roots, skill_inputs = (
+                await _resolve_frozen_skill_argv(db, context, argv)
+            )
+        except ValueError as error:
+            return ToolResult(
+                status="failed",
+                summary="Frozen Skill input could not be resolved",
+                error=str(error),
+                error_code="execute_skill_input_unavailable",
+                error_category="authorization",
+                error_details={"side_effect_started": False},
+            )
         _, cwd, _ = await resolve_workspace_path(
             db, workspace_id=context.workspace_id, session_id=context.session_id,
             relative_path=args.get("cwd", "."), agent_id=context.agent_id,
@@ -310,7 +351,9 @@ class ExecuteTool(BaseTool):
         memory_mb = int(args.get("memory_mb", 256))
         output_limit = int(args.get("max_output_bytes", 65536))
         input_file_checksums = {}
-        for value in argv[1:]:
+        for display_path, candidate in skill_inputs.items():
+            input_file_checksums[display_path] = sha256_file(candidate)
+        for value in execution_argv[1:]:
             if value.startswith("-"):
                 continue
             candidate = (cwd / value).resolve(strict=False)
@@ -322,14 +365,16 @@ class ExecuteTool(BaseTool):
                 input_file_checksums[value] = sha256_file(candidate)
         before = _snapshot(root)
         try:
-            bounded_argv = _bounded_execution_argv(argv, memory_mb=memory_mb)
+            bounded_argv = _bounded_execution_argv(execution_argv, memory_mb=memory_mb)
             process = await asyncio.create_subprocess_exec(
                 *bounded_argv, cwd=cwd, env=environment,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,
                 preexec_fn=lambda: _resource_limits(
-                    cpu_seconds=cpu_seconds, workspace_root=str(root),
+                    cpu_seconds=cpu_seconds,
+                    workspace_root=str(root),
+                    readonly_roots=tuple(sorted(readonly_skill_roots)),
                 ),
             )
         except (RuntimeError, subprocess.SubprocessError):
