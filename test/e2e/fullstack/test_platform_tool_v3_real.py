@@ -277,6 +277,70 @@ def test_real_multistep_chat_browser_memory_and_dynamic_mcp(
 
 
 @pytest.mark.timeout(1800)
+def test_chat_working_plan_finishes_after_report_artifact_is_published(
+    phase_api: MyClawAPI, real_llm_world: dict, record_testsuite_property,
+):
+    """Regression for Session 019fe50d: a completed Run must not leave a 4/5 plan."""
+    api = phase_api
+    session = api.create_session(real_llm_world["general"]["id"])
+
+    command = api.chat(
+        session["id"],
+        "请完整执行这个无需补充信息的多步骤任务：先写个随机数的脚本，然后跑一下，如果是单数抓取百度首页，"
+        "如果是双数抓取新浪首页，最后把抓取到的内容写成报告并发布为可下载成果",
+    )
+    run, approvals = _settle_with_tool_approvals(
+        api, session["id"], command["run"]["id"],
+    )
+    assert run["status"] == "completed", run
+
+    invocations = api.invocations(run["id"])
+    observed_tools = {
+        item["tool_key"] for item in invocations if item["status"] == "succeeded"
+    }
+    assert {"write_file", "execute", "web_fetch", "publish_artifact"} <= observed_tools
+    assert approvals
+
+    artifacts = api.request(
+        "GET", f"/api/v1/sessions/{session['id']}/artifacts",
+        params={"status": "published"},
+    ).json()["items"]
+    assert artifacts
+
+    plans = api.request(
+        "GET", f"/api/v1/runs/{run['id']}/working-plans",
+    ).json()["items"]
+    assert len(plans) == 1, plans
+    final_plan = plans[0]
+    assert final_plan["status"] == "closed", final_plan
+    assert final_plan["items"], final_plan
+    assert all(
+        item["status"] == "completed" for item in final_plan["items"]
+    ), final_plan
+
+    events = api.request("GET", f"/api/v1/runs/{run['id']}/events").json()["items"]
+    artifact_sequence = max(
+        item["sequence"] for item in events if item["event_type"] == "artifact.published"
+    )
+    completed_plan_updates = [
+        item for item in events
+        if item["event_type"] == "working_plan.updated"
+        and item["sequence"] > artifact_sequence
+        and item["payload"].get("items")
+        and all(step["status"] == "completed" for step in item["payload"]["items"])
+    ]
+    assert completed_plan_updates, {
+        "reason": "WorkingPlan was not reconciled after the report Artifact was published",
+        "artifact_sequence": artifact_sequence,
+        "final_plan": final_plan,
+    }
+    record_testsuite_property(
+        "chat_working_plan_terminal_consistency",
+        "artifact-published-before-final-plan-update,all-steps-completed",
+    )
+
+
+@pytest.mark.timeout(1800)
 def test_plan_zero_side_effect_before_approval_restart_and_real_implementation(
     phase_api: MyClawAPI, assembled_world: dict, record_testsuite_property,
 ):

@@ -135,6 +135,7 @@ export default function SessionPage() {
       ['tool', 'session_grant', 'tool_confirmation'].includes(action.type),
   )
   const clarificationActions = sessionActions.filter(action => action.type === 'clarification')
+  const pendingActionCount = toolActions.length + clarificationActions.length
   const planApproval = sessionActions.find(
     (action): action is ApprovalAction => action.type === 'plan_implementation' && action.run_id === activePlanRun?.id,
   )
@@ -546,16 +547,6 @@ export default function SessionPage() {
         >
           <div className={cn('mx-auto w-full', mode === 'group' ? 'max-w-5xl' : 'max-w-3xl')}>
             {mode === 'group' ? <div className="space-y-6">
-              <PendingActions
-                toolActions={toolActions}
-                clarifications={clarificationActions}
-                answers={clarificationAnswers}
-                deciding={decide.isPending}
-                answering={answerClarification.isPending}
-                onAnswerChange={(id, value) => setClarificationAnswers(current => ({ ...current, [id]: value }))}
-                onDecision={(action, decision) => decide.mutate({ action, decision })}
-                onAnswer={(action, answer) => answerClarification.mutate({ action, answer })}
-              />
               <GroupPanel group={activeGroup} members={groupMembers} runs={groupRuns}
                 messages={groupMessages} graph={interactionGraph} cards={networkCards?.items || []}
                 plans={groupPlans} artifacts={artifacts} requiredActions={sessionActions}
@@ -564,17 +555,6 @@ export default function SessionPage() {
                 onReplaceReporter={async value => { await replaceReporter.mutateAsync(value) }}
                 onDownload={sessionsApi.downloadArtifact} />
             </div> : <div className="space-y-6">
-              <PendingActions
-                toolActions={toolActions}
-                clarifications={clarificationActions}
-                answers={clarificationAnswers}
-                deciding={decide.isPending}
-                answering={answerClarification.isPending}
-                onAnswerChange={(id, value) => setClarificationAnswers(current => ({ ...current, [id]: value }))}
-                onDecision={(action, decision) => decide.mutate({ action, decision })}
-                onAnswer={(action, answer) => answerClarification.mutate({ action, answer })}
-              />
-
               {mode === 'plan' && <PlanPanel
                 session={sessionRecord}
                 run={activePlanRun}
@@ -618,35 +598,52 @@ export default function SessionPage() {
         </section>
 
         <footer className="shrink-0 border-t bg-background/90 px-4 pb-4 pt-3 backdrop-blur-lg">
-          <div className="mx-auto max-w-3xl">
-            <SessionComposer
-              mode={mode}
-              value={input}
-              disabled={inputDisabled}
-              submitting={submitting}
-              running={isActivelyExecuting}
-              planEntered={Boolean(planAlreadyEntered)}
-              hasPlan={Boolean(activeWorkingPlan)}
-              planCanRevise={canRevisePlan}
-              groupReady={Boolean(activeGroup && groupIsOpen)}
-              accessory={mode === 'group' && activeGroup ? <Select
-                className="w-48 shrink-0"
-                value={groupRecipient ?? ''}
-                onChange={value => setGroupRecipient(value || undefined)}
-                disabled={!groupIsOpen}
-                options={[
-                  { value: '', label: 'Reporter（默认）' },
-                  ...groupMembers.filter(member => member.status === 'joined').map(member => ({
-                    value: member.agent_id,
-                    label: networkCards?.items.find(card => card.agent_id === member.agent_id)?.name || member.agent_id.slice(0, 10),
-                  })),
-                ]}
-                aria-label="Group 接收 Agent"
-              /> : undefined}
-              onChange={setInput}
-              onSubmit={submitComposer}
-              onStop={requestCancel}
-            />
+          <div className={cn('mx-auto w-full', mode === 'group' ? 'max-w-5xl' : 'max-w-3xl')}>
+            {pendingActionCount > 0 && <div
+              className="mb-3 max-h-[min(44vh,30rem)] overflow-y-auto overscroll-contain pr-1"
+              aria-live="polite"
+            >
+              <PendingActions
+                toolActions={toolActions}
+                clarifications={clarificationActions}
+                answers={clarificationAnswers}
+                deciding={decide.isPending}
+                answering={answerClarification.isPending}
+                onAnswerChange={(id, value) => setClarificationAnswers(current => ({ ...current, [id]: value }))}
+                onDecision={(action, decision) => decide.mutate({ action, decision })}
+                onAnswer={(action, answer) => answerClarification.mutate({ action, answer })}
+              />
+            </div>}
+            <div className="mx-auto max-w-3xl">
+              <SessionComposer
+                mode={mode}
+                value={input}
+                disabled={inputDisabled}
+                submitting={submitting}
+                running={isActivelyExecuting}
+                planEntered={Boolean(planAlreadyEntered)}
+                hasPlan={Boolean(activeWorkingPlan)}
+                planCanRevise={canRevisePlan}
+                groupReady={Boolean(activeGroup && groupIsOpen)}
+                accessory={mode === 'group' && activeGroup ? <Select
+                  className="w-48 shrink-0"
+                  value={groupRecipient ?? ''}
+                  onChange={value => setGroupRecipient(value || undefined)}
+                  disabled={!groupIsOpen}
+                  options={[
+                    { value: '', label: 'Reporter（默认）' },
+                    ...groupMembers.filter(member => member.status === 'joined').map(member => ({
+                      value: member.agent_id,
+                      label: networkCards?.items.find(card => card.agent_id === member.agent_id)?.name || member.agent_id.slice(0, 10),
+                    })),
+                  ]}
+                  aria-label="Group 接收 Agent"
+                /> : undefined}
+                onChange={setInput}
+                onSubmit={submitComposer}
+                onStop={requestCancel}
+              />
+            </div>
           </div>
         </footer>
       </main>

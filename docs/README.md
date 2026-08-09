@@ -56,6 +56,7 @@
 
 ## 验收报告
 
+- [一期当前实现封板审计（2026-08-09）](acceptance/phase-one-closure-audit-2026-08-09.md)
 - [首次测试基线：一期真实业务 UAT 报告（2026-08-03）](acceptance/phase-one-uat-2026-08-03.md)
 - [修复后持久 UAT 复验报告（2026-08-03）](acceptance/phase-one-uat-revalidation-2026-08-03.md)
 - [Harness 修复实现与候选验收报告（2026-08-03）](acceptance/phase-one-harness-remediation-2026-08-03.md)
