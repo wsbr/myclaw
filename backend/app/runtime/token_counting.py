@@ -16,6 +16,50 @@ class RequestTokenCount:
     degraded: bool = False
 
 
+@dataclass(frozen=True)
+class ModelInputLimits:
+    context_window: int
+    frozen_max_output_tokens: int
+    hard_input_limit: int
+    soft_input_target: int
+
+
+def resolve_model_input_limits(
+    capabilities: dict[str, Any] | None,
+    parameters: dict[str, Any] | None,
+) -> ModelInputLimits:
+    values = dict(capabilities or {})
+    runtime_parameters = dict(parameters or {})
+    context_window = int(values.get("context_window", 24_000))
+    raw_frozen_output = runtime_parameters.get(
+        "max_output_tokens", runtime_parameters.get("max_tokens", 8192),
+    )
+    if (
+        isinstance(raw_frozen_output, bool)
+        or not isinstance(raw_frozen_output, int)
+        or raw_frozen_output <= 0
+    ):
+        raise ValueError("frozen output limit must be a positive integer")
+    frozen_output = raw_frozen_output
+    declared_output = values.get("max_output_tokens")
+    if declared_output is not None and frozen_output > int(declared_output):
+        raise ValueError("frozen output exceeds declared model capability")
+    context_derived = context_window - frozen_output
+    declared_input = values.get("max_input_tokens")
+    hard_limit = min(
+        context_derived,
+        int(declared_input) if declared_input is not None else context_derived,
+    )
+    if hard_limit <= 0:
+        raise ValueError("frozen output leaves no model input capacity")
+    return ModelInputLimits(
+        context_window=context_window,
+        frozen_max_output_tokens=frozen_output,
+        hard_input_limit=hard_limit,
+        soft_input_target=max(1, int(hard_limit * 0.8)),
+    )
+
+
 def conservative_request_tokens(
     messages: list[dict] | tuple[dict, ...],
     tools: list[dict] | tuple[dict, ...] | None = None,

@@ -249,7 +249,7 @@ async def test_search_tools_empty_query_can_inventory_the_authorized_catalog():
 
 
 @pytest.mark.asyncio
-async def test_web_fetch_bounds_model_visible_text_by_default(monkeypatch):
+async def test_web_fetch_uses_platform_owned_balanced_capture_limits(monkeypatch):
     captured: dict = {}
 
     async def fake_safe_fetch(url: str, **kwargs):
@@ -275,8 +275,11 @@ async def test_web_fetch_bounds_model_visible_text_by_default(monkeypatch):
     )
 
     assert result.success is True
-    assert captured["max_text_chars"] == 8_000
-    assert BUILTIN_TOOLS["web_fetch"].input_schema["properties"]["max_chars"]["maximum"] == 100_000
+    assert captured["max_text_chars"] == 100_000
+    assert captured["max_bytes"] == 2 * 1024 * 1024
+    assert captured["objective"] == "Extract the main factual content from this source."
+    assert set(BUILTIN_TOOLS["web_fetch"].input_schema["properties"]) == {"url", "objective"}
+    assert BUILTIN_TOOLS["web_fetch"].input_schema["required"] == ["url", "objective"]
 
 
 def test_execute_applies_memory_limit_after_the_worker_python_image_is_replaced(monkeypatch):
@@ -466,10 +469,13 @@ async def test_bailian_search_uses_forced_native_search_and_only_structured_evid
         "forced_search": True, "enable_source": True,
         "search_strategy": "turbo", "freshness": 7,
     }
-    assert items == [{
+    assert len(items) == 1
+    assert items[0] == {
         "title": "Official result", "url": "https://example.com/source",
         "snippet": "Structured provider snippet", "published_at": "2026-08-10",
-    }]
+        "source_id": items[0]["source_id"], "site_name": "example.com",
+    }
+    assert items[0]["source_id"].startswith("web-")
     assert "Generated prose" not in json.dumps(items)
     assert provider == {
         "name": "bailian", "request_id": "req-bailian-real",

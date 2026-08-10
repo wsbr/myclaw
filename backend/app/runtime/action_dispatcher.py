@@ -37,15 +37,36 @@ class DispatchResult:
     wait_reason: str | None = None
 
     def provider_message(self) -> dict[str, Any]:
+        result = self.result
+        if self.tool_name in {"web_search", "web_fetch"}:
+            from app.runtime.web_result_projection import (
+                BALANCED_SINGLE_FETCH_TOKENS,
+                BALANCED_SINGLE_SEARCH_TOKENS,
+                project_web_result,
+            )
+
+            result = project_web_result(
+                self.tool_name, result,
+                max_tokens=(
+                    BALANCED_SINGLE_FETCH_TOKENS
+                    if self.tool_name == "web_fetch"
+                    else BALANCED_SINGLE_SEARCH_TOKENS
+                ),
+            )
         return {
             "role": "tool",
             "tool_use_id": self.call_id,
             "tool_call_id": self.call_id,
-            "content": json.dumps(self.result.model_dump(mode="json"), ensure_ascii=False),
+            "content": json.dumps(result.model_dump(mode="json"), ensure_ascii=False),
         }
 
 
 Executor = Callable[[str, dict[str, Any], RuntimeContext, AsyncSession | None], Awaitable[ToolResult]]
+
+WEB_RETRIEVAL_LIMITS = {
+    "web_search": {"turn": 2, "normal_run": 2, "run": 6},
+    "web_fetch": {"turn": 3, "normal_run": 3, "run": 8},
+}
 
 
 def _safe_argument_projection(value: Any, *, force_text_redaction: bool = False) -> Any:
@@ -265,6 +286,104 @@ class ActionDispatcher:
             )
         return None
 
+    async def _apply_web_retrieval_limits(
+        self, calls: list[ToolCallItem], *, db: AsyncSession | None,
+        runtime_context: RuntimeContext, run_id: str | None,
+        source_turn_id: str | None,
+    ) -> tuple[list[ToolCallItem], dict[str, DispatchResult]]:
+        if db is None or not run_id or not source_turn_id or not any(
+            call.name in WEB_RETRIEVAL_LIMITS for call in calls
+        ):
+            return calls, {}
+        # Serialize admission on the existing Session -> Run aggregate lock
+        # order so concurrent Group members cannot race the per-Run ceiling.
+        await db.scalar(select(UserSession).where(
+            UserSession.id == runtime_context.session_id,
+        ).execution_options(populate_existing=True).with_for_update())
+        await db.scalar(select(Run).where(
+            Run.id == run_id,
+        ).execution_options(populate_existing=True).with_for_update())
+        existing = list(await db.scalars(select(ToolInvocation).where(
+            ToolInvocation.run_id == run_id,
+            ToolInvocation.tool_key.in_(tuple(WEB_RETRIEVAL_LIMITS)),
+        )))
+        run_counts = {
+            name: sum(item.tool_key == name for item in existing)
+            for name in WEB_RETRIEVAL_LIMITS
+        }
+        turn_counts = {
+            name: sum(
+                item.tool_key == name and item.source_turn_id == source_turn_id
+                for item in existing
+            )
+            for name in WEB_RETRIEVAL_LIMITS
+        }
+        failed_counts = {
+            name: sum(
+                item.tool_key == name
+                and item.status in {"failed", "cancelled", "outcome_unknown"}
+                for item in existing
+            )
+            for name in WEB_RETRIEVAL_LIMITS
+        }
+        existing_calls = {
+            (item.tool_key, item.source_turn_id, item.provider_tool_call_id)
+            for item in existing
+        }
+        admitted: list[ToolCallItem] = []
+        rejected: dict[str, DispatchResult] = {}
+        for call in calls:
+            limits = WEB_RETRIEVAL_LIMITS.get(call.name)
+            if limits is None or (
+                call.name, source_turn_id, call.call_id
+            ) in existing_calls:
+                admitted.append(call)
+                continue
+            dimension = None
+            limit = None
+            used = None
+            if turn_counts[call.name] >= limits["turn"]:
+                dimension, limit, used = "agent_turn", limits["turn"], turn_counts[call.name]
+            elif run_counts[call.name] >= limits["run"]:
+                dimension, limit, used = "run", limits["run"], run_counts[call.name]
+            elif run_counts[call.name] >= min(
+                limits["run"], limits["normal_run"] + failed_counts[call.name],
+            ):
+                # The wider 6/8 Run ceilings are replacement capacity, not an
+                # exploration allowance. Every call beyond the normal 2/3
+                # envelope must replace a prior typed terminal failure.
+                dimension = "run_recovery_reserve"
+                limit = min(
+                    limits["run"], limits["normal_run"] + failed_counts[call.name],
+                )
+                used = run_counts[call.name]
+            if dimension is not None:
+                result = DispatchResult(
+                    call.call_id, call.name,
+                    ToolResult(
+                        status="failed", summary="Balanced web retrieval limit exceeded",
+                        error=ToolError(
+                            code="web_retrieval_limit_exceeded",
+                            message=(
+                                f"{call.name} exceeded its per-{dimension} Balanced limit"
+                            ),
+                            category="authorization",
+                            details={"dimension": dimension, "limit": limit, "used": used},
+                        ),
+                    ),
+                )
+                rejected[call.call_id] = result
+                await _record_authorization_rejection(
+                    db, call=call, context=runtime_context, run_id=run_id,
+                    source_turn_id=source_turn_id,
+                    error_code="web_retrieval_limit_exceeded",
+                )
+                continue
+            admitted.append(call)
+            turn_counts[call.name] += 1
+            run_counts[call.name] += 1
+        return admitted, rejected
+
     async def dispatch_batch(
         self, calls: list[ToolCallItem], *,
         capability_snapshot: CapabilitySnapshot | dict[str, Any],
@@ -299,6 +418,11 @@ class ActionDispatcher:
                     )
             else:
                 admitted.append(call)
+        admitted, web_rejected = await self._apply_web_retrieval_limits(
+            admitted, db=db, runtime_context=runtime_context,
+            run_id=run_id, source_turn_id=source_turn_id,
+        )
+        rejected.update(web_rejected)
         # Risk classification is part of whole-batch preflight. Execution
         # repeats it immediately before admission so a Browser revision or
         # governance change cannot rely on this earlier snapshot.

@@ -398,11 +398,21 @@ def builtin_tool_specs() -> list[CodeToolSpec]:
             ],
             annotations={
                 "untrusted_external_content": tool.name.startswith(("web_", "browser_")),
+                **({
+                    "retrieval_profile": "balanced",
+                    "model_visible_total_tokens": 12_000,
+                    "model_visible_input_fraction": 0.20,
+                    "per_turn_limit": 2 if tool.name == "web_search" else 3,
+                    "normal_run_limit": 2 if tool.name == "web_search" else 3,
+                    "per_run_limit": 6 if tool.name == "web_search" else 8,
+                } if tool.name in {"web_search", "web_fetch"} else {}),
             },
             implementation_ref=f"{tool.__class__.__module__}:{tool.__class__.__name__}",
             implementation_version=(
-                "platform-tools.v3.web-fetch-3"
+                "platform-tools.v3.web-fetch-balanced-4"
                 if tool.name == "web_fetch"
+                else "platform-tools.v3.web-search-balanced-2"
+                if tool.name == "web_search"
                 else "platform-tools.v3.execute-2"
                 if tool.name == "execute"
                 else "platform-tools.v3.publish-artifact-2"

@@ -8,7 +8,8 @@
 controlled_uat_candidate: GO（以包含本文的 clean SHA 门禁为准）
 phase_one_definition_of_done: NO-GO
 enterprise_production: NO-GO
-full_search_real_gate: GO（Bailian 原生 Search 模式；以本文 clean SHA 证据为准）
+balanced_bailian_real_uat: GO（本次 clean SHA 的三项定向证据）
+full_search_real_gate: NOT-RUN（完整矩阵的最近一次通过属于更早 SHA）
 ```
 
 封板提交不在正文自引用 SHA。`test/scripts/run_ci_gates.sh` 会要求工作树 clean、HEAD 与 `MYCLAW_ACCEPTANCE_COMMIT_SHA` 完全一致，并输出绑定该 SHA 的 JUnit 与 JSON manifest；浏览器证据另输出 PNG checksum manifest。
@@ -40,7 +41,7 @@ full_search_real_gate: GO（Bailian 原生 Search 模式；以本文 clean SHA �
 
 ### Context 80% 软水位
 
-- `hard_input_limit = context_window - frozen max_tokens`，soft target 为其 80%。
+- `hard_input_limit = min(context_window - frozen max_tokens, max_input_tokens)`；未声明 `max_input_tokens` 时兼容原公式，soft target 为 hard limit 的 80%。
 - 计数对象是完整请求：Messages、Tool schema、WorkingPlan、Skill catalog、策略段及未消费结果。
 - Anthropic 使用原生 count API；官方 OpenAI 使用模型 tokenizer；其他 OpenAI-compatible 使用保守 UTF-8 / JSON 结构估算。计数失败降级并记录方法。
 - 超过 soft target 时只从最旧 ambient History 开始裁剪；ready 语义摘要已作为低 authority 数据段先行替代其历史前缀。旧的 hash fact System 伪摘要已删除。
@@ -55,15 +56,25 @@ full_search_real_gate: GO（Bailian 原生 Search 模式；以本文 clean SHA �
 - 搜索调用记录安全的 request id、模型、策略、延迟和真实 token usage，不记录 Prompt 正文或凭据；生成正文固定限制为 64 tokens 以控制 Tool 成本。
 - 管理页面可直接新建、加密保存、设为主搜索并真实测试 Bailian；Agent 发布时继续冻结主 Search connection revision。
 
+### Balanced Web Search / Fetch Harness
+
+- `web_search` 与 `web_fetch` 保持两个显式模型 Tool；前者只负责发现来源，后者必须携带 `objective` 做页面级验证，不增加搜索子 Agent 或隐藏摘要模型调用。
+- 当前 ToolVersion 只向模型开放 query / freshness / domains 与 url / objective；旧版本的 count、country、`pd/pw/pm/py` 和 Fetch 传输参数仍由执行器兼容，但超时、字节数和字符数由平台固定。
+- 正常 Run 以 2 次 Search、3 次 Fetch 收敛；硬限额仍为每 AgentTurn 2/3、每 Run 6/8。2/3 之后只有已有类型化终态失败才按失败数解锁替代调用，不能把恢复储备当成探索额度；超限在外部请求前返回 `web_retrieval_limit_exceeded`。
+- Search 固定最多 8 个候选，URL 去 tracking / fragment 后去重，每个注册域名先保留两条再回填；北京时间相对日期被改写为明确日期区间，Bailian 固定 `turbo`。
+- Fetch 固定 20 秒、2 MiB 原始捕获、100,000 字符规范化正文；HTML 去除导航等噪声，HTML/PDF 用中英文确定性相关段落选择，并拒绝 SSRF、MIME 异常与联合信号命中的 HTTP 200 soft-404。
+- 数据库保留完整受限 ToolResult、request id / usage / checksum；Provider 只接收 source id、标题、真实 URL、日期和 objective 相关 excerpts。共享投影预算为 `min(12,000 tokens, hard_input_limit × 20%)`，旧结果降为 citation digest。
+- `prompt_manifest` 与 Runner trace 只记录固定北京时间事实及 hash、full/projected 大小、token 估算、checksum、消费状态和省略原因，不记录网页正文或 Prompt 正文。
+
 ## 证据边界
 
 封板后的必跑证据分三层：
 
 1. `standard`：全部 Backend unit、Frontend production build、空 MySQL migration、单一 Alembic head、MySQL Tool / Skill integration 与 schema/trigger contract。
 2. `minimal-real`：只要求真实 LLM，不要求 Search provider；覆盖多步骤 Chat 最终 Plan 全完成、长 Session 异步语义摘要并在下一 Runner 使用、明确用户事实异步提取与召回、Skill 上传/发布/同步及模型渐进读取、Chromium 页面查看/编辑/预览并保存不可变新版本。
-3. `real`：要求真实 LLM 与显式选择的真实 Search 模式。本候选使用 `MYCLAW_REAL_SEARCH_PROVIDER=bailian`，覆盖 Bailian 中英文和四种 freshness、Search→Fetch→引用、动态 MCP、隔离 Chromium、30 项自然语言盲测、多步 Chat / Plan / Group 及真实产品 UI。
+3. `balanced-bailian-real`：复用本机 UAT 中页面写入并加密保存的 Bailian Secret，覆盖北京时间最近一周改写、Search→目标化 Fetch→真实引用、长 HTML 完整受限持久化与紧凑投影，以及 HTTP 200 soft-404 单次拒绝。完整 `real` gate 的中英文四种 freshness、动态 MCP、隔离 Chromium、30 项自然语言盲测、多步 Chat / Plan / Group 与完整产品 UI 矩阵本次未在最终 SHA 重跑。
 
-当前 real/minimal-real 模型为 `qwen3.5-plus`。fixture 按百炼公开规格冻结 1,000,000 token context window；其他模型默认保持保守 32,768，亦可通过 `MYCLAW_REAL_LLM_CAPABILITIES` 显式覆盖。不得为了通过门禁把真实 1M 模型误冻结为旧 32K，也不得绕过 Runtime 的 hard-limit 检查。
+当前 real/minimal-real 模型为 `qwen3.5-plus`。fixture 冻结 `context_window=1,000,000`、`max_input_tokens=983,616`、`max_output_tokens=65,536`，默认生成上限仍为 4,096 且 thinking 保持开启；其他模型默认保持保守 32,768，亦可通过 `MYCLAW_REAL_LLM_CAPABILITIES` 显式覆盖。不得为了通过门禁把真实 1M 模型误冻结为旧 32K，也不得绕过 Runtime 的 hard-limit 检查。
 
 `minimal-real` 输出：
 
@@ -72,7 +83,7 @@ full_search_real_gate: GO（Bailian 原生 Search 模式；以本文 clean SHA �
 - `minimal-browser-checksums.txt` 及其 manifest SHA-256；
 - Skill 页面浏览器截图。
 
-`real` 另输出 `real-model-fullstack.xml`、`real-gates.json`、`real-browser-checksums.txt` 及其 manifest SHA-256，并绑定同一 clean commit。Bocha / Brave 双 Provider 与 failover 矩阵仍作为扩展验收项，不再阻断本次 Bailian 真实 Search 完成口径。
+本次定向 Bailian 验收另输出 `bailian-balanced-uat.xml` 与 `bailian-balanced-uat.json`，记录 Run / ToolInvocation ID、投影统计、完整结果 checksum，并绑定同一 clean commit。历史 `real-model-fullstack.xml`、`real-gates.json` 与 `real-browser-checksums.txt` 属于更早提交的完整套件证据，不能当作本次 clean SHA 的通过证明。Bocha / Brave 双 Provider、failover 和完整 `real` 矩阵仍作为扩展验收项，不阻断本次 Balanced 改造的受控 UAT 完成口径。
 
 ## 回归覆盖
 
@@ -86,10 +97,11 @@ full_search_real_gate: GO（Bailian 原生 Search 模式；以本文 clean SHA �
 - “Run 预算只剩 1 Token 仍调用，真实 overage 只拦下一次”的回归。
 - Bailian 强制搜索请求、四种 freshness、真实 usage、安全配置边界，以及“HTTP 200 但没有 search_info”不可发布为证据。
 - Group Reporter 使用 `invoke_agent` 对两个冻结成员完成真实委派，以及委派结果保持 Tool continuation authority、不进入 System role。
+- Runner 北京时间快照、跨午夜 replacement、显式日期区间、Qwen 输入上限公式、新旧 Web schema、URL 多样性、中英文摘录、四个并行长 Fetch 的共享预算、失败 ToolResult JSON 续跑和 Search / Fetch Run 限额。
 
 ## 保留风险
 
-- 本候选只证明 Bailian 原生 Search 的真实可用性；Bocha / Brave 双 Provider 可用性与跨 Provider failover 未由本候选证明。
+- 本候选只证明 Bailian 原生 Search 与本轮 Balanced Search / Fetch 路径的三项定向真实可用性；Bocha / Brave 双 Provider 可用性、跨 Provider failover 与完整 `real` 矩阵未由本次 clean SHA 证明。
 - Bailian Search 内部仍会产生模型 token 和搜索费用；连接 config 冻结具体模型/策略，但生产前仍需独立成本上限、配额告警与供应商 SLO。
 - maintenance 模型调用不计入已终态 Run 的硬预算，但仍会产生独立 Provider 成本；生产前需要单独的 maintenance 成本/SLO 配额。
 - soft target 不是硬拒绝线；当不可裁剪 authoritative input 较大时会允许进入 80%–100% 区间并告警。
@@ -99,6 +111,6 @@ full_search_real_gate: GO（Bailian 原生 Search 模式；以本文 clean SHA �
 
 - 将 `vibe_3` 当前全部改动作为单次提交：`chore: seal vibe_3 controlled-UAT candidate`。
 - 提交前跑 unit、compile、diff、Frontend build、MySQL migration/integration 与定向测试。
-- 提交后在 clean SHA 上从头跑 `standard`、`minimal-real`、Bailian `real`，随后用同一 SHA 重建本地 UAT并检查健康状态。
+- 提交后在 clean SHA 上从头跑 `standard`、`minimal-real` 与三项 `balanced-bailian-real`，随后用同一 SHA 重建本地 UAT并检查健康状态。完整 `real` 矩阵保留为后续扩展门禁。
 - 任一失败均修复后 amend 同一封板提交，并从 clean-SHA gate 起点重跑。
 - 最终工作树必须 clean、Alembic 必须单一 `0033` head；本轮不 push、不打 tag。

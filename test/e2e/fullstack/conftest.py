@@ -153,8 +153,9 @@ def _default_real_llm_capabilities(model_name: str) -> dict:
     # The controlled UAT model is qwen3.5-plus. Its documented context window
     # is 1M tokens; freezing the old 32K fallback makes the platform reject a
     # valid continuation after real Search/Fetch results are appended.
-    context_window = 1_000_000 if normalized.startswith("qwen3.5-plus") else 32_768
-    return {
+    qwen35_plus = normalized.startswith("qwen3.5-plus")
+    context_window = 1_000_000 if qwen35_plus else 32_768
+    capabilities = {
         "streaming": True,
         "native_tool_calling": True,
         "parallel_tool_calling": False,
@@ -164,6 +165,12 @@ def _default_real_llm_capabilities(model_name: str) -> dict:
         "context_window": context_window,
         "structured_output": "none",
     }
+    if qwen35_plus:
+        capabilities.update({
+            "max_input_tokens": 983_616,
+            "max_output_tokens": 65_536,
+        })
+    return capabilities
 
 
 @pytest.fixture(scope="session")

@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import os
+import random
 import socket
 from dataclasses import dataclass
 from datetime import timedelta
@@ -133,6 +134,7 @@ class SandboxClaim:
     group_session_id: str | None
     group_run_id: str | None
     group_membership_id: str | None
+    runtime_clock: dict
     preflight_error: str | None = None
 
 
@@ -371,7 +373,9 @@ class SandboxWorker:
                 ),
                 connection_revision_id=invocation.connection_revision_id,
                 group_session_id=group_session_id, group_run_id=work.group_run_id,
-                group_membership_id=work.group_membership_id, preflight_error=preflight_error,
+                group_membership_id=work.group_membership_id,
+                runtime_clock=dict((source_runner.prompt_manifest or {}).get("runtime_clock") or {}),
+                preflight_error=preflight_error,
             )
 
     async def execute(self, claim: SandboxClaim) -> None:
@@ -400,6 +404,7 @@ class SandboxWorker:
                     execution_epoch=claim.execution_epoch,
                     group_session_id=claim.group_session_id, group_run_id=claim.group_run_id,
                     group_membership_id=claim.group_membership_id,
+                    runtime_clock=dict(claim.runtime_clock),
                 )
                 # Tool implementations that publish Artifacts, advance Browser
                 # state, or create Memory candidates write authoritative rows.
@@ -604,10 +609,14 @@ class SandboxWorker:
                 invocation.status = "outcome_unknown"
             else:
                 attempt.status = "failed"
+                max_attempts = (
+                    2 if invocation.tool_key in {"web_search", "web_fetch"}
+                    else settings.sandbox_tool_max_attempts
+                )
                 safe_retry = (
                     result.retryable
                     and claim.side_effect in {"none", "idempotent"}
-                    and invocation.attempt_count < settings.sandbox_tool_max_attempts
+                    and invocation.attempt_count < max_attempts
                 )
                 invocation.status = "queued" if safe_retry else "failed"
             attempt.response_snapshot = envelope
@@ -655,7 +664,9 @@ class SandboxWorker:
                     partition_key=run.session_id,
                     dedupe_key=f"event:{settled.id}:retry_tool",
                     payload_ref={"tool_invocation_id": invocation.id},
-                    available_at=utcnow() + timedelta(seconds=2 ** invocation.attempt_count),
+                    available_at=utcnow() + timedelta(
+                        seconds=(2 ** invocation.attempt_count) + random.uniform(0.05, 0.5)
+                    ),
                 )
                 return
             if run.status in {"completed", "cancelled", "failed"} or work.status not in {
@@ -728,6 +739,7 @@ class SandboxWorker:
                 connection_revision_id=invocation.connection_revision_id,
                 group_session_id=group_session_id, group_run_id=work.group_run_id,
                 group_membership_id=work.group_membership_id,
+                runtime_clock=dict((source.prompt_manifest or {}).get("runtime_clock") or {}),
             )
         await self.settle(claim, ToolResult(
             status="failed", error="Sandbox worker stopped after process execution may have started",

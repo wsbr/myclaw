@@ -166,6 +166,46 @@ class ProviderConformanceSuite:
         if missing:
             return ConformanceReport(False, tuple(probes))
 
+        limit_errors = []
+        for key in ("context_window", "max_input_tokens", "max_output_tokens"):
+            value = capabilities.get(key)
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or value <= 0
+            ):
+                limit_errors.append(f"{key}_invalid")
+        context_window = capabilities.get("context_window")
+        max_input = capabilities.get("max_input_tokens")
+        max_output = capabilities.get("max_output_tokens")
+        if context_window and max_input and max_input > context_window:
+            limit_errors.append("max_input_exceeds_context")
+        if context_window and max_output and max_output > context_window:
+            limit_errors.append("max_output_exceeds_context")
+        frozen_output = (version.default_parameters or {}).get(
+            "max_output_tokens",
+            (version.default_parameters or {}).get("max_tokens", 8192),
+        )
+        if (
+            isinstance(frozen_output, bool)
+            or not isinstance(frozen_output, int)
+            or frozen_output <= 0
+        ):
+            limit_errors.append("frozen_output_invalid")
+        elif max_output and frozen_output > max_output:
+            limit_errors.append("frozen_output_exceeds_capability")
+        probes.append({
+            "name": "declared_context_limits",
+            "passed": not limit_errors,
+            "details": {
+                "errors": limit_errors,
+                "context_window": context_window,
+                "max_input_tokens": max_input,
+                "max_output_tokens": max_output,
+                "frozen_output_tokens": frozen_output,
+            },
+        })
+        if limit_errors:
+            return ConformanceReport(False, tuple(probes))
+
         base_parameters = _base_probe_parameters(version)
         zero_payload_proxy = _ZeroPayloadOnce(self.provider)
         plain = await ModelAdapter(zero_payload_proxy).invoke(ProviderRequest(

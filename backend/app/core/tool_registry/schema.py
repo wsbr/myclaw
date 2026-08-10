@@ -203,13 +203,17 @@ BUILTIN_RESULT_DATA_SCHEMAS: dict[str, dict[str, Any]] = {
         "source_message_ids": _A, "observed_head_version": {"type": ["integer", "null"]},
         "memory_id": _N_S, "rejection_code": _N_S,
     }),
-    "web_search": _object("query", "results", "count", properties={
-        "query": _S, "results": _A, "count": _I,
+    "web_search": _object("query", "original_query", "effective_query", "results", "count", "retrieved_at", properties={
+        "query": _S, "original_query": _S, "effective_query": _S,
+        "results": _A, "count": _I, "retrieved_at": _S,
+        "freshness": _N_S, "domains": _A,
+        "checksum": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     }),
-    "web_fetch": _object("final_url", "mime_type", "text", "checksum", "truncated", "text_length", properties={
+    "web_fetch": _object("final_url", "mime_type", "source_id", "checksum", "truncated", "text_length", "excerpts", "retrieved_at", "objective", properties={
         "final_url": {"type": "string", "format": "uri"}, "mime_type": _S,
         "text": _S, "checksum": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-        "truncated": _B, "text_length": _I,
+        "source_id": _S, "truncated": _B, "text_length": _I,
+        "excerpts": _A, "retrieved_at": _S, "objective": _S,
     }),
     "browser_navigate": _object("url", "title", "status_code", "page_revision", "origin", properties={
         "url": {"type": "string", "format": "uri"}, "title": _S,

@@ -557,6 +557,18 @@ def _safe_harness_diagnostics(runner: DurableRunner) -> dict:
     assembly = runner.assembly_snapshot or {}
     manifest = runner.prompt_manifest or {}
     capabilities = manifest.get("capabilities") or {}
+    projection = [
+        {
+            key: item.get(key)
+            for key in (
+                "tool_name", "tool_call_id", "full_result_hash", "full_chars",
+                "full_tokens", "projected_chars", "projected_tokens", "omitted",
+                "consumed", "omission_reason",
+            )
+        }
+        for item in list(manifest.get("web_projection") or [])
+        if isinstance(item, dict)
+    ]
     return {
         "agent_version_id": assembly.get("agent_version_id"),
         "model_id": assembly.get("model_id"),
@@ -564,6 +576,12 @@ def _safe_harness_diagnostics(runner: DurableRunner) -> dict:
         "assembled_tool_keys": list(capabilities.get("assembled_tool_keys") or []),
         "effective_tool_keys": list(capabilities.get("effective_tool_keys") or []),
         "harness_tool_keys": list(capabilities.get("harness_tool_keys") or []),
+        "runtime_clock": dict(manifest.get("runtime_clock") or {}),
+        "web_projection": projection,
+        "count_method": manifest.get("count_method"),
+        "pre_call_count": manifest.get("pre_call_count"),
+        "soft_input_target": manifest.get("soft_input_target"),
+        "hard_input_limit": manifest.get("hard_input_limit"),
     }
 
 

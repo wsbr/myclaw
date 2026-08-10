@@ -54,6 +54,11 @@ class ToolResult(BaseModel):
                 category=values.pop("error_category", "provider"),
                 details=values.pop("error_details", {}),
             )
+        elif isinstance(raw_error, dict):
+            # ``model_validate`` re-enters this compatibility constructor with
+            # a serialized ToolError. Normalize it before the default-summary
+            # path dereferences ``.message``.
+            values["error"] = ToolError.model_validate(raw_error)
         if values["status"] != "succeeded" and values.get("error") is None:
             category = values.pop(
                 "error_category",
@@ -117,6 +122,7 @@ class RuntimeContext(BaseModel):
     group_session_id: str | None = None
     group_run_id: str | None = None
     group_membership_id: str | None = None
+    runtime_clock: dict[str, Any] = Field(default_factory=dict)
 
     model_config = {"arbitrary_types_allowed": True}
 

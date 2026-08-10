@@ -1,7 +1,7 @@
 from urllib.parse import urlsplit
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 def _validate_model_capabilities(value: dict | None) -> dict | None:
@@ -10,6 +10,25 @@ def _validate_model_capabilities(value: dict | None) -> dict | None:
     structured_output = value.get("structured_output")
     if structured_output is not None and structured_output not in {"json_schema", "json_object", "none"}:
         raise ValueError("structured_output must be json_schema, json_object, or none")
+    for key in ("context_window", "max_input_tokens", "max_output_tokens"):
+        limit = value.get(key)
+        if limit is not None and (
+            isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0
+        ):
+            raise ValueError(f"{key} must be a positive integer")
+    context_window = value.get("context_window")
+    max_input_tokens = value.get("max_input_tokens")
+    max_output_tokens = value.get("max_output_tokens")
+    if (
+        context_window is not None and max_input_tokens is not None
+        and max_input_tokens > context_window
+    ):
+        raise ValueError("max_input_tokens must not exceed context_window")
+    if (
+        context_window is not None and max_output_tokens is not None
+        and max_output_tokens > context_window
+    ):
+        raise ValueError("max_output_tokens must not exceed context_window")
     return value
 
 
@@ -47,6 +66,20 @@ def _validate_endpoint(value: str | None) -> str | None:
     return normalized
 
 
+def _validate_default_output(parameters: dict, capabilities: dict) -> None:
+    raw = parameters.get(
+        "max_output_tokens", parameters.get("max_tokens", 8192),
+    )
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw <= 0:
+        raise ValueError("default max output tokens must be a positive integer")
+    declared = capabilities.get("max_output_tokens")
+    if declared is not None and raw > declared:
+        raise ValueError("default max output tokens must not exceed model capability")
+    context_window = capabilities.get("context_window")
+    if context_window is not None and raw >= context_window:
+        raise ValueError("default max output tokens must be smaller than context_window")
+
+
 class ModelCreate(BaseModel):
     key: str
     provider: str
@@ -66,6 +99,11 @@ class ModelCreate(BaseModel):
     _default_parameters_have_no_secrets = field_validator("default_parameters")(_validate_no_embedded_secrets)
     _capabilities_have_no_secrets = field_validator("capabilities")(_validate_no_embedded_secrets)
     _endpoint_is_valid = field_validator("endpoint")(_validate_endpoint)
+
+    @model_validator(mode="after")
+    def _default_output_is_valid(self):
+        _validate_default_output(self.default_parameters, self.capabilities)
+        return self
 
 
 class LogicalModelCreate(BaseModel):
@@ -90,6 +128,11 @@ class ModelVersionCreate(BaseModel):
     _default_parameters_have_no_secrets = field_validator("default_parameters")(_validate_no_embedded_secrets)
     _capabilities_have_no_secrets = field_validator("capabilities")(_validate_no_embedded_secrets)
     _endpoint_is_valid = field_validator("endpoint")(_validate_endpoint)
+
+    @model_validator(mode="after")
+    def _default_output_is_valid(self):
+        _validate_default_output(self.default_parameters, self.capabilities)
+        return self
 
 
 class ModelPatch(BaseModel):

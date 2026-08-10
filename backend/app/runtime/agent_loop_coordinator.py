@@ -27,6 +27,7 @@ from app.runtime.protocol import (
     StopReason,
 )
 from app.runtime.token_counting import count_provider_request
+from app.runtime.web_result_projection import project_web_messages
 from app.services.run_reliability_service import (
     BudgetExceeded, assert_post_provider_budget, assert_turn_budget,
     record_progress,
@@ -174,6 +175,9 @@ class AgentLoopCoordinator:
             request_count = None
             history_before_count = history_count
             if context.hard_input_limit is not None:
+                messages, turn_web_projection = project_web_messages(
+                    messages, hard_input_limit=context.hard_input_limit,
+                )
                 provider_type = (
                     identity.provider if identity is not None
                     else type(self.adapter.provider).__name__.removesuffix("LLM").lower()
@@ -218,6 +222,9 @@ class AgentLoopCoordinator:
                                 if history_count < history_before_count
                                 else prompt_manifest.get("compaction_reason")
                             ),
+                            **({
+                                "web_projection_latest": turn_web_projection,
+                            } if turn_web_projection else {}),
                         })
                         active_runner.prompt_manifest = prompt_manifest
                 previous = await db.scalar(select(func.max(AgentTurn.turn_no)).where(

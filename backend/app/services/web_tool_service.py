@@ -7,9 +7,11 @@ import hashlib
 import ipaddress
 import io
 import json
+import re
 import socket
 import time
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from datetime import date, datetime, timedelta, timezone
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 import httpx
 from bs4 import BeautifulSoup
@@ -18,12 +20,196 @@ from pypdf import PdfReader
 from app.config import settings
 
 
+BALANCED_SEARCH_RESULT_LIMIT = 8
+BALANCED_FETCH_MAX_BYTES = 2 * 1024 * 1024
+BALANCED_FETCH_MAX_TEXT_CHARS = 100_000
+BALANCED_FETCH_TIMEOUT_SECONDS = 20
+
+_FRESHNESS_ALIASES = {
+    "day": "pd", "week": "pw", "month": "pm", "year": "py",
+    "pd": "pd", "pw": "pw", "pm": "pm", "py": "py",
+}
+_TRACKING_QUERY_KEYS = {
+    "fbclid", "gclid", "mc_cid", "mc_eid", "ref", "ref_src", "spm",
+}
+_RELATIVE_TIME_PATTERN = re.compile(
+    r"(?:今天|今日|昨天|昨日|本周|这周|最近|近期|当前|最新|今年|"
+    r"\btoday\b|\byesterday\b|\bthis\s+week\b|\blast\s+week\b|"
+    r"\brecent(?:ly)?\b|\bcurrent(?:ly)?\b|\blatest\b|\bthis\s+year\b)",
+    re.IGNORECASE,
+)
+_SOFT_404_PATTERN = re.compile(
+    r"(?:\b404\b|page\s+not\s+found|not\s+found|页面不存在|找不到页面|内容不存在)",
+    re.IGNORECASE,
+)
+_COMMON_MULTIPART_SUFFIXES = {
+    "co.uk", "com.au", "com.br", "com.cn", "com.hk", "com.sg", "co.jp",
+    "co.kr", "co.nz", "org.uk", "net.cn", "org.cn",
+}
+
+
 class WebToolError(RuntimeError):
     def __init__(self, message: str, *, code: str, category: str = "provider", retryable: bool = False):
         self.code = code
         self.category = category
         self.retryable = retryable
         super().__init__(message)
+
+
+def normalize_freshness(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = _FRESHNESS_ALIASES.get(str(value).casefold())
+    if normalized is None:
+        raise WebToolError(
+            "freshness must be day, week, month, or year",
+            code="invalid_freshness", category="validation",
+        )
+    return normalized
+
+
+def _normalized_domain(value: str) -> str:
+    candidate = value.strip().casefold().rstrip(".")
+    if not candidate or len(candidate) > 253 or "/" in candidate or ":" in candidate:
+        raise WebToolError(
+            "domains must contain DNS hostnames only",
+            code="invalid_search_domain", category="validation",
+        )
+    if any(
+        not label or len(label) > 63 or not re.fullmatch(r"[a-z0-9-]+", label)
+        or label.startswith("-") or label.endswith("-")
+        for label in candidate.split(".")
+    ):
+        raise WebToolError(
+            "domains must contain valid DNS hostnames",
+            code="invalid_search_domain", category="validation",
+        )
+    return candidate
+
+
+def effective_search_query(
+    query: str, *, freshness: str | None = None,
+    domains: list[str] | None = None, runtime_clock: dict | None = None,
+) -> tuple[str, list[str]]:
+    """Apply platform-owned date and domain constraints deterministically."""
+
+    normalized_freshness = normalize_freshness(freshness)
+    normalized_domains = list(dict.fromkeys(
+        _normalized_domain(item) for item in list(domains or [])
+    ))
+    if len(normalized_domains) > 5:
+        raise WebToolError(
+            "at most five search domains are allowed",
+            code="search_domain_limit_exceeded", category="validation",
+        )
+    parts = [query.strip()]
+    clock = dict(runtime_clock or {})
+    if (
+        (normalized_freshness or _RELATIVE_TIME_PATTERN.search(query))
+        and clock.get("local_date") and clock.get("timezone")
+    ):
+        local_date = date.fromisoformat(str(clock["local_date"]))
+        lowered = query.casefold()
+        lookback = {
+            "pd": 0, "pw": 6, "pm": 30, "py": 365,
+        }.get(normalized_freshness)
+        if lookback is None:
+            if re.search(r"昨天|昨日|\byesterday\b", lowered):
+                local_date -= timedelta(days=1)
+                lookback = 0
+            elif re.search(r"最近一周|过去一周|本周|这周|\b(?:last|this)\s+week\b", lowered):
+                lookback = 6
+            elif re.search(r"最近一月|过去一月|最近一个月|\b(?:last|this)\s+month\b", lowered):
+                lookback = 30
+            elif re.search(r"今年|\bthis\s+year\b", lowered):
+                lookback = (local_date - date(local_date.year, 1, 1)).days
+            elif re.search(r"今天|今日|\btoday\b", lowered):
+                lookback = 0
+            else:
+                lookback = 30
+        start_date = local_date - timedelta(days=lookback)
+        parts.append(
+            f"Explicit date range ({clock['timezone']}): "
+            f"{start_date.isoformat()} through {local_date.isoformat()}."
+        )
+    if normalized_domains:
+        parts.append(
+            "Source domain constraint: "
+            + " OR ".join(f"site:{domain}" for domain in normalized_domains)
+        )
+    return "\n".join(parts), normalized_domains
+
+
+def canonicalize_url(value: str) -> str:
+    parsed = urlsplit(value)
+    hostname = (parsed.hostname or "").casefold().rstrip(".")
+    port = parsed.port
+    netloc = f"[{hostname}]" if ":" in hostname else hostname
+    if port and port != (443 if parsed.scheme.casefold() == "https" else 80):
+        netloc = f"[{hostname}]:{port}" if ":" in hostname else f"{hostname}:{port}"
+    query = urlencode([
+        (key, item) for key, item in parse_qsl(parsed.query, keep_blank_values=True)
+        if not key.casefold().startswith("utm_")
+        and key.casefold() not in _TRACKING_QUERY_KEYS
+    ], doseq=True)
+    return urlunsplit((
+        parsed.scheme.casefold(), netloc, parsed.path or "/", query, "",
+    ))
+
+
+def _registrable_domain(url: str) -> str:
+    host = (urlsplit(url).hostname or "").casefold().rstrip(".")
+    labels = host.split(".")
+    if len(labels) <= 2:
+        return host
+    suffix = ".".join(labels[-2:])
+    return ".".join(labels[-3:]) if suffix in _COMMON_MULTIPART_SUFFIXES else suffix
+
+
+def _source_id(url: str) -> str:
+    return "web-" + hashlib.sha256(url.encode()).hexdigest()[:20]
+
+
+def _normalize_search_items(
+    items: list[dict], *, domains: list[str] | None = None, limit: int = 8,
+) -> list[dict]:
+    allowed = set(domains or [])
+    unique: list[dict] = []
+    seen: set[str] = set()
+    for item in items:
+        try:
+            original = str(item.get("url") or "")
+            _validate_url(original)
+            canonical = canonicalize_url(original)
+            _validate_url(canonical)
+        except (ValueError, WebToolError):
+            continue
+        host = (urlsplit(canonical).hostname or "").casefold()
+        if allowed and not any(host == domain or host.endswith("." + domain) for domain in allowed):
+            continue
+        if canonical in seen:
+            continue
+        seen.add(canonical)
+        unique.append({
+            **item,
+            "url": canonical,
+            "source_id": _source_id(canonical),
+            "site_name": host,
+        })
+    selected: list[dict] = []
+    deferred: list[dict] = []
+    domain_counts: dict[str, int] = {}
+    for item in unique:
+        domain = _registrable_domain(item["url"])
+        if domain_counts.get(domain, 0) >= 2:
+            deferred.append(item)
+            continue
+        selected.append(item)
+        domain_counts[domain] = domain_counts.get(domain, 0) + 1
+        if len(selected) >= limit:
+            return selected
+    selected.extend(deferred[:max(0, limit - len(selected))])
+    return selected[:limit]
 
 
 async def _bounded_json_response(client, method: str, url: str, **kwargs):
@@ -102,7 +288,10 @@ async def _resolve_public(hostname: str, port: int) -> list[str]:
             hostname, port, type=socket.SOCK_STREAM,
         )
     except socket.gaierror as error:
-        raise WebToolError("URL hostname could not be resolved", code="dns_resolution_failed", category="provider", retryable=True) from error
+        raise WebToolError(
+            "URL hostname could not be resolved",
+            code="dns_resolution_failed", category="provider", retryable=False,
+        ) from error
     addresses = sorted({record[4][0] for record in records})
     if not addresses or any(
         not (_public_address(item) or _trusted_synthetic_address(item, hostname))
@@ -127,12 +316,94 @@ def _validate_url(value: str) -> tuple[str, str, int]:
         or lowered_host.endswith((".localhost", ".local", ".internal"))
     ):
         raise WebToolError("local hostnames are prohibited", code="ssrf_prohibited_host", category="authorization")
-    return parsed.hostname, parsed.scheme, parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError as error:
+        raise WebToolError(
+            "URL contains an invalid port", code="invalid_url", category="validation",
+        ) from error
+    return parsed.hostname, parsed.scheme, port
+
+
+def _normalized_lines(value: str) -> list[str]:
+    return [
+        re.sub(r"\s+", " ", line).strip()
+        for line in value.splitlines()
+        if re.sub(r"\s+", " ", line).strip()
+    ]
+
+
+def _objective_terms(value: str) -> set[str]:
+    lowered = value.casefold()
+    latin = set(re.findall(r"[a-z0-9][a-z0-9_.-]{1,}", lowered))
+    cjk_groups = re.findall(r"[\u3400-\u9fff]+", lowered)
+    cjk = {
+        group[index:index + 2]
+        for group in cjk_groups
+        for index in range(max(1, len(group) - 1))
+        if group[index:index + 2]
+    }
+    return latin | cjk
+
+
+def select_relevant_excerpts(
+    text: str, objective: str, *, max_chars: int = 16_000,
+) -> list[str]:
+    """Select bounded source passages without an untracked model call."""
+
+    lines = _normalized_lines(text)
+    if not lines:
+        return []
+    chunks: list[str] = []
+    current: list[str] = []
+    current_length = 0
+    for line in lines:
+        if current and current_length + len(line) + 1 > 1_200:
+            chunks.append("\n".join(current))
+            current, current_length = [], 0
+        current.append(line)
+        current_length += len(line) + 1
+    if current:
+        chunks.append("\n".join(current))
+    terms = _objective_terms(objective)
+    ranked = []
+    for index, chunk in enumerate(chunks):
+        chunk_terms = _objective_terms(chunk)
+        overlap = len(terms & chunk_terms)
+        density = overlap / max(1, len(terms))
+        ranked.append((overlap > 0, density, overlap, -index, index, chunk))
+    ranked.sort(reverse=True)
+    selected = []
+    used = 0
+    for has_match, _density, _overlap, _position, _index, chunk in ranked:
+        if terms and not has_match and selected:
+            continue
+        remaining = max_chars - used
+        if remaining <= 0:
+            break
+        selected.append(chunk[:remaining])
+        used += min(len(chunk), remaining)
+        if used >= max_chars:
+            break
+    if not selected:
+        selected = ["\n".join(lines)[:max_chars]]
+    return selected
+
+
+def _looks_like_soft_404(*, final_url: str, title: str | None, text: str) -> bool:
+    path = urlsplit(final_url).path.casefold()
+    path_signal = bool(re.search(r"(?:^|[/_.-])404(?:[/_.-]|$)|not[-_]?found", path))
+    title_signal = bool(_SOFT_404_PATTERN.search(title or ""))
+    body_signal = bool(_SOFT_404_PATTERN.search(text[:2_000]))
+    return sum((path_signal, title_signal, body_signal)) >= 2
 
 
 async def safe_fetch(
-    url: str, *, timeout_seconds: int = 20, max_bytes: int = 10 * 1024 * 1024,
-    max_redirects: int = 5, max_text_chars: int = 8_000,
+    url: str, *, timeout_seconds: int = BALANCED_FETCH_TIMEOUT_SECONDS,
+    max_bytes: int = BALANCED_FETCH_MAX_BYTES,
+    max_redirects: int = 5,
+    max_text_chars: int = BALANCED_FETCH_MAX_TEXT_CHARS,
+    objective: str = "",
 ) -> dict:
     current = url
     redirects: list[str] = []
@@ -175,6 +446,7 @@ async def safe_fetch(
                     }:
                         raise WebToolError("response MIME type is not permitted", code="mime_not_allowed", category="validation")
                     advertised = response.headers.get("content-length")
+                    advertised_truncated = False
                     if advertised:
                         try:
                             advertised_size = int(advertised)
@@ -188,10 +460,9 @@ async def safe_fetch(
                                 "origin returned an invalid Content-Length",
                                 code="invalid_content_length", category="provider",
                             )
-                        if advertised_size > max_bytes:
-                            raise WebToolError("response exceeds size limit", code="response_too_large", category="validation")
+                        advertised_truncated = advertised_size > max_bytes
                     body = bytearray()
-                    truncated = False
+                    truncated = advertised_truncated
                     async for chunk in response.aiter_bytes():
                         remaining = max_bytes - len(body)
                         if remaining <= 0:
@@ -233,10 +504,14 @@ async def safe_fetch(
         title = None
     elif content_type in {"text/html", "application/xhtml+xml"}:
         soup = BeautifulSoup(raw, "html.parser")
-        for element in soup(["script", "style", "noscript", "template", "svg"]):
-            element.decompose()
         title = soup.title.get_text(" ", strip=True) if soup.title else None
-        text = "\n".join(line.strip() for line in soup.get_text("\n").splitlines() if line.strip())
+        for element in soup([
+            "script", "style", "noscript", "template", "svg", "nav", "header",
+            "footer", "aside", "form",
+        ]):
+            element.decompose()
+        main = soup.find("article") or soup.find("main") or soup.body or soup
+        text = "\n".join(_normalized_lines(main.get_text("\n")))
     else:
         title = None
         text = raw.decode("utf-8", errors="replace")
@@ -244,24 +519,52 @@ async def safe_fetch(
     text_truncated = text_length > max_text_chars
     if text_truncated:
         text = text[:max_text_chars]
+    if _looks_like_soft_404(final_url=final_url, title=title, text=text):
+        raise WebToolError(
+            "origin returned a soft 404 page",
+            code="soft_404", category="validation", retryable=False,
+        )
+    normalized_url = canonicalize_url(final_url)
     return {
-        "url": url, "final_url": final_url, "title": title,
+        "url": url, "final_url": normalized_url, "title": title,
         "status_code": status_code, "mime_type": content_type,
         "text": text, "checksum": hashlib.sha256(raw).hexdigest(),
+        "normalized_text_checksum": hashlib.sha256(text.encode()).hexdigest(),
         "byte_size": len(raw), "text_length": text_length,
         "truncated": truncated or text_truncated,
         "raw_truncated": truncated, "text_truncated": text_truncated,
         "redirects": redirects, "elapsed_ms": round((time.perf_counter() - started) * 1000),
+        "retrieved_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "provider_request_id": (
+            headers.get("x-request-id") or headers.get("x-amzn-requestid")
+            or headers.get("cf-ray")
+        ),
+        "source_id": _source_id(normalized_url),
+        "objective": objective,
+        "excerpts": select_relevant_excerpts(text, objective),
         "untrusted_external_content": True,
     }
 
 
 async def web_search(
     *, provider: str, endpoint: str, api_key: str, query: str,
-    count: int, freshness: str | None, country: str | None,
+    count: int = BALANCED_SEARCH_RESULT_LIMIT,
+    freshness: str | None = None, country: str | None = None,
+    domains: list[str] | None = None,
     config: dict | None = None,
 ) -> tuple[list[dict], dict]:
     started = time.perf_counter()
+    freshness = normalize_freshness(freshness)
+    count = min(BALANCED_SEARCH_RESULT_LIMIT, max(1, int(count)))
+    provider_result_count = min(20, count * 2)
+    normalized_domains = list(dict.fromkeys(
+        _normalized_domain(item) for item in list(domains or [])
+    ))
+    if len(normalized_domains) > 5:
+        raise WebToolError(
+            "at most five search domains are allowed",
+            code="search_domain_limit_exceeded", category="validation",
+        )
     headers = {"Accept": "application/json"}
     provider_config = dict(config or {})
     try:
@@ -280,7 +583,7 @@ async def web_search(
         async with httpx.AsyncClient(timeout=timeout_seconds, trust_env=False) as client:
             if provider == "brave":
                 headers["X-Subscription-Token"] = api_key
-                params = {"q": query, "count": count}
+                params = {"q": query, "count": provider_result_count}
                 if freshness:
                     params["freshness"] = freshness
                 if country:
@@ -306,10 +609,10 @@ async def web_search(
                     "url": str(item.get("url") or "")[:2000],
                     "snippet": str(item.get("description") or "")[:4000],
                     "published_at": str(item.get("age") or "")[:200] or None,
-                } for item in source[:count] if isinstance(item, dict)]
+                } for item in source[:provider_result_count] if isinstance(item, dict)]
             elif provider == "bocha":
                 headers["Authorization"] = f"Bearer {api_key}"
-                request = {"query": query, "count": count, "summary": True}
+                request = {"query": query, "count": provider_result_count, "summary": True}
                 if freshness:
                     # The platform contract uses the provider-neutral Brave-style
                     # age buckets. Bocha's public API uses named ranges instead.
@@ -358,7 +661,7 @@ async def web_search(
                     "url": str(item.get("url") or "")[:2000],
                     "snippet": str(item.get("summary") or item.get("snippet") or "")[:4000],
                     "published_at": str(item.get("datePublished") or "")[:200] or None,
-                } for item in source[:count] if isinstance(item, dict)]
+                } for item in source[:provider_result_count] if isinstance(item, dict)]
             elif provider == "bailian":
                 if country:
                     raise WebToolError(
@@ -438,7 +741,7 @@ async def web_search(
                         item.get("publish_time") or item.get("published_at")
                         or item.get("date") or ""
                     )[:200] or None,
-                } for item in source[:count] if isinstance(item, dict)]
+                } for item in source[:provider_result_count] if isinstance(item, dict)]
             else:
                 raise WebToolError(
                     "unsupported Search Provider", code="search_provider_unsupported",
@@ -453,14 +756,9 @@ async def web_search(
             category="rate_limit" if status == 429 else "provider",
             retryable=status in {408, 429} or status >= 500,
         ) from error
-    validated_items = []
-    for item in items:
-        try:
-            _validate_url(item["url"])
-        except WebToolError:
-            continue
-        validated_items.append(item)
-    items = validated_items
+    items = _normalize_search_items(
+        items, domains=normalized_domains, limit=count,
+    )
     usage_payload = payload.get("usage") if provider == "bailian" else None
     safe_usage = {
         key: value for key, value in (

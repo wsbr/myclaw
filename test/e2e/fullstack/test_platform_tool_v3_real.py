@@ -99,12 +99,23 @@ def _assert_expected_evidence(
     assert not any(item["event_type"] == "tool_invocation.rejected" for item in events), events
 
 
+def _runner_harnesses(api: MyClawAPI, run_id: str) -> list[dict]:
+    runners = api.request("GET", f"/api/v1/runs/{run_id}/runners").json()["items"]
+    return [
+        api.request("GET", f"/api/v1/runners/{runner['id']}/trace").json()["harness"]
+        for runner in runners
+    ]
+
+
 @pytest.mark.timeout(1800)
 def test_real_connections_search_fetch_mcp_browser_and_secret_boundaries(
     phase_api: MyClawAPI, assembled_world: dict, record_testsuite_property,
 ):
     api = phase_api
     assert assembled_world["conformance"]["status"] == "passed"
+    assert assembled_world["model_version"]["capabilities"]["context_window"] == 1_000_000
+    assert assembled_world["model_version"]["capabilities"]["max_input_tokens"] == 983_616
+    assert assembled_world["model_version"]["capabilities"]["max_output_tokens"] == 65_536
     for connection in assembled_world["search_connections"]:
         assert connection["test"]["provider"] == connection["connection_type"]
         assert connection["test"]["details"]["result_count"] >= 1
@@ -119,21 +130,24 @@ def test_real_connections_search_fetch_mcp_browser_and_secret_boundaries(
     if assembled_world["search_provider"] == "bailian":
         bailian_agent = assembled_world["search_agents"]["bailian"]["id"]
         cases = (
-            (bailian_agent, "请搜索过去一周 OpenAI API 的公开中文资讯，返回真实链接和日期。", "bailian", "pw"),
-            (bailian_agent, "Find public English sources from the past month about HTTP semantics and cite the URLs.", "bailian", "pm"),
-            (bailian_agent, "请搜索过去一天关于 Chromium 的英文公开资料，并引用真实网址。", "bailian", "pd"),
-            (bailian_agent, "Search public English sources from the past year about Model Context Protocol and cite links.", "bailian", "py"),
+            (bailian_agent, "请搜索过去一周 OpenAI API 的公开中文资讯，返回真实链接和日期。", "bailian", "week"),
+            (bailian_agent, "Find public English sources from the past month about HTTP semantics and cite the URLs.", "bailian", "month"),
+            (bailian_agent, "请搜索过去一天关于 Chromium 的英文公开资料，并引用真实网址。", "bailian", "day"),
+            (bailian_agent, "Search public English sources from the past year about Model Context Protocol and cite links.", "bailian", "year"),
         )
     else:
         cases = (
-            (assembled_world["search_agents"]["bocha"]["id"], "请搜索过去一周 OpenAI API 的公开中文资讯，返回真实链接和日期。", "bocha", "pw"),
-            (assembled_world["search_agents"]["bocha"]["id"], "Find public English sources from the past month about HTTP semantics and cite the URLs.", "bocha", "pm"),
-            (assembled_world["search_agents"]["brave"]["id"], "请搜索过去一天关于 Chromium 的英文公开资料，并引用真实网址。", "brave", "pd"),
-            (assembled_world["search_agents"]["brave"]["id"], "Search public English sources from the past year about Model Context Protocol and cite links.", "brave", "py"),
+            (assembled_world["search_agents"]["bocha"]["id"], "请搜索过去一周 OpenAI API 的公开中文资讯，返回真实链接和日期。", "bocha", "week"),
+            (assembled_world["search_agents"]["bocha"]["id"], "Find public English sources from the past month about HTTP semantics and cite the URLs.", "bocha", "month"),
+            (assembled_world["search_agents"]["brave"]["id"], "请搜索过去一天关于 Chromium 的英文公开资料，并引用真实网址。", "brave", "day"),
+            (assembled_world["search_agents"]["brave"]["id"], "Search public English sources from the past year about Model Context Protocol and cite links.", "brave", "year"),
         )
     for agent_id, prompt, provider, freshness in cases:
         _, run, invocations, _ = _run(api, agent_id, prompt)
         _assert_expected_evidence(api, run, invocations, "web_search")
+        assert len([
+            item for item in invocations if item["tool_key"] == "web_search"
+        ]) <= 2
         searched = next(
             item for item in invocations
             if item["tool_key"] == "web_search" and item["status"] == "succeeded"
@@ -142,18 +156,75 @@ def test_real_connections_search_fetch_mcp_browser_and_secret_boundaries(
         assert searched["arguments"].get("freshness") == freshness
         results = searched["result"]["data"]["results"]
         assert results and all(item["url"].startswith(("http://", "https://")) for item in results)
+        assert searched["result"]["data"]["original_query"]
+        assert searched["result"]["data"]["effective_query"]
+        harnesses = _runner_harnesses(api, run["id"])
+        runtime_dates = {
+            item["runtime_clock"].get("local_date")
+            for item in harnesses if item["runtime_clock"].get("local_date")
+        }
+        assert runtime_dates
+        assert any(
+            local_date in searched["result"]["data"]["effective_query"]
+            for local_date in runtime_dates
+        )
+        assert all(
+            item["runtime_clock"].get("timezone") == "Asia/Shanghai"
+            for item in harnesses if item["runtime_clock"]
+        )
+        projections = [
+            projection for harness in harnesses
+            for projection in harness["web_projection"]
+        ]
+        assert any(
+            item["tool_name"] == "web_search" and item["omitted"]
+            and item["projected_chars"] < item["full_chars"]
+            for item in projections
+        )
+        assert all(
+            item["hard_input_limit"] == 983_616
+            for item in harnesses if item["hard_input_limit"] is not None
+        )
 
     _, html_run, html_calls, _ = _run(
         api, assembled_world["general"]["id"],
         "读取并摘要 https://www.rfc-editor.org/rfc/rfc9110.html 的公开正文，附可点击引用和校验依据。",
     )
     _assert_expected_evidence(api, html_run, html_calls, "web_fetch")
+    html_fetch = next(
+        item for item in html_calls
+        if item["tool_key"] == "web_fetch" and item["status"] == "succeeded"
+    )
+    assert html_fetch["result"]["data"]["text"]
+    assert html_fetch["result"]["data"]["excerpts"]
+    assert html_fetch["result"]["data"]["objective"]
+    assert html_fetch["result"]["data"]["truncated"] is True
+    assert len(html_fetch["result"]["data"]["text"]) <= 100_000
+    html_projections = [
+        projection for harness in _runner_harnesses(api, html_run["id"])
+        for projection in harness["web_projection"]
+    ]
+    assert any(
+        item["tool_name"] == "web_fetch" and item["omitted"]
+        for item in html_projections
+    )
     _, pdf_run, pdf_calls, _ = _run(
         api, assembled_world["general"]["id"],
         "读取 https://www.rfc-editor.org/rfc/rfc9110.pdf 这份公开 PDF，摘要其主题并附引用。",
     )
     _assert_expected_evidence(api, pdf_run, pdf_calls, "web_fetch")
     assert next(item for item in pdf_calls if item["tool_key"] == "web_fetch")["result"]["data"]["mime_type"] == "application/pdf"
+
+    _, soft_404_run, soft_404_calls, _ = _run(
+        api, assembled_world["general"]["id"],
+        "只读取一次 https://httpbin.org/anything/404 并报告平台返回的类型化错误；不要改用其他网址。",
+    )
+    soft_404_fetch = next(
+        item for item in soft_404_calls if item["tool_key"] == "web_fetch"
+    )
+    assert soft_404_fetch["status"] == "failed"
+    assert soft_404_fetch["attempt_count"] == 1
+    assert soft_404_fetch["result"]["error"]["code"] == "soft_404"
 
     connections = api.request("GET", "/api/v1/tool-connections").json()["items"]
     serialized = str(connections)
