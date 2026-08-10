@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from sqlalchemy import func, select
@@ -24,6 +25,7 @@ from app.runtime.protocol import (
     ProviderAttemptEvent,
     ProviderError,
     ProviderRequest,
+    StreamEvent,
     StopReason,
 )
 from app.runtime.token_counting import count_provider_request
@@ -58,6 +60,10 @@ class AgentLoopResult:
     turns: tuple[NormalizedTurnResult, ...]
     dispatches: tuple[DispatchResult, ...]
     messages: tuple[dict[str, Any], ...]
+    final_stream_id: str | None = None
+
+
+TurnStreamObserver = Callable[[str, StreamEvent], Awaitable[None] | None]
 
 
 class _TurnRecorder:
@@ -119,12 +125,14 @@ class AgentLoopCoordinator:
         max_turns: int = 24,
         max_schema_repairs: int = 1,
         reliability_enabled: bool = False,
+        stream_observer: TurnStreamObserver | None = None,
     ) -> None:
         self.adapter = adapter
         self.dispatcher = dispatcher
         self.max_turns = max_turns
         self.max_schema_repairs = max_schema_repairs
         self.reliability_enabled = reliability_enabled
+        self.stream_observer = stream_observer
         self._configured_transport_retries = adapter.max_zero_payload_retries
 
     async def run(
@@ -272,14 +280,26 @@ class AgentLoopCoordinator:
                 await db.flush()
                 recorder = _TurnRecorder(db, persisted_turn, identity)
             try:
+                async def observe_stream(event: StreamEvent) -> None:
+                    if self.stream_observer is None or persisted_turn is None:
+                        return
+                    returned = self.stream_observer(persisted_turn.id, event)
+                    if returned is not None:
+                        await returned
+
                 result = await self.adapter.invoke(
                     ProviderRequest(
                         messages=tuple(messages), tools=tuple(presented_definitions),
                         parameters=model_parameters,
                     ),
                     attempt_observer=recorder.observe if recorder else None,
+                    stream_observer=observe_stream if self.stream_observer else None,
                 )
             except ProviderError as error:
+                if self.stream_observer is not None and persisted_turn is not None:
+                    await observe_stream(StreamEvent(
+                        type="reset", data={"reason_code": error.code},
+                    ))
                 if persisted_turn is not None:
                     persisted_turn.status = "failed"
                     persisted_turn.error_code = error.code
@@ -303,6 +323,10 @@ class AgentLoopCoordinator:
                 try:
                     budget_state = await assert_post_provider_budget(db, identity.run_id)
                 except BudgetExceeded as error:
+                    if self.stream_observer is not None and persisted_turn is not None:
+                        await observe_stream(StreamEvent(
+                            type="reset", data={"reason_code": error.code},
+                        ))
                     if persisted_turn is not None:
                         persisted_turn.status = "failed"
                         persisted_turn.error_code = error.code
@@ -346,6 +370,10 @@ class AgentLoopCoordinator:
             ):
                 invalid_stop_code = "provider_invalid_stop_reason"
             if invalid_stop_code is not None:
+                if self.stream_observer is not None and persisted_turn is not None:
+                    await observe_stream(StreamEvent(
+                        type="reset", data={"reason_code": invalid_stop_code},
+                    ))
                 if persisted_turn is not None:
                     persisted_turn.status = "failed"
                     persisted_turn.error_code = invalid_stop_code
@@ -372,6 +400,10 @@ class AgentLoopCoordinator:
                     code=invalid_stop_code,
                 )
             if tool_calls:
+                if self.stream_observer is not None and persisted_turn is not None:
+                    await observe_stream(StreamEvent(
+                        type="reset", data={"reason_code": "tool_use"},
+                    ))
                 messages.append({
                     "role": "assistant", "content": assistant_text,
                     "turn_items": [item.as_dict() for item in result.items],
@@ -483,7 +515,7 @@ class AgentLoopCoordinator:
                     return AgentLoopResult(
                         status="waiting_actions", final_message=None,
                         turns=tuple(turns), dispatches=tuple(dispatches),
-                        messages=tuple(messages),
+                        messages=tuple(messages), final_stream_id=None,
                     )
                 if db is not None and identity is not None:
                     previous_checkpoint = await db.scalar(select(
@@ -584,6 +616,7 @@ class AgentLoopCoordinator:
                     status="completed", final_message=assistant_text,
                     turns=tuple(turns), dispatches=tuple(dispatches),
                     messages=tuple(messages),
+                    final_stream_id=persisted_turn.id if persisted_turn else None,
                 )
             raise AgentLoopError(
                 "Provider returned no Tool Call and no assistant message",

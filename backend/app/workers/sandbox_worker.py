@@ -336,6 +336,19 @@ class SandboxWorker:
                 payload={"tool_key": invocation.tool_key, "attempt_no": attempt.attempt_no},
                 correlation_id=run.id,
             )
+            await ExecutionEventWriter(db).append(
+                session_id=run.session_id, run_id=run.id,
+                event_type="tool_invocation.running",
+                event_dedupe_key=(
+                    f"tool_invocation:{invocation.id}:attempt:{attempt.attempt_no}:running"
+                ),
+                actor_type="service", actor_id=self.worker_id,
+                entity_type="tool_invocation", entity_id=invocation.id,
+                entity_version=invocation.version, visibility="user",
+                summary=f"Tool running: {invocation.tool_key}",
+                payload={"tool_key": invocation.tool_key, "status": "running"},
+                correlation_id=run.id,
+            )
             await db.flush()
             invocation.active_attempt_id = attempt.id
             self._complete_command(command)

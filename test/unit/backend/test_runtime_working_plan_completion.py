@@ -80,13 +80,14 @@ async def test_unfinished_plan_queues_replacement_and_only_completed_revision_pu
 
     worker = RuntimeWorker("plan-completion-test")
     context = SimpleNamespace(manifest=(), compaction=None)
-    await worker._settle_completed(
+    rejected_message_id = await worker._settle_completed(
         RunnerFence(
             runner_id=runner_id, work_item_id=work_id, run_id=run_id,
             session_id=session_id, execution_epoch=1, lease_token="lease-1",
         ),
         "premature partial answer", context,
     )
+    assert rejected_message_id is None
 
     async with factory() as db:
         run = await db.get(Run, run_id)
@@ -141,7 +142,7 @@ async def test_unfinished_plan_queues_replacement_and_only_completed_revision_pu
             updated_by_runner_id=replacement_id, content_hash="b" * 64,
         ))
 
-    await worker._settle_completed(
+    committed_message_id = await worker._settle_completed(
         RunnerFence(
             runner_id=replacement_id, work_item_id=work_id, run_id=run_id,
             session_id=session_id, execution_epoch=2, lease_token="lease-2",
@@ -154,6 +155,7 @@ async def test_unfinished_plan_queues_replacement_and_only_completed_revision_pu
         work = await db.get(WorkItem, work_id)
         plan = await db.get(WorkingPlan, plan_id)
         messages = list(await db.scalars(select(Message).where(Message.run_id == run_id)))
+        assert committed_message_id == messages[0].id
         assert run.status == "completed"
         assert work.status == "succeeded"
         assert plan.status == "closed"

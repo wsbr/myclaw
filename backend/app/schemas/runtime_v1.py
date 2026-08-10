@@ -84,6 +84,7 @@ class MessageResponse(BaseModel):
     content_format: str
     status: str
     run_id: str | None
+    tool_activity_count: int = 0
     created_at: datetime
 
     model_config = {"from_attributes": True}

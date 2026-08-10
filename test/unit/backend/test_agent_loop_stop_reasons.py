@@ -1,13 +1,18 @@
 """Provider stop reasons are enforced before any partial output is published."""
 
 import pytest
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.core.model_hub.base import BaseLLM, LLMChunk, LLMResponse, TokenUsage, ToolCall
 from app.core.tool_registry.base import RuntimeContext
+from app.database import Base
 from app.runtime.action_dispatcher import ActionDispatcher
-from app.runtime.agent_loop_coordinator import AgentLoopCoordinator, AgentLoopError
+from app.runtime.agent_loop_coordinator import (
+    AgentLoopCoordinator, AgentLoopError, LoopIdentity,
+)
 from app.runtime.context_assembler import ContextPackage
 from app.runtime.model_adapter import ModelAdapter
+from app.runtime.protocol import ProviderRequest
 
 pytestmark = pytest.mark.unit
 
@@ -111,3 +116,58 @@ async def test_completed_or_provider_compatible_unknown_message_is_accepted(stop
 
     assert result.status == "completed"
     assert result.final_message == "complete"
+
+
+@pytest.mark.asyncio
+async def test_model_adapter_streams_only_normalized_text_events():
+    events = []
+
+    async def observe(event):
+        events.append(event)
+
+    await ModelAdapter(_StoppedProvider("stop", content="complete")).invoke(
+        request=ProviderRequest(
+            messages=({"role": "user", "content": "go"},),
+            tools=(), parameters={},
+        ),
+        stream_observer=observe,
+    )
+
+    assert events[0].type == "text_delta"
+    assert events[0].data == {"content": "complete"}
+    assert events[-1].type == "done"
+
+
+@pytest.mark.asyncio
+async def test_persisted_agent_loop_wires_text_and_reset_to_turn_observer():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    observed = []
+
+    async def observe(turn_id, event):
+        observed.append((turn_id, event))
+
+    coordinator = AgentLoopCoordinator(
+        ModelAdapter(_StoppedProvider("length", content="partial")),
+        ActionDispatcher([]), stream_observer=observe,
+    )
+    async with factory() as db:
+        with pytest.raises(AgentLoopError):
+            await coordinator.run(
+                context=_context(), tool_definitions=[],
+                capability_snapshot={"id": "snapshot", "effective_tool_keys": []},
+                runtime_context=_runtime_context(), model_parameters={}, db=db,
+                identity=LoopIdentity(
+                    runner_id="runner", work_item_id="work", run_id="run",
+                    agent_version_id="agent-version", model_version_id="model-version",
+                    provider="test",
+                ),
+            )
+
+    assert observed[0][1].type == "text_delta"
+    assert observed[-1][1].type == "reset"
+    assert observed[-1][1].data["reason_code"] == "provider_output_truncated"
+    assert {turn_id for turn_id, _ in observed} == {observed[0][0]}
+    await engine.dispose()

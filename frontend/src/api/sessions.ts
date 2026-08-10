@@ -25,6 +25,7 @@ export interface Message {
   content_format: string
   status: string
   run_id: string | null
+  tool_activity_count: number
   created_at: string
 }
 
@@ -114,8 +115,36 @@ export interface LiveDeltaEvent {
   session_id: string
   run_id: string
   runner_id: string
+  agent_turn_id: string
+  stream_id: string
+  sequence: number
   delta: string
 }
+
+export interface LiveStreamTerminalEvent {
+  event_type: 'model.stream_reset' | 'model.stream_committed'
+  session_id: string
+  run_id: string
+  runner_id: string
+  agent_turn_id: string
+  stream_id: string
+  sequence: number
+  reason_code?: string
+  message_id?: string
+}
+
+export interface LiveToolProgressEvent {
+  event_type: 'tool.progress'
+  session_id: string
+  run_id: string
+  runner_id: string
+  call_id: string
+  tool_key: string
+  status: 'queued' | 'running' | 'succeeded' | 'failed'
+  tool_invocation_id?: string
+}
+
+export type LiveSessionEvent = LiveDeltaEvent | LiveStreamTerminalEvent | LiveToolProgressEvent
 
 export interface ToolConfirmation {
   type: 'tool_confirmation'
@@ -511,7 +540,7 @@ export const sessionsApi = {
 export function subscribeSessionEvents(
   sessionId: string,
   afterSequence: number,
-  onEvent: (event: ExecutionEvent | LiveDeltaEvent | { event_type: 'cursor'; sequence: number }) => void,
+  onEvent: (event: ExecutionEvent | LiveSessionEvent | { event_type: 'cursor'; sequence: number }) => void,
   onConnection: (connected: boolean) => void,
   onCursorReset?: () => void,
 ): () => void {
@@ -615,8 +644,8 @@ export function subscribeSessionEvents(
             }
             if (eventType === 'cursor' && id) onEvent({ event_type: 'cursor', sequence: cursor })
             else if (data) {
-              const event = JSON.parse(data) as ExecutionEvent | LiveDeltaEvent
-              if (event.event_type === 'model.delta' && 'delta' in event) onEvent(event)
+              const event = JSON.parse(data) as ExecutionEvent | LiveSessionEvent
+              if (event.event_type.startsWith('model.') || event.event_type === 'tool.progress') onEvent(event)
               else if ('event_id' in event && remember(event)) onEvent(event)
             }
           }

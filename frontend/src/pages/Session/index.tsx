@@ -5,7 +5,10 @@ import { Alert, Button, Modal, Select, Space, Tag, Tooltip, message as toast } f
 import { HistoryOutlined } from '@ant-design/icons'
 import { Activity, ArrowLeft, GitBranch, MessageSquare, PanelRightOpen, Plus, UsersRound } from 'lucide-react'
 import { agentsApi } from '@/api/agents'
-import { ApprovalAction, Message, ToolConfirmation, sessionsApi, subscribeSessionEvents } from '@/api/sessions'
+import {
+  ApprovalAction, LiveToolProgressEvent, Message, ToolConfirmation,
+  sessionsApi, subscribeSessionEvents,
+} from '@/api/sessions'
 import { cn } from '@/lib/utils'
 import MessageThread from './MessageThread'
 import PendingActions from './PendingActions'
@@ -14,6 +17,7 @@ import GroupPanel from './GroupPanel'
 import SessionComposer from './SessionComposer'
 import SessionInspector from './SessionInspector'
 import { isTerminalRun, runStatusMeta } from './runtimeView'
+import { appendLiveDelta, closeLiveDraft, type LiveDraft } from './liveState'
 
 export default function SessionPage() {
   const { agentId, sessionId: routeSessionId } = useParams<{ agentId: string; sessionId?: string }>()
@@ -25,7 +29,8 @@ export default function SessionPage() {
   const [mode, setMode] = useState<'chat' | 'plan' | 'group'>('chat')
   const [activeRunId, setActiveRunId] = useState<string | null>(null)
   const [connected, setConnected] = useState(true)
-  const [liveText, setLiveText] = useState('')
+  const [liveDraft, setLiveDraft] = useState<LiveDraft | null>(null)
+  const [liveTools, setLiveTools] = useState<Record<string, LiveToolProgressEvent>>({})
   const [inspectorOpen, setInspectorOpen] = useState(() => window.innerWidth >= 1280)
   const [showScrollButton, setShowScrollButton] = useState(false)
   const [clarificationAnswers, setClarificationAnswers] = useState<Record<string, string>>({})
@@ -34,6 +39,8 @@ export default function SessionPage() {
   const messageViewportRef = useRef<HTMLElement>(null)
   const followOutputRef = useRef(true)
   const latestRunIdRef = useRef<string | null>(null)
+  const closedStreamIdsRef = useRef(new Set<string>())
+  const suppressLiveUntilNextRunRef = useRef(Boolean(routeSessionId))
 
   const { data: agent } = useQuery({
     queryKey: ['agent-summary', agentId], queryFn: () => agentsApi.getSummary(agentId!), enabled: !!agentId,
@@ -108,6 +115,12 @@ export default function SessionPage() {
     queryKey: ['run', latestRunId], queryFn: () => sessionsApi.getRun(latestRunId!), enabled: !!latestRunId,
     refetchInterval: query => query.state.data && !isTerminalRun(query.state.data.status) ? 2000 : false,
   })
+  const { data: activeTools = [] } = useQuery({
+    queryKey: ['tool-invocations', latestRunId],
+    queryFn: () => sessionsApi.getToolInvocations(latestRunId!),
+    enabled: !!latestRunId && mode !== 'group',
+    refetchInterval: activeRun && !isTerminalRun(activeRun.status) ? 2000 : false,
+  })
   const { data: workingPlans = [] } = useQuery({
     queryKey: ['working-plans', latestRunId],
     queryFn: () => sessionsApi.getWorkingPlans(latestRunId!), enabled: !!latestRunId,
@@ -143,7 +156,10 @@ export default function SessionPage() {
   useEffect(() => {
     setSessionId(routeSessionId ?? null)
     setActiveRunId(null)
-    setLiveText('')
+    setLiveDraft(null)
+    setLiveTools({})
+    closedStreamIdsRef.current.clear()
+    suppressLiveUntilNextRunRef.current = Boolean(routeSessionId)
     setClarificationAnswers({})
     followOutputRef.current = true
     setShowScrollButton(false)
@@ -159,13 +175,46 @@ export default function SessionPage() {
   useEffect(() => {
     if (!sessionId) return
     return subscribeSessionEvents(sessionId, 0, event => {
-      if (event.event_type === 'model.delta' && 'delta' in event) {
-        if (event.run_id === latestRunIdRef.current) setLiveText(value => value + event.delta)
+      if (event.event_type === 'model.delta' && 'stream_id' in event && 'delta' in event) {
+        setLiveDraft(current => appendLiveDelta(
+          current, event, latestRunIdRef.current,
+          suppressLiveUntilNextRunRef.current,
+          closedStreamIdsRef.current,
+        ))
+        return
+      }
+      if (
+        (event.event_type === 'model.stream_reset'
+          || event.event_type === 'model.stream_committed')
+        && 'stream_id' in event
+      ) {
+        closedStreamIdsRef.current.add(event.stream_id)
+        setLiveDraft(current => closeLiveDraft(current, event.stream_id))
+        if (event.event_type === 'model.stream_committed') {
+          queryClient.invalidateQueries({ queryKey: ['messages', sessionId] })
+        }
+        return
+      }
+      if (event.event_type === 'tool.progress' && 'call_id' in event) {
+        if (event.run_id === latestRunIdRef.current) {
+          setLiveTools(current => ({ ...current, [event.call_id]: event }))
+          queryClient.invalidateQueries({ queryKey: ['tool-invocations', event.run_id] })
+        }
         return
       }
       if (event.event_type === 'message.created') {
-        setLiveText('')
+        setLiveDraft(null)
         queryClient.invalidateQueries({ queryKey: ['messages', sessionId] })
+      }
+      if (event.event_type.startsWith('tool.') || event.event_type.startsWith('tool_invocation.')) {
+        if ('run_id' in event && event.run_id) {
+          queryClient.invalidateQueries({ queryKey: ['tool-invocations', event.run_id] })
+        }
+        if ('entity_id' in event && event.entity_id) {
+          setLiveTools(current => Object.fromEntries(
+            Object.entries(current).filter(([, item]) => item.tool_invocation_id !== event.entity_id),
+          ))
+        }
       }
       if (event.event_type.startsWith('tool.confirmation') || event.event_type.startsWith('tool_confirmation.')) {
         queryClient.invalidateQueries({ queryKey: ['required-actions'] })
@@ -217,10 +266,22 @@ export default function SessionPage() {
       }
       if (['run.completed', 'run.cancelled', 'run.failed'].includes(event.event_type) && 'run_id' in event) {
         queryClient.invalidateQueries({ queryKey: ['run', event.run_id] })
+        setLiveTools(current => Object.fromEntries(
+          Object.entries(current).filter(([, item]) => item.run_id !== event.run_id),
+        ))
         if (event.event_type === 'run.failed') toast.error(`Agent 执行失败：${String(event.payload.error_code || 'unknown')}`)
       }
-    }, value => { setConnected(value); if (!value) setLiveText('') }, () => {
-      setLiveText('')
+    }, value => {
+      setConnected(value)
+      if (!value) {
+        suppressLiveUntilNextRunRef.current = true
+        setLiveDraft(null)
+      }
+    }, () => {
+      setLiveDraft(null)
+      setLiveTools({})
+      closedStreamIdsRef.current.clear()
+      suppressLiveUntilNextRunRef.current = true
       queryClient.invalidateQueries({ queryKey: ['messages', sessionId] })
       queryClient.invalidateQueries({ queryKey: ['session', sessionId] })
       queryClient.invalidateQueries({ queryKey: ['session-runs', sessionId] })
@@ -241,8 +302,8 @@ export default function SessionPage() {
   }
 
   useEffect(() => {
-    if (followOutputRef.current) scrollToBottom(liveText ? 'auto' : 'smooth')
-  }, [messages.length, liveText])
+    if (followOutputRef.current) scrollToBottom(liveDraft?.text ? 'auto' : 'smooth')
+  }, [messages.length, liveDraft?.text, liveTools])
 
   const ensureSession = async () => {
     if (sessionId) return sessionId
@@ -268,9 +329,11 @@ export default function SessionPage() {
     },
     onSuccess: result => {
       setActiveRunId(result.run.id)
+      suppressLiveUntilNextRunRef.current = false
       queryClient.setQueryData(['run', result.run.id], result.run)
       cacheMessage(result.message)
-      setLiveText('')
+      setLiveDraft(null)
+      setLiveTools({})
       queryClient.invalidateQueries({ queryKey: ['messages', result.message.session_id] })
     },
     onError: (error: any) => toast.error(error?.response?.data?.error?.message || '消息提交失败'),
@@ -283,7 +346,9 @@ export default function SessionPage() {
     },
     onSuccess: result => {
       setActiveRunId(result.run.id)
-      setLiveText('')
+      suppressLiveUntilNextRunRef.current = false
+      setLiveDraft(null)
+      setLiveTools({})
       cacheMessage(result.message)
       queryClient.setQueryData(['run', result.run.id], result.run)
       queryClient.setQueryData(['session', result.session.id], result.session)
@@ -304,7 +369,8 @@ export default function SessionPage() {
     },
     onSuccess: result => {
       if (result.kind === 'run') setActiveRunId(result.value.run.id)
-      setLiveText('')
+      setLiveDraft(null)
+      setLiveTools({})
       queryClient.invalidateQueries({ queryKey: ['group-runs'] })
       queryClient.invalidateQueries({ queryKey: ['group-messages'] })
     },
@@ -322,6 +388,7 @@ export default function SessionPage() {
     mutationFn: (instruction: string) => sessionsApi.continuePlanning(activeWorkingPlan!, instruction),
     onSuccess: result => {
       setActiveRunId(result.run.id)
+      suppressLiveUntilNextRunRef.current = false
       cacheMessage(result.message)
       queryClient.setQueryData(['run', result.run.id], result.run)
       queryClient.setQueryData(['session', result.session.id], result.session)
@@ -332,12 +399,18 @@ export default function SessionPage() {
   })
   const confirmPlan = useMutation({
     mutationFn: () => sessionsApi.approvePlanImplementation(activeWorkingPlan!, planApproval!.subject_hash),
-    onSuccess: () => { refreshPlan(); toast.success('当前 revision 已批准；同一 Session 开始动态实施') },
+    onSuccess: () => {
+      suppressLiveUntilNextRunRef.current = false
+      refreshPlan(); toast.success('当前 revision 已批准；同一 Session 开始动态实施')
+    },
     onError: (error: any) => toast.error(error?.response?.data?.detail?.code || 'Plan 批准失败'),
   })
   const rejectPlan = useMutation({
     mutationFn: (reason?: string) => sessionsApi.decideApproval(planApproval!, 'reject', reason),
-    onSuccess: () => { refreshPlan(); toast.info('当前 Plan revision 已拒绝，项目经理将继续只读规划') },
+    onSuccess: () => {
+      suppressLiveUntilNextRunRef.current = false
+      refreshPlan(); toast.info('当前 Plan revision 已拒绝，项目经理将继续只读规划')
+    },
     onError: (error: any) => toast.error(error?.response?.data?.detail?.code || 'Plan 拒绝失败'),
   })
   const exitPlan = useMutation({
@@ -380,6 +453,9 @@ export default function SessionPage() {
     onSuccess: result => {
       const run = result.run
       setActiveRunId(null)
+      suppressLiveUntilNextRunRef.current = true
+      setLiveDraft(null)
+      setLiveTools({})
       queryClient.setQueryData(['run', run.id], run)
       refreshPlan()
       toast.info('Run 已取消；已发生的外部副作用不会回滚')
@@ -467,7 +543,8 @@ export default function SessionPage() {
     }
     setMode(nextMode)
     setActiveRunId(null)
-    setLiveText('')
+    setLiveDraft(null)
+    setLiveTools({})
     followOutputRef.current = true
   }
 
@@ -588,7 +665,9 @@ export default function SessionPage() {
                 messages={messages}
                 loading={historyLoading}
                 running={isActivelyExecuting}
-                liveText={liveText}
+                liveText={liveDraft?.text || ''}
+                activeTools={activeTools}
+                liveTools={Object.values(liveTools).filter(item => item.run_id === latestRunId)}
                 showScrollButton={showScrollButton}
                 onScrollToBottom={() => scrollToBottom()}
               />

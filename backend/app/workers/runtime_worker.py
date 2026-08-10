@@ -62,6 +62,7 @@ from app.runtime import (
 )
 from app.runtime.token_counting import count_provider_request, resolve_model_input_limits
 from app.runtime.runtime_facts import runtime_clock_snapshot, runtime_clock_system_rules
+from app.runtime.live_stream import LiveStreamPublisher
 from app.runtime.web_result_projection import project_web_messages
 from app.services.provider_conformance import resolve_provider_credential
 from app.services.observability_service import (
@@ -217,8 +218,12 @@ class RunnerFenced(RuntimeError):
 
 
 class RuntimeWorker:
-    def __init__(self, worker_id: str | None = None) -> None:
+    def __init__(
+        self, worker_id: str | None = None,
+        live_stream_publisher: LiveStreamPublisher | None = None,
+    ) -> None:
         self.worker_id = worker_id or f"runtime-v2:{os.getpid()}:{uuid7()}"
+        self.live_stream = live_stream_publisher or LiveStreamPublisher()
 
     @staticmethod
     async def _lock_event_session(db, session_id: str) -> UserSession:
@@ -253,11 +258,10 @@ class RuntimeWorker:
                 return True
         return False
 
-    async def _settle_with_retry(self, operation, *args) -> None:
+    async def _settle_with_retry(self, operation, *args):
         for attempt in range(3):
             try:
-                await operation(*args)
-                return
+                return await operation(*args)
             except DBAPIError as error:
                 if (
                     not self._is_transient_settlement_conflict(error)
@@ -540,6 +544,8 @@ class RuntimeWorker:
         execution_started_at = utcnow()
         runtime_clock: dict = {}
         execution_error_code = None
+        active_stream_id: str | None = None
+        stream_enabled = False
         await ensure_runner_trace(
             fence.runner_id, session_factory=AsyncSessionLocal,
         )
@@ -553,6 +559,10 @@ class RuntimeWorker:
                 work = await db.get(WorkItem, fence.work_item_id)
                 run = await db.get(Run, fence.run_id)
                 session = await db.get(UserSession, fence.session_id)
+                stream_enabled = (
+                    run.mode in {"chat", "plan"}
+                    and work.id == run.root_work_item_id
+                )
                 resolved = await SnapshotResolver().resolve(
                     db, runner=runner,
                     execution_principal=dict(runner.principal_snapshot or {}),
@@ -894,13 +904,43 @@ class RuntimeWorker:
                 ),
                 runtime_clock=dict(runtime_clock),
             )
-            dispatcher = ActionDispatcher(tool_definitions)
+            async def observe_tool_progress(progress: dict) -> None:
+                await self.live_stream.publish_tool_progress(
+                    session_id=fence.session_id, run_id=fence.run_id,
+                    runner_id=fence.runner_id,
+                    call_id=str(progress["call_id"]),
+                    tool_key=str(progress["tool_key"]),
+                    status=str(progress["status"]),
+                    invocation_id=progress.get("tool_invocation_id"),
+                )
+
+            dispatcher = ActionDispatcher(
+                tool_definitions,
+                progress_observer=observe_tool_progress if stream_enabled else None,
+            )
+
+            async def observe_live_stream(agent_turn_id, event) -> None:
+                if event.type == "text_delta":
+                    await self.live_stream.publish_delta(
+                        session_id=fence.session_id, run_id=fence.run_id,
+                        runner_id=fence.runner_id, agent_turn_id=agent_turn_id,
+                        delta=str(event.data.get("content") or ""),
+                    )
+                elif event.type == "reset":
+                    await self.live_stream.finish(
+                        event_type="model.stream_reset",
+                        session_id=fence.session_id, run_id=fence.run_id,
+                        runner_id=fence.runner_id, agent_turn_id=agent_turn_id,
+                        reason_code=str(event.data.get("reason_code") or "stream_reset"),
+                    )
+
             async with AsyncSessionLocal() as db:
                 capability = await db.get(CapabilitySnapshot, capability_id)
                 try:
                     result = await AgentLoopCoordinator(
                         ModelAdapter(provider), dispatcher,
                         reliability_enabled=True,
+                        stream_observer=observe_live_stream if stream_enabled else None,
                     ).run(
                         context=context, tool_definitions=tool_definitions,
                         capability_snapshot=capability, runtime_context=runtime_context,
@@ -922,10 +962,29 @@ class RuntimeWorker:
                 else:
                     await db.commit()
             if result.status == "completed":
-                await self._settle_with_retry(
+                active_stream_id = result.final_stream_id
+                message_id = await self._settle_with_retry(
                     self._settle_completed,
                     fence, result.final_message or "", context,
                 )
+                if active_stream_id:
+                    if message_id:
+                        await self.live_stream.finish(
+                            event_type="model.stream_committed",
+                            session_id=fence.session_id, run_id=fence.run_id,
+                            runner_id=fence.runner_id,
+                            agent_turn_id=active_stream_id,
+                            message_id=message_id,
+                        )
+                    else:
+                        await self.live_stream.finish(
+                            event_type="model.stream_reset",
+                            session_id=fence.session_id, run_id=fence.run_id,
+                            runner_id=fence.runner_id,
+                            agent_turn_id=active_stream_id,
+                            reason_code="message_not_committed",
+                        )
+                    active_stream_id = None
             else:
                 reasons = {dispatch.wait_reason for dispatch in result.dispatches if dispatch.durable_wait}
                 wait_reason = (
@@ -940,6 +999,14 @@ class RuntimeWorker:
             execution_error_code = str(
                 getattr(error, "code", type(error).__name__)
             )[:100]
+            if active_stream_id:
+                await self.live_stream.finish(
+                    event_type="model.stream_reset",
+                    session_id=fence.session_id, run_id=fence.run_id,
+                    runner_id=fence.runner_id, agent_turn_id=active_stream_id,
+                    reason_code=execution_error_code,
+                )
+                active_stream_id = None
             if self._is_transient_settlement_conflict(error):
                 # The provider/tool dispatch transaction rolled back. Leave
                 # the durable Runner fenced as running; its lease recovery
@@ -1000,7 +1067,9 @@ class RuntimeWorker:
             raise RunnerFenced("Runner lease or epoch no longer owns writes")
         return runner
 
-    async def _settle_completed(self, fence: RunnerFence, content: str, context) -> None:
+    async def _settle_completed(
+        self, fence: RunnerFence, content: str, context,
+    ) -> str | None:
         async with AsyncSessionLocal.begin() as db:
             session = await self._lock_event_session(db, fence.session_id)
             runner = await self._load_fenced_runner(db, fence)
@@ -1100,7 +1169,7 @@ class RuntimeWorker:
                     db, runner=runner, work=work, run=run, session=session,
                     plan=plan, update=update, content=content, context=context,
                 )
-                return
+                return runner.result_message_id
             if run.mode == "group" and work.group_run_id:
                 await self._settle_group_completed(
                     db, runner=runner, work=work, run=run,
@@ -1181,6 +1250,7 @@ class RuntimeWorker:
             await enqueue_run_terminal_followups(
                 db, run=run, runner=runner, completion_event=completed,
             )
+            return message.id
 
     async def _continue_incomplete_working_plan(
         self, db, *, runner: DurableRunner, work: WorkItem, run: Run,
@@ -1453,7 +1523,7 @@ class RuntimeWorker:
         self, db, *, runner: DurableRunner, work: WorkItem, run: Run,
         session: UserSession, plan: WorkingPlan, update: PlanUpdate,
         content: str, context,
-    ) -> None:
+    ) -> str:
         message = Message(
             id=uuid7(), session_id=run.session_id, user_id=work.user_id,
             scope_type="chat", sender_type="agent", sender_agent_id=runner.agent_id,
@@ -1526,6 +1596,7 @@ class RuntimeWorker:
             },
             correlation_id=run.id, caused_by_event_id=created.id,
         )
+        return message.id
 
     async def _resume_agent_batch_if_ready(
         self, db, *, run: Run, caller_work: WorkItem,

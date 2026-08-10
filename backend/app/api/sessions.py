@@ -7,7 +7,7 @@ from datetime import timedelta
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 import asyncio
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -15,7 +15,7 @@ from app.deps import SessionActor, get_session_actor
 from app.models.agent_v1 import AgentBlueprint
 from app.models.common import utcnow, uuid7
 from app.models.foundation import IdempotencyRecord, UserSession
-from app.models.runtime_v1 import Message, Run, SessionSandbox
+from app.models.runtime_v1 import Message, Run, SessionSandbox, ToolInvocation
 from app.schemas.runtime_v1 import (
     ChatCommandResponse,
     MessageCreateRequest,
@@ -200,7 +200,17 @@ async def list_messages(
         principal=f"{actor.principal_type}:{actor.principal_id}",
         resource=f"session:{session_id}:messages", filters={"scope": scope},
     )
-    return {"items": [MessageResponse.model_validate(row).model_dump(mode="json") for row in rows],
+    run_ids = {row.run_id for row in rows if row.run_id}
+    tool_counts = {}
+    if run_ids:
+        tool_counts = dict((await db.execute(select(
+            ToolInvocation.run_id, func.count(ToolInvocation.id),
+        ).where(
+            ToolInvocation.run_id.in_(run_ids),
+        ).group_by(ToolInvocation.run_id))).all())
+    return {"items": [MessageResponse.model_validate(row).model_copy(update={
+                "tool_activity_count": int(tool_counts.get(row.run_id, 0)),
+            }).model_dump(mode="json") for row in rows],
             "next_cursor": next_cursor}
 
 
@@ -307,7 +317,17 @@ async def stream_events(
                 if pubsub is not None:
                     live = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1)
                     if live and live.get("type") == "message":
-                        yield f"event: model.delta\ndata: {live['data']}\n\n"
+                        try:
+                            live_payload = json.loads(live["data"])
+                            live_type = str(live_payload.get("event_type") or "model.delta")
+                            if live_type not in {
+                                "model.delta", "model.stream_reset",
+                                "model.stream_committed", "tool.progress",
+                            }:
+                                live_type = "model.delta"
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            live_type = "model.delta"
+                        yield f"event: {live_type}\ndata: {live['data']}\n\n"
                     else:
                         yield ": keepalive\n\n"
                 else:

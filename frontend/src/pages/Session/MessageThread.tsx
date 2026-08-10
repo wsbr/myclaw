@@ -1,11 +1,14 @@
 import { useEffect, useMemo, useState } from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { Button, Spin, Tooltip } from 'antd'
 import { ArrowDown, Bot, Check, Copy, UserRound } from 'lucide-react'
 import DOMPurify from 'dompurify'
 import { marked } from 'marked'
-import type { Message } from '@/api/sessions'
+import { sessionsApi } from '@/api/sessions'
+import type { LiveToolProgressEvent, Message, ToolInvocationView } from '@/api/sessions'
 import { cn } from '@/lib/utils'
 import { formatClock } from './runtimeView'
+import ToolActivityCard from './ToolActivityCard'
 
 interface Props {
   agentName?: string
@@ -13,13 +16,22 @@ interface Props {
   loading: boolean
   running: boolean
   liveText: string
+  activeTools: ToolInvocationView[]
+  liveTools: LiveToolProgressEvent[]
   showScrollButton: boolean
   onScrollToBottom: () => void
 }
 
 function MessageItem({ item, agentName }: { item: Message; agentName?: string }) {
   const [copied, setCopied] = useState(false)
+  const [toolsOpen, setToolsOpen] = useState(false)
   const isUser = item.role === 'user'
+  const hasTools = !isUser && Boolean(item.run_id) && item.tool_activity_count > 0
+  const { data: tools = [] } = useQuery({
+    queryKey: ['tool-invocations', item.run_id],
+    queryFn: () => sessionsApi.getToolInvocations(item.run_id!),
+    enabled: hasTools && toolsOpen,
+  })
   const renderedContent = useMemo(() => {
     if (isUser || item.content_format !== 'markdown') return null
     const html = marked.parse(item.content, { async: false, breaks: true, gfm: true }) as string
@@ -61,6 +73,12 @@ function MessageItem({ item, agentName }: { item: Message; agentName?: string })
           dangerouslySetInnerHTML={{ __html: renderedContent }}
         /> : item.content}
       </div>
+      {hasTools && <ToolActivityCard
+        items={tools}
+        totalCount={item.tool_activity_count}
+        historical
+        onOpen={() => setToolsOpen(true)}
+      />}
       <div className={cn('mt-1 flex h-7 items-center opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100', isUser && 'justify-end')}>
         <Tooltip title={copied ? '已复制' : '复制消息'}>
           <Button
@@ -80,7 +98,8 @@ function MessageItem({ item, agentName }: { item: Message; agentName?: string })
 }
 
 export default function MessageThread({
-  agentName, messages, loading, running, liveText, showScrollButton, onScrollToBottom,
+  agentName, messages, loading, running, liveText, activeTools, liveTools,
+  showScrollButton, onScrollToBottom,
 }: Props) {
   const visibleMessages = messages.filter(item => item.role === 'user' || item.role === 'assistant')
 
@@ -109,12 +128,13 @@ export default function MessageThread({
         <div className="min-w-0 max-w-[84%]">
           <div className="mb-1 px-1 text-[11px] font-medium text-foreground/75">{agentName || 'Agent'} · 正在响应</div>
           <div className="min-h-12 whitespace-pre-wrap break-words rounded-2xl rounded-tl-md border bg-card px-4 py-3 text-sm leading-7 shadow-sm">
-            {liveText || <div className="flex items-center gap-2 py-1 text-muted-foreground">
+            {liveText || (activeTools.length === 0 && liveTools.length === 0) && <div className="flex items-center gap-2 py-1 text-muted-foreground">
               <span className="runtime-pulse-dot" />
               <span className="runtime-pulse-dot [animation-delay:160ms]" />
               <span className="runtime-pulse-dot [animation-delay:320ms]" />
               <span className="ml-1">正在处理当前任务</span>
             </div>}
+            <ToolActivityCard items={activeTools} liveItems={liveTools} />
           </div>
         </div>
       </article>}

@@ -62,6 +62,7 @@ class DispatchResult:
 
 
 Executor = Callable[[str, dict[str, Any], RuntimeContext, AsyncSession | None], Awaitable[ToolResult]]
+ProgressObserver = Callable[[dict[str, Any]], Awaitable[None]]
 
 WEB_RETRIEVAL_LIMITS = {
     "web_search": {"turn": 2, "normal_run": 2, "run": 6},
@@ -234,9 +235,21 @@ class ActionDispatcher:
     def __init__(
         self, tool_definitions: list[dict[str, Any]], *,
         executor: Executor = _builtin_executor,
+        progress_observer: ProgressObserver | None = None,
     ) -> None:
         self.definitions = {value["name"]: value for value in tool_definitions}
         self.executor = executor
+        self.progress_observer = progress_observer
+
+    async def _progress(
+        self, call: ToolCallItem, status: str,
+        invocation_id: str | None = None,
+    ) -> None:
+        if self.progress_observer is not None:
+            await self.progress_observer({
+                "call_id": call.call_id, "tool_key": call.name,
+                "status": status, "tool_invocation_id": invocation_id,
+            })
 
     def add_definitions(self, definitions: list[dict[str, Any]]) -> None:
         """Load only definitions already admitted by the CapabilitySnapshot."""
@@ -447,12 +460,23 @@ class ActionDispatcher:
             else:
                 serialized.append(call)
         completed: dict[str, DispatchResult] = dict(rejected)
+        for call in calls:
+            if call.call_id in rejected:
+                await self._progress(call, "failed")
         for call in [*readonly, *serialized]:
-            completed[call.call_id] = await self.dispatch(
+            await self._progress(call, "running")
+            dispatched = await self.dispatch(
                 call, capability_snapshot=capability_snapshot,
                 runtime_context=runtime_context, db=db, run_id=run_id,
                 work_item_id=work_item_id, source_turn_id=source_turn_id,
             )
+            completed[call.call_id] = dispatched
+            status = str((dispatched.result.data or {}).get("status") or dispatched.result.status)
+            if status not in {"queued", "running", "succeeded", "failed"}:
+                status = "queued" if dispatched.durable_wait else (
+                    "succeeded" if dispatched.result.success else "failed"
+                )
+            await self._progress(call, status, dispatched.invocation_id)
         return [completed[call.call_id] for call in calls]
 
     async def dispatch(
