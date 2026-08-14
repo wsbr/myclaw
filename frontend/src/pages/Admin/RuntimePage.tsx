@@ -87,6 +87,14 @@ export default function RuntimePage() {
       render: (_: unknown, row: RuntimeRunProjection) => `W ${total(row.counts.work_items)} · R ${total(row.counts.runners)} · T ${total(row.counts.tool_invocations)} · A ${total(row.counts.agent_invocations)}`,
     },
     {
+      title: '下一动作',
+      render: (_: unknown, row: RuntimeRunProjection) => row.next_action
+        ? <Space direction="vertical" size={0}>
+          <Typography.Text>{row.next_action.actor_type}</Typography.Text>
+          <Typography.Text type="secondary" className="text-xs">{short(row.next_action.owner_agent_id)} · {row.next_action.wait_reason || row.next_action.status}</Typography.Text>
+        </Space> : '—',
+    },
+    {
       title: '预算预警',
       render: (_: unknown, row: RuntimeRunProjection) => row.budget.warning_dimensions.length
         ? row.budget.warning_dimensions.map(item => <Tag key={item} color="warning">{item}</Tag>) : <Tag color="success">正常</Tag>,
@@ -108,7 +116,8 @@ export default function RuntimePage() {
 
     <Row gutter={[16, 16]} className="mb-4">
       <Col xs={12} xl={6}><Card><Statistic title="非终态 Runs" value={activeRuns} /></Card></Col>
-      <Col xs={12} xl={6}><Card><Statistic title="Queued Runners" value={data?.runners.queued || 0} /></Card></Col>
+      <Col xs={12} xl={6}><Card><Statistic title="Queued Runners" value={data?.runners.queued || 0}
+        suffix={data?.queue_age.oldest_queued_runner_seconds == null ? undefined : `最老 ${duration(data.queue_age.oldest_queued_runner_seconds)}`} /></Card></Col>
       <Col xs={12} xl={6}><Card><Statistic title="待处理 Outbox" value={queuedCommands} /></Card></Col>
       <Col xs={12} xl={6}><Card><Statistic title="Group 诊断" value={data?.diagnostic_count || 0} /></Card></Col>
     </Row>
@@ -144,12 +153,13 @@ export default function RuntimePage() {
           { title: '最老年龄', dataIndex: 'oldest_age_seconds', render: duration },
         ]} />
       </Card>
-      <Card size="small" title="当前租约观测（不冒充完整 Worker 注册表）">
+      <Card size="small" title="Worker 进程与槽位健康">
         <Table size="small" pagination={false} rowKey={row => `${row.worker_kind}:${row.worker_id}`} dataSource={data?.observed_workers || []} columns={[
           { title: '类型', dataIndex: 'worker_kind', render: value => <Tag>{value}</Tag> },
           { title: 'Worker', dataIndex: 'worker_id', ellipsis: true },
-          { title: '占用槽', dataIndex: 'observed_active_slots' },
-          { title: '租约', dataIndex: 'health', render: value => <Tag color={statusColor(value)}>{value}</Tag> },
+          { title: '槽位', render: (_, row) => row.capacity == null ? `${row.observed_active_slots}/?` : `${row.active_slots}/${row.capacity}` },
+          { title: '健康', dataIndex: 'health', render: value => <Tag color={statusColor(value)}>{value}</Tag> },
+          { title: '陈旧租约', dataIndex: 'stale_leases' },
           { title: '心跳', dataIndex: 'last_heartbeat_at', render: when },
         ]} />
       </Card>
@@ -173,6 +183,7 @@ export default function RuntimePage() {
               <Descriptions.Item label="等待原因">{runtimeDetail.wait_reason || '—'}</Descriptions.Item>
               <Descriptions.Item label="终态原因">{runtimeDetail.terminal_reason || '—'}</Descriptions.Item>
               <Descriptions.Item label="Deadline">{when(runtimeDetail.deadline_at)}</Descriptions.Item>
+              <Descriptions.Item label="下一动作" span={3}>{runtimeDetail.next_action ? `${runtimeDetail.next_action.actor_type} · Agent ${short(runtimeDetail.next_action.owner_agent_id)} · ${runtimeDetail.next_action.wait_reason || runtimeDetail.next_action.status}` : '—'}</Descriptions.Item>
               <Descriptions.Item label="最近进度" span={3}>{runtimeDetail.last_progress ? `${runtimeDetail.last_progress.reason_code} · 连续无进展 ${runtimeDetail.last_progress.consecutive_no_progress}` : '—'}</Descriptions.Item>
             </Descriptions>
             <Table size="small" pagination={false} rowKey="dimension" dataSource={Object.entries(runtimeDetail.budget.limits).map(([key, limit]) => ({
@@ -212,6 +223,22 @@ export default function RuntimePage() {
           key: 'timeline', label: `因果时间线 (${runtimeDetail.timeline.length})`, children: recordTable(runtimeDetail.timeline, [
             { title: '#', dataIndex: 'sequence_no' }, { title: '时间', dataIndex: 'occurred_at', render: when }, { title: 'Event', dataIndex: 'event_type' }, { title: 'Actor', render: (_: unknown, row: Record<string, unknown>) => `${row.actor_type}:${row.actor_id || '—'}` }, { title: '实体', render: (_: unknown, row: Record<string, unknown>) => `${row.entity_type}:${short(row.entity_id as string)}` }, { title: '摘要', dataIndex: 'summary' },
           ], '暂无事件'),
+        },
+        {
+          key: 'evidence', label: `消息 / Turn / Checkpoint / Group 边 (${runtimeDetail.messages.length}/${runtimeDetail.agent_turns.length}/${runtimeDetail.checkpoints.length}/${runtimeDetail.group_edges.length})`, children: <Space direction="vertical" className="w-full" size="large">
+            {recordTable(runtimeDetail.messages, [
+              { title: '#', dataIndex: 'sequence_no' }, { title: '消息', dataIndex: 'id', render: short }, { title: '发送方', render: (_: unknown, row: Record<string, unknown>) => `${row.sender_type}:${short(row.sender_agent_id as string)}` }, { title: '接收 Agent', dataIndex: 'recipient_agent_id', render: short }, { title: '可见性', dataIndex: 'visibility' }, { title: 'Role', dataIndex: 'role' }, { title: '时间', dataIndex: 'created_at', render: when },
+            ], '暂无已提交消息元数据')}
+            {recordTable(runtimeDetail.agent_turns, [
+              { title: 'Turn', dataIndex: 'id', render: short }, { title: 'Runner', dataIndex: 'runner_id', render: short }, { title: '#', dataIndex: 'turn_no' }, { title: '状态', dataIndex: 'status', render: (value: string) => <Tag color={statusColor(value)}>{value}</Tag> }, { title: 'Stop', dataIndex: 'stop_reason' }, { title: 'Usage', dataIndex: 'usage', render: (value: unknown) => <Typography.Text code>{JSON.stringify(value)}</Typography.Text> },
+            ], '暂无 AgentTurn')}
+            {recordTable(runtimeDetail.checkpoints, [
+              { title: 'Checkpoint', dataIndex: 'id', render: short }, { title: 'Runner', dataIndex: 'runner_id', render: short }, { title: '#', dataIndex: 'sequence_no' }, { title: '类型', dataIndex: 'checkpoint_type' }, { title: '可恢复', dataIndex: 'safe_to_resume', render: (value: boolean) => <Tag color={value ? 'success' : 'default'}>{String(value)}</Tag> }, { title: 'Hash', dataIndex: 'content_hash', render: short },
+            ], '暂无 Checkpoint')}
+            {recordTable(runtimeDetail.group_edges, [
+              { title: '类型', dataIndex: 'cause_type' }, { title: '路径', render: (_: unknown, row: Record<string, unknown>) => `${short(row.source_agent_id as string)} → ${short(row.target_agent_id as string)}` }, { title: '状态', dataIndex: 'status', render: (value: string) => <Tag color={statusColor(value)}>{value}</Tag> }, { title: 'Cause', dataIndex: 'cause_id', render: short },
+            ], '暂无 Group 交互边')}
+          </Space>,
         },
         {
           key: 'diagnostics', label: `诊断 / Outbox (${runtimeDetail.diagnostics.length}/${runtimeDetail.outbox.length})`, children: <Space direction="vertical" className="w-full" size="large">

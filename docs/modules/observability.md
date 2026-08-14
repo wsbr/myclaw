@@ -162,7 +162,7 @@ UAT/生产不能只启用 debug exporter。至少一个出口必须有可验证�
 
 管理员可通过 Web 的 `Runtime Console` 或 `/admin/runtime/*` 只读投影回答当前 Run 状态、等待原因、下一执行实体、预算用量、最近进展、Runner/Tool 租约、Provider/Tool/Agent 调用、Group 诊断、Outbox 积压与终态原因。Run 详情时间线直接来自权威 ExecutionEvent，控制台不保存第二套 lifecycle，也没有任意修改数据库状态的入口。
 
-跨账号运营投影只返回 ID、状态、计数、稳定错误码、受控摘要与时间；不返回 Message/WorkItem 正文、AgentInvocation request_text、Tool 参数/结果、Outbox payload、raw error detail、Prompt 或 Chain-of-Thought。当前 Worker 列表明确标记为“活跃租约观测”，只能证明正在持有 Runner、ToolAttempt 或 Outbox lease 的 Worker，不能冒充完整的空闲 Worker 注册表；持久化 Worker capacity/idle heartbeat 属于后续独立注册能力。
+跨账号运营投影只返回 ID、状态、计数、稳定错误码、受控摘要与时间；不返回 Message/WorkItem 正文、AgentInvocation request_text、Tool 参数/结果、Outbox payload、raw error detail、Prompt 或 Chain-of-Thought。Worker 进程独立写入 `worker_instance` 心跳、release、capacity 与 active slots，因此空闲进程也可见；控制台同时核对 Runner/Tool/Outbox 租约，区分 active、stale、stopped 与只有租约但没有注册心跳的 unknown。进程心跳只用于观测，不能改写 Run 生命周期或替代 lease/fencing；超过配置保留期的旧进程记录由 bounded maintenance retention 分批清理。
 
 ## Usage / 成本账本
 

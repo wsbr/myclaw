@@ -10,7 +10,7 @@ from app.database import Base
 from app.models.channel_v1 import NotificationDeliveryAttempt
 from app.models.foundation import IdempotencyRecord, OutboxCommand, PlatformAuditEvent
 from app.models.observability_v1 import ObservabilitySpan, ObservabilitySpanLink, RunnerTrace
-from app.models.runtime_v1 import RunnerCheckpoint, WorkItem
+from app.models.runtime_v1 import RunnerCheckpoint, WorkerInstance, WorkItem
 from app.services.retention_service import run_retention_cleanup
 
 
@@ -51,6 +51,18 @@ async def test_retention_cleanup_prunes_only_expired_operational_rows():
             _outbox("outbox-completed-old", status="completed", when=old_31),
             _outbox("outbox-completed-live", status="completed", when=now - timedelta(days=1)),
             _outbox("outbox-dead-old", status="dead", when=old_181),
+            WorkerInstance(
+                worker_id="runtime:old", worker_kind="runtime", capacity=8,
+                active_slots=0, status="stopped", hostname="old", process_id=1,
+                release_id="old", started_at=old_31, heartbeat_at=old_31,
+                stopped_at=old_31, created_at=old_31, updated_at=old_31,
+            ),
+            WorkerInstance(
+                worker_id="runtime:live", worker_kind="runtime", capacity=8,
+                active_slots=0, status="active", hostname="live", process_id=2,
+                release_id="current", started_at=now, heartbeat_at=now,
+                created_at=now, updated_at=now,
+            ),
         ])
         work = WorkItem(
             id="work-old", run_id="run", session_id="session", user_id="user", mode="chat",
@@ -93,11 +105,14 @@ async def test_retention_cleanup_prunes_only_expired_operational_rows():
     assert result.observability_spans == 1
     assert result.observability_span_links == 1
     assert result.notification_delivery_attempts == 1
+    assert result.worker_instances == 1
 
     async with factory() as db:
         assert await db.get(IdempotencyRecord, "idem-live") is not None
         assert await db.get(OutboxCommand, "outbox-completed-live") is not None
         assert await db.get(WorkItem, "work-old") is not None
+        assert await db.get(WorkerInstance, "runtime:old") is None
+        assert await db.get(WorkerInstance, "runtime:live") is not None
         audit = await db.scalar(select(PlatformAuditEvent).where(
             PlatformAuditEvent.dedupe_key == "retention_cleanup:job-1",
         ))

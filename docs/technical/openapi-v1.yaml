@@ -201,7 +201,7 @@ paths:
     get:
       tags: [Operations]
       operationId: getRuntimeConsoleSummary
-      description: Administrator-only redacted projection of global Runtime, queue and active-lease health.
+      description: Administrator-only redacted projection of global Runtime, queue, process-heartbeat and lease health.
       responses:
         '200': {description: Runtime health snapshot., content: {application/json: {schema: {$ref: '#/components/schemas/RuntimeConsoleSummary'}}}}
         default: {$ref: '#/components/responses/Error'}
@@ -1797,6 +1797,20 @@ paths:
         '200': {description: Current immutable index revision., content: {application/json: {schema: {$ref: '#/components/schemas/KnowledgeIndexRevision'}}}}
         default: {$ref: '#/components/responses/Error'}
 
+  /knowledge-bases/{knowledge_base_id}/reconcile-storage:
+    post:
+      tags: [Knowledge]
+      operationId: reconcileKnowledgeBaseStorage
+      parameters:
+        - {$ref: '#/components/parameters/KnowledgeBaseId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/KnowledgeReconcileRequest'}}}
+      responses:
+        '200': {description: Missing, corrupt and unreferenced local body report with optional fail-closed repair., content: {application/json: {schema: {$ref: '#/components/schemas/KnowledgeReconcileResult'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
   /knowledge-bases/{knowledge_base_id}/search:
     post:
       tags: [Knowledge]
@@ -3141,7 +3155,7 @@ components:
     RuntimeConsoleSummary:
       type: object
       additionalProperties: false
-      required: [generated_at, runs, runners, tool_invocations, agent_invocations, outbox, observed_workers, outcome_unknown, diagnostic_count]
+      required: [generated_at, runs, runners, tool_invocations, agent_invocations, outbox, queue_age, observed_workers, outcome_unknown, diagnostic_count]
       properties:
         generated_at: {$ref: '#/components/schemas/Timestamp'}
         runs: {type: object, additionalProperties: {type: integer, minimum: 0}}
@@ -3149,13 +3163,14 @@ components:
         tool_invocations: {type: object, additionalProperties: {type: integer, minimum: 0}}
         agent_invocations: {type: object, additionalProperties: {type: integer, minimum: 0}}
         outbox: {type: array, items: {type: object, additionalProperties: true}}
-        observed_workers: {type: array, description: Workers inferred only from current Runner/Tool/Outbox leases; this is not an idle-worker registry., items: {type: object, additionalProperties: true}}
+        queue_age: {type: object, additionalProperties: false, required: [oldest_queued_runner_seconds, oldest_waiting_work_seconds], properties: {oldest_queued_runner_seconds: {type: [integer, 'null'], minimum: 0}, oldest_waiting_work_seconds: {type: [integer, 'null'], minimum: 0}}}
+        observed_workers: {type: array, description: Persisted process heartbeat/capacity plus current Runner/Tool/Outbox lease cross-checks., items: {type: object, additionalProperties: true}}
         outcome_unknown: {type: object, additionalProperties: false, required: [provider_attempts, tool_attempts], properties: {provider_attempts: {type: integer, minimum: 0}, tool_attempts: {type: integer, minimum: 0}}}
         diagnostic_count: {type: integer, minimum: 0}
     RuntimeRunProjection:
       type: object
       additionalProperties: false
-      required: [id, session_id, account_id, mode, status, wait_reason, terminal_reason, root_work_item_id, permission_mode, created_at, updated_at, completed_at, deadline_at, age_seconds, counts, budget, last_progress]
+      required: [id, session_id, account_id, mode, status, wait_reason, terminal_reason, root_work_item_id, permission_mode, created_at, updated_at, completed_at, deadline_at, age_seconds, counts, budget, last_progress, next_action]
       properties:
         id: {$ref: '#/components/schemas/Uuid'}
         session_id: {$ref: '#/components/schemas/Uuid'}
@@ -3174,6 +3189,7 @@ components:
         counts: {type: object, additionalProperties: true}
         budget: {type: object, additionalProperties: true}
         last_progress: {type: [object, 'null'], additionalProperties: true}
+        next_action: {type: [object, 'null'], additionalProperties: true}
     RuntimeRunPage:
       type: object
       additionalProperties: false
@@ -3183,12 +3199,16 @@ components:
       type: object
       description: RuntimeRunProjection fields plus the redacted child collections below.
       additionalProperties: true
-      required: [id, work_items, runners, provider_attempts, tool_invocations, agent_invocations, diagnostics, timeline, outbox]
+      required: [id, work_items, runners, provider_attempts, messages, agent_turns, checkpoints, group_edges, tool_invocations, agent_invocations, diagnostics, timeline, outbox]
       properties:
         id: {$ref: '#/components/schemas/Uuid'}
         work_items: {type: array, items: {type: object, additionalProperties: true}}
         runners: {type: array, items: {type: object, additionalProperties: true}}
         provider_attempts: {type: array, items: {type: object, additionalProperties: true}}
+        messages: {type: array, description: Committed message routing metadata only; content is redacted., items: {type: object, additionalProperties: true}}
+        agent_turns: {type: array, description: AgentTurn state and usage without prompt or turn items., items: {type: object, additionalProperties: true}}
+        checkpoints: {type: array, description: Checkpoint identity/resume metadata without state snapshots., items: {type: object, additionalProperties: true}}
+        group_edges: {type: array, description: Edges projected only from committed messages and AgentInvocations., items: {type: object, additionalProperties: true}}
         tool_invocations: {type: array, items: {type: object, additionalProperties: true}}
         agent_invocations: {type: array, items: {type: object, additionalProperties: true}}
         diagnostics: {type: array, items: {$ref: '#/components/schemas/GroupDiagnostic'}}
@@ -3571,6 +3591,26 @@ components:
       required: [agent_ids]
       properties:
         agent_ids: {type: array, maxItems: 100, uniqueItems: true, items: {$ref: '#/components/schemas/Uuid'}}
+    KnowledgeReconcileRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        repair: {type: boolean, default: true}
+    KnowledgeReconcileResult:
+      type: object
+      additionalProperties: false
+      required: [knowledge_base_id, checked_source_count, missing_sources, corrupt_sources, orphaned_bodies, changed_source_ids, restored_source_ids, repair_applied, index_revision, healthy]
+      properties:
+        knowledge_base_id: {$ref: '#/components/schemas/Uuid'}
+        checked_source_count: {type: integer, minimum: 0}
+        missing_sources: {type: array, items: {type: object, additionalProperties: true}}
+        corrupt_sources: {type: array, items: {type: object, additionalProperties: true}}
+        orphaned_bodies: {type: array, items: {type: string}}
+        changed_source_ids: {type: array, items: {$ref: '#/components/schemas/Uuid'}}
+        restored_source_ids: {type: array, items: {$ref: '#/components/schemas/Uuid'}}
+        repair_applied: {type: boolean}
+        index_revision: {oneOf: [{$ref: '#/components/schemas/KnowledgeIndexRevision'}, {type: 'null'}]}
+        healthy: {type: boolean}
     KnowledgeSource:
       type: object
       additionalProperties: false

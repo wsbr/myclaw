@@ -1021,6 +1021,12 @@ async def test_group_peers_message_invoke_audit_and_repeat_history():
         assert console_detail["counts"]["diagnostics"] == 5
         assert console_detail["budget"]["usage"]["agent_invocations"] == 6
         assert len(console_detail["agent_invocations"]) == 6
+        assert console_detail["next_action"] is None
+        assert console_detail["messages"]
+        assert console_detail["group_edges"]
+        assert all("content" not in item for item in console_detail["messages"])
+        assert all("turn_items" not in item for item in console_detail["agent_turns"])
+        assert all("state_snapshot" not in item for item in console_detail["checkpoints"])
         assert all("request_text" not in item for item in console_detail["agent_invocations"])
         assert all("payload_ref" not in item for item in console_detail["outbox"])
         assert all("content" not in item for item in console_detail["timeline"])

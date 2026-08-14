@@ -48,6 +48,13 @@ export interface RuntimeRunProjection {
     consecutive_no_progress: number
     created_at: string
   }
+  next_action: null | {
+    actor_type: string | null
+    work_item_id: string
+    owner_agent_id: string
+    status: string
+    wait_reason: string | null
+  }
 }
 
 export interface RuntimeSummary {
@@ -57,13 +64,20 @@ export interface RuntimeSummary {
   tool_invocations: Record<string, number>
   agent_invocations: Record<string, number>
   outbox: Array<{ topic: string; status: string; count: number; oldest_age_seconds: number | null }>
+  queue_age: {
+    oldest_queued_runner_seconds: number | null
+    oldest_waiting_work_seconds: number | null
+  }
   observed_workers: Array<{
     worker_kind: string
     worker_id: string
+    capacity: number | null
+    active_slots: number | null
     observed_active_slots: number
     last_heartbeat_at: string | null
     stale_leases: number
-    health: 'active' | 'stale'
+    health: 'active' | 'stale' | 'stopped' | 'unknown'
+    release_id: string | null
   }>
   outcome_unknown: { provider_attempts: number; tool_attempts: number }
   diagnostic_count: number
@@ -73,6 +87,10 @@ export interface RuntimeRunDetail extends RuntimeRunProjection {
   work_items: Array<Record<string, unknown>>
   runners: Array<Record<string, unknown>>
   provider_attempts: Array<Record<string, unknown>>
+  messages: Array<Record<string, unknown>>
+  agent_turns: Array<Record<string, unknown>>
+  checkpoints: Array<Record<string, unknown>>
+  group_edges: Array<Record<string, unknown>>
   tool_invocations: Array<Record<string, unknown>>
   agent_invocations: Array<Record<string, unknown>>
   diagnostics: Array<Record<string, unknown>>

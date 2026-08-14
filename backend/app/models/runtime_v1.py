@@ -117,6 +117,39 @@ class Run(Base, TimestampMixin, VersionMixin):
     deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
 
 
+class WorkerInstance(Base, TimestampMixin):
+    """Process-level liveness and bounded slot capacity for Runtime operators."""
+
+    __tablename__ = "worker_instance"
+    __table_args__ = (
+        CheckConstraint("capacity > 0", name="ck_worker_instance_capacity_positive"),
+        CheckConstraint(
+            "active_slots >= 0 AND active_slots <= capacity",
+            name="ck_worker_instance_active_slots",
+        ),
+        CheckConstraint(
+            "status IN ('active','stopped')", name="ck_worker_instance_status",
+        ),
+        Index("ix_worker_instance_kind_heartbeat", "worker_kind", "heartbeat_at"),
+    )
+
+    worker_id: Mapped[str] = mapped_column(String(191), primary_key=True)
+    worker_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    capacity: Mapped[int] = mapped_column(Integer, nullable=False)
+    active_slots: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="active", nullable=False)
+    hostname: Mapped[str] = mapped_column(String(255), nullable=False)
+    process_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    release_id: Mapped[str] = mapped_column(String(191), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), default=utcnow, nullable=False,
+    )
+    heartbeat_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), default=utcnow, nullable=False,
+    )
+    stopped_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+
+
 class WorkItem(Base, TimestampMixin, VersionMixin):
     __tablename__ = "work_item"
     __table_args__ = (

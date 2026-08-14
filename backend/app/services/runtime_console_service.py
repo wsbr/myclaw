@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.models.common import utcnow
 from app.models.foundation import ExecutionEvent, OutboxCommand, UserSession
 from app.models.group_v1 import GroupDiagnostic
@@ -16,10 +17,13 @@ from app.models.runtime_v1 import (
     AgentInvocation,
     AgentTurn,
     DurableRunner,
+    Message,
     ProviderAttempt,
     Run,
+    RunnerCheckpoint,
     ToolAttempt,
     ToolInvocation,
+    WorkerInstance,
     WorkItem,
 )
 from app.models.verification_v1 import RunProgressMark
@@ -85,6 +89,15 @@ async def project_runtime_runs(
     ).where(GroupDiagnostic.run_id.in_(run_ids)).group_by(
         GroupDiagnostic.run_id,
     ))).all())
+    open_work_rows = list(await db.scalars(select(WorkItem).where(
+        WorkItem.run_id.in_(run_ids),
+        WorkItem.status.not_in((
+            "succeeded", "failed", "timed_out", "cancelled", "abandoned", "blocked",
+        )),
+    ).order_by(WorkItem.created_at, WorkItem.id)))
+    open_work_by_run: dict[str, list[WorkItem]] = defaultdict(list)
+    for item in open_work_rows:
+        open_work_by_run[item.run_id].append(item)
 
     usage_by_run: dict[str, dict[str, int | float]] = defaultdict(lambda: {
         "agent_turns": 0,
@@ -153,6 +166,20 @@ async def project_runtime_runs(
             if float(usage[dimension]) >= float(limits[limit_key]) * 0.8
         ]
         progress = progress_by_run.get(run.id)
+        open_work = open_work_by_run[run.id]
+        next_work = next((
+            item for item in open_work if item.status.startswith("waiting_")
+        ), None)
+        next_work = next_work or (open_work[0] if open_work else None)
+        next_actor = {
+            "waiting_user": "user",
+            "waiting_approval": "user_approval",
+            "waiting_tool": "tool_worker",
+            "waiting_resource": "resource_worker",
+            "waiting_agent": "agent",
+            "queued": "runtime_worker",
+            "running": "runtime_worker",
+        }.get(next_work.status) if next_work else None
         items.append({
             "id": run.id,
             "session_id": run.session_id,
@@ -186,6 +213,13 @@ async def project_runtime_runs(
                 "consecutive_no_progress": progress.consecutive_no_progress,
                 "created_at": _iso(progress.created_at),
             },
+            "next_action": None if next_work is None else {
+                "actor_type": next_actor,
+                "work_item_id": next_work.id,
+                "owner_agent_id": next_work.owner_agent_id,
+                "status": next_work.status,
+                "wait_reason": next_work.wait_reason,
+            },
         })
     return items
 
@@ -213,8 +247,41 @@ async def runtime_console_summary(db: AsyncSession) -> dict[str, Any]:
         "count": int(count),
         "oldest_age_seconds": _age_seconds(oldest, now=now),
     } for topic, status, count, oldest in outbox_rows]
+    oldest_queued_runner = await db.scalar(select(
+        func.min(DurableRunner.created_at),
+    ).where(DurableRunner.status == "queued"))
+    oldest_waiting_work = await db.scalar(select(
+        func.min(WorkItem.updated_at),
+    ).where(WorkItem.status.like("waiting_%")))
 
-    workers: dict[tuple[str, str], dict[str, Any]] = {}
+    workers: dict[str, dict[str, Any]] = {}
+    registration_cutoff = now - timedelta(
+        days=settings.worker_heartbeat_retention_days,
+    )
+    registrations = list(await db.scalars(select(WorkerInstance).where(
+        WorkerInstance.heartbeat_at >= registration_cutoff,
+    ).order_by(WorkerInstance.worker_kind, WorkerInstance.worker_id)))
+    stale_before = now - timedelta(seconds=settings.worker_heartbeat_stale_seconds)
+    for registration in registrations:
+        if registration.status == "stopped":
+            health = "stopped"
+        elif registration.heartbeat_at <= stale_before:
+            health = "stale"
+        else:
+            health = "active"
+        workers[registration.worker_id] = {
+            "worker_kind": registration.worker_kind,
+            "worker_id": registration.worker_id,
+            "capacity": registration.capacity,
+            "active_slots": registration.active_slots,
+            "observed_active_slots": 0,
+            "last_heartbeat_at": registration.heartbeat_at,
+            "stale_leases": 0,
+            "health": health,
+            "release_id": registration.release_id,
+            "hostname": registration.hostname,
+            "process_id": registration.process_id,
+        }
     runner_leases = (await db.execute(select(
         DurableRunner.lease_owner,
         DurableRunner.heartbeat_at,
@@ -239,19 +306,25 @@ async def runtime_console_summary(db: AsyncSession) -> dict[str, Any]:
         OutboxCommand.status == "claimed",
         OutboxCommand.dispatch_lease_owner.is_not(None),
     ))).all()
-    for kind, rows in (
+    for lease_kind, rows in (
         ("runtime", runner_leases),
         ("tool", tool_leases),
         ("outbox", claimed_outbox),
     ):
         for worker_id, heartbeat_at, lease_expires_at in rows:
-            key = (kind, str(worker_id))
-            item = workers.setdefault(key, {
-                "worker_kind": kind,
+            worker_id = str(worker_id)
+            item = workers.setdefault(worker_id, {
+                "worker_kind": lease_kind,
                 "worker_id": str(worker_id),
+                "capacity": None,
+                "active_slots": None,
                 "observed_active_slots": 0,
                 "last_heartbeat_at": None,
                 "stale_leases": 0,
+                "health": "unknown",
+                "release_id": None,
+                "hostname": None,
+                "process_id": None,
             })
             item["observed_active_slots"] += 1
             if heartbeat_at and (
@@ -263,7 +336,8 @@ async def runtime_console_summary(db: AsyncSession) -> dict[str, Any]:
                 item["stale_leases"] += 1
     worker_items = []
     for item in workers.values():
-        item["health"] = "stale" if item["stale_leases"] else "active"
+        if item["stale_leases"] and item["health"] == "active":
+            item["health"] = "stale"
         item["last_heartbeat_at"] = _iso(item["last_heartbeat_at"])
         worker_items.append(item)
     worker_items.sort(key=lambda item: (item["worker_kind"], item["worker_id"]))
@@ -275,6 +349,14 @@ async def runtime_console_summary(db: AsyncSession) -> dict[str, Any]:
         "tool_invocations": tool_counts,
         "agent_invocations": agent_counts,
         "outbox": outbox,
+        "queue_age": {
+            "oldest_queued_runner_seconds": _age_seconds(
+                oldest_queued_runner, now=now,
+            ),
+            "oldest_waiting_work_seconds": _age_seconds(
+                oldest_waiting_work, now=now,
+            ),
+        },
         "observed_workers": worker_items,
         "outcome_unknown": {
             "provider_attempts": int(await db.scalar(select(
@@ -311,6 +393,22 @@ async def runtime_run_detail(db: AsyncSession, run: Run) -> dict[str, Any]:
     ).where(AgentTurn.run_id == run.id).order_by(
         ProviderAttempt.created_at, ProviderAttempt.id,
     ))).all()
+    messages = list(await db.scalars(select(Message).where(
+        Message.run_id == run.id,
+        Message.status == "committed",
+    ).order_by(Message.created_at.desc(), Message.id.desc()).limit(500)))
+    messages.reverse()
+    agent_turns = list(await db.scalars(select(AgentTurn).where(
+        AgentTurn.run_id == run.id,
+    ).order_by(AgentTurn.created_at.desc(), AgentTurn.id.desc()).limit(500)))
+    agent_turns.reverse()
+    runner_ids = [item.id for item in runners]
+    checkpoints = list(await db.scalars(select(RunnerCheckpoint).where(
+        RunnerCheckpoint.runner_id.in_(runner_ids),
+    ).order_by(
+        RunnerCheckpoint.created_at.desc(), RunnerCheckpoint.id.desc(),
+    ).limit(500))) if runner_ids else []
+    checkpoints.reverse()
     diagnostics = list(await db.scalars(select(GroupDiagnostic).where(
         GroupDiagnostic.run_id == run.id,
     ).order_by(GroupDiagnostic.created_at.desc(), GroupDiagnostic.id.desc())))
@@ -328,6 +426,40 @@ async def runtime_run_detail(db: AsyncSession, run: Run) -> dict[str, Any]:
     outbox = list(await db.scalars(select(OutboxCommand).where(
         OutboxCommand.aggregate_id.in_(related_ids),
     ).order_by(OutboxCommand.created_at.desc()).limit(200)))
+
+    invocation_message_ids = {
+        item.result_message_id for item in agent_invocations if item.result_message_id
+    } | {
+        str((item.context_snapshot or {}).get("request_message_id"))
+        for item in agent_invocations
+        if (item.context_snapshot or {}).get("request_message_id")
+    }
+    group_edges = []
+    for item in messages:
+        if item.sender_agent_id is None or item.group_run_id is None:
+            continue
+        if item.id in invocation_message_ids:
+            continue
+        group_edges.append({
+            "source_agent_id": item.sender_agent_id,
+            "target_agent_id": item.recipient_agent_id,
+            "cause_type": (
+                "group_message"
+                if item.visibility == "group" and item.recipient_agent_id is None
+                else "message"
+            ),
+            "cause_id": item.id,
+            "status": "committed",
+            "created_at": _iso(item.created_at),
+        })
+    group_edges.extend({
+        "source_agent_id": item.caller_agent_id,
+        "target_agent_id": item.target_agent_id,
+        "cause_type": "agent_invocation",
+        "cause_id": item.id,
+        "status": item.status,
+        "created_at": _iso(item.created_at),
+    } for item in agent_invocations if item.group_run_id is not None)
 
     return {
         **projection,
@@ -373,6 +505,47 @@ async def runtime_run_detail(db: AsyncSession, run: Run) -> dict[str, Any]:
             "started_at": _iso(item.started_at),
             "ended_at": _iso(item.ended_at),
         } for item, runner_id in provider_attempts],
+        "messages": [{
+            "id": item.id,
+            "scope_type": item.scope_type,
+            "group_run_id": item.group_run_id,
+            "sender_type": item.sender_type,
+            "sender_agent_id": item.sender_agent_id,
+            "recipient_agent_id": item.recipient_agent_id,
+            "role": item.role,
+            "visibility": item.visibility,
+            "sequence_no": item.sequence_no,
+            "reply_to_message_id": item.reply_to_message_id,
+            "created_at": _iso(item.created_at),
+        } for item in messages],
+        "agent_turns": [{
+            "id": item.id,
+            "runner_id": item.runner_id,
+            "work_item_id": item.work_item_id,
+            "agent_version_id": item.agent_version_id,
+            "turn_no": item.turn_no,
+            "status": item.status,
+            "stop_reason": item.stop_reason,
+            "schema_repair_count": item.schema_repair_count,
+            "usage": dict(item.usage or {}),
+            "error_code": item.error_code,
+            "started_at": _iso(item.started_at),
+            "ended_at": _iso(item.ended_at),
+        } for item in agent_turns],
+        "checkpoints": [{
+            "id": item.id,
+            "runner_id": item.runner_id,
+            "work_item_id": item.work_item_id,
+            "sequence_no": item.sequence_no,
+            "checkpoint_type": item.checkpoint_type,
+            "execution_epoch": item.execution_epoch,
+            "working_plan_revision": item.working_plan_revision,
+            "last_completed_step": item.last_completed_step,
+            "safe_to_resume": item.safe_to_resume,
+            "content_hash": item.content_hash,
+            "created_at": _iso(item.created_at),
+        } for item in checkpoints],
+        "group_edges": group_edges,
         "tool_invocations": [{
             "id": item.id,
             "runner_id": item.runner_id,

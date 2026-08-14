@@ -83,6 +83,7 @@ from app.services.verification_service import maybe_verify_capacity_risk
 from app.services.run_reliability_service import expire_one_run_deadline
 from app.services.runtime_policy_service import prepare_runtime_policy_inputs
 from app.services.run_followup_service import enqueue_run_terminal_followups
+from app.services.worker_heartbeat_service import run_worker_heartbeat
 from app.services.group_collaboration_service import (
     build_group_emergence_candidate_snapshot,
     emerge_group_after_chat,
@@ -3137,6 +3138,12 @@ class RuntimeWorker:
     async def run_forever(self, poll_seconds: float | None = None) -> None:
         interval = settings.runtime_worker_poll_seconds if poll_seconds is None else poll_seconds
         active: set[asyncio.Task[None]] = set()
+        heartbeat_stop = asyncio.Event()
+        heartbeat = asyncio.create_task(run_worker_heartbeat(
+            worker_id=self.worker_id, worker_kind="runtime",
+            capacity=self.max_concurrency, active_slots=lambda: len(active),
+            stop=heartbeat_stop,
+        ), name=f"worker-heartbeat:{self.worker_id}")
         try:
             while True:
                 await self._wait_for_runner_tasks(active, timeout=0)
@@ -3179,6 +3186,8 @@ class RuntimeWorker:
                 task.cancel()
             if active:
                 await asyncio.gather(*active, return_exceptions=True)
+            heartbeat_stop.set()
+            await asyncio.gather(heartbeat, return_exceptions=True)
             await self.provider_pool.aclose()
 
 

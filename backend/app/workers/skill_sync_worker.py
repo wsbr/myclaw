@@ -22,6 +22,7 @@ from app.models.common import utcnow, uuid7
 from app.models.foundation import OutboxCommand
 from app.models.registry import RegisteredSkill, SkillVersion
 from app.services.skill_package_service import InvalidSkillPackage, sync_package
+from app.services.worker_heartbeat_service import run_worker_heartbeat
 
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,7 @@ class SkillSyncWorker:
         self.worker_id = worker_id or (
             f"skill-sync:{socket.gethostname()}:{os.getpid()}:{uuid7()}"
         )
+        self._active_slots = 0
 
     async def claim_one(self) -> SkillSyncClaim | None:
         async with AsyncSessionLocal.begin() as db:
@@ -125,6 +127,7 @@ class SkillSyncWorker:
         claim = await self.claim_one()
         if claim is None:
             return False
+        self._active_slots = 1
         error = None
         try:
             await asyncio.to_thread(
@@ -136,55 +139,71 @@ class SkillSyncWorker:
                 "Skill cache warm failed",
                 extra={"skill_id": claim.skill_id, "version_id": claim.version_id},
             )
-        await self._settle(claim, error)
+        try:
+            await self._settle(claim, error)
+        finally:
+            self._active_slots = 0
         return True
 
     async def warm_current_versions(self) -> None:
-        async with AsyncSessionLocal() as db:
-            versions = list(await db.scalars(
-                select(SkillVersion).join(
-                    RegisteredSkill,
-                    RegisteredSkill.current_published_version_id == SkillVersion.id,
-                ).where(
-                    RegisteredSkill.status == "active",
-                    SkillVersion.status == "published",
-                )
-            ))
-        for version in versions:
-            try:
-                await asyncio.to_thread(
-                    sync_package,
-                    version.skill_id,
-                    version.checksum,
-                    version.package_uri,
-                )
-            except InvalidSkillPackage:
-                logger.exception(
-                    "Startup Skill cache warm failed",
-                    extra={"skill_id": version.skill_id, "version_id": version.id},
-                )
+        self._active_slots = 1
+        try:
+            async with AsyncSessionLocal() as db:
+                versions = list(await db.scalars(
+                    select(SkillVersion).join(
+                        RegisteredSkill,
+                        RegisteredSkill.current_published_version_id == SkillVersion.id,
+                    ).where(
+                        RegisteredSkill.status == "active",
+                        SkillVersion.status == "published",
+                    )
+                ))
+            for version in versions:
+                try:
+                    await asyncio.to_thread(
+                        sync_package,
+                        version.skill_id,
+                        version.checksum,
+                        version.package_uri,
+                    )
+                except InvalidSkillPackage:
+                    logger.exception(
+                        "Startup Skill cache warm failed",
+                        extra={"skill_id": version.skill_id, "version_id": version.id},
+                    )
+        finally:
+            self._active_slots = 0
 
 
 async def main() -> None:
     worker = SkillSyncWorker()
-    await worker.warm_current_versions()
-    loop = asyncio.get_running_loop()
-    next_reconcile = loop.time() + settings.skill_sync_reconcile_seconds
-    while True:
-        if loop.time() >= next_reconcile:
+    heartbeat_stop = asyncio.Event()
+    heartbeat = asyncio.create_task(run_worker_heartbeat(
+        worker_id=worker.worker_id, worker_kind="skill_sync", capacity=1,
+        active_slots=lambda: worker._active_slots, stop=heartbeat_stop,
+    ), name=f"worker-heartbeat:{worker.worker_id}")
+    try:
+        await worker.warm_current_versions()
+        loop = asyncio.get_running_loop()
+        next_reconcile = loop.time() + settings.skill_sync_reconcile_seconds
+        while True:
+            if loop.time() >= next_reconcile:
+                try:
+                    await worker.warm_current_versions()
+                except Exception:
+                    logger.exception("Periodic Skill cache reconciliation failed")
+                finally:
+                    next_reconcile = loop.time() + settings.skill_sync_reconcile_seconds
             try:
-                await worker.warm_current_versions()
+                worked = await worker.run_once()
             except Exception:
-                logger.exception("Periodic Skill cache reconciliation failed")
-            finally:
-                next_reconcile = loop.time() + settings.skill_sync_reconcile_seconds
-        try:
-            worked = await worker.run_once()
-        except Exception:
-            logger.exception("Skill sync worker iteration failed")
-            worked = False
-        if not worked:
-            await asyncio.sleep(settings.skill_sync_worker_poll_seconds)
+                logger.exception("Skill sync worker iteration failed")
+                worked = False
+            if not worked:
+                await asyncio.sleep(settings.skill_sync_worker_poll_seconds)
+    finally:
+        heartbeat_stop.set()
+        await asyncio.gather(heartbeat, return_exceptions=True)
 
 
 if __name__ == "__main__":

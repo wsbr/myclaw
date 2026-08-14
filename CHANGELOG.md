@@ -4,6 +4,26 @@ All notable changes to MyClaw are documented in this file. The format follows [K
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-08-14
+
+### Added
+
+- Added persisted process-level worker registration with idle heartbeats,
+  release identity, bounded capacity/active slots, stale/stopped/unknown health,
+  and lease cross-checks in the Runtime Console.
+- Added redacted Runtime next-action, queued-age, committed-message, AgentTurn,
+  Checkpoint and actual Group-edge projections without exposing message bodies,
+  prompts, Tool payloads or Chain-of-Thought.
+- Added local Knowledge storage reconciliation for missing, corrupt and
+  unreferenced source bodies, fail-closed retrieval, repairable current-source
+  availability and an operator-facing reconciliation report.
+
+### Changed
+
+- Tightened the roadmap after a completion audit: shipped capability cores are
+  separated from queued Usage budget enforcement and advanced Eval regression,
+  stochastic-suite and override work.
+
 ## [0.3.0] - 2026-08-14
 
 ### Added
@@ -24,7 +44,7 @@ All notable changes to MyClaw are documented in this file. The format follows [K
 
 ### Release scope
 
-- This release completes the six dependency-ordered roadmap capabilities for the local/UAT profile. It does not claim customer billing, production multi-tenant identity operations, OCR, remote knowledge storage, production HA, or strong untrusted-code isolation.
+- This release delivers the core of the six dependency-ordered roadmap capabilities for the local/UAT profile. It does not claim customer billing, production multi-tenant identity operations, OCR, remote knowledge storage, production HA, or strong untrusted-code isolation.
 
 ## [0.1.1] - 2026-08-14
 

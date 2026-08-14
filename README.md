@@ -14,7 +14,7 @@ MyClaw is an Agent-native runtime for durable Chat, plan-first execution, govern
 
 这次流转从 Recovery 的正常 Chat 开始；Recovery 只建立最小项目组并立即向用户返回，Evidence 完成自己的审查后按语义把安全核查交给 Security。定向消息只唤醒接收者，Group 留痕只保存收紧后的进度、分歧和结果。
 
-> **Release status:** `v0.3.0` is a single-machine/UAT release for development and architectural evaluation. The repository contains a production reference architecture, but the local Compose profile is not a production security or HA profile.
+> **Release status:** `v0.3.1` is a single-machine/UAT release for development and architectural evaluation. The repository contains a production reference architecture, but the local Compose profile is not a production security or HA profile.
 
 ## Run it locally
 
@@ -161,7 +161,7 @@ Real-model full-stack acceptance requires explicit Provider credentials and cont
 
 ## Project maturity
 
-| Area | v0.3.0 status |
+| Area | v0.3.1 status |
 | --- | --- |
 | Durable Runtime, Outbox, lease/fencing | Implemented and unit tested |
 | Chat / Plan / Group unified loop | Implemented; real-model behavior requires UAT |
@@ -175,7 +175,7 @@ Real-model full-stack acceptance requires explicit Provider credentials and cont
 | Production OIDC/OBO/SCIM and Tenant operations | Designed, not implemented as a production profile |
 | Kubernetes, multi-AZ, committed SLO/RPO/RTO | Reference architecture only |
 
-See [`ROADMAP.md`](ROADMAP.md) for the delivery record through `v0.3.0`, [`PRODUCT.md`](PRODUCT.md) for product semantics, [`TECH.md`](TECH.md) for target architecture, and [`docs/README.md`](docs/README.md) for the authoritative documentation map.
+See [`ROADMAP.md`](ROADMAP.md) for the delivery record through `v0.3.1`, [`PRODUCT.md`](PRODUCT.md) for product semantics, [`TECH.md`](TECH.md) for target architecture, and [`docs/README.md`](docs/README.md) for the authoritative documentation map.
 
 ## Contributing and security
 

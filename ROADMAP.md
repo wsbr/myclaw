@@ -1,19 +1,25 @@
 # MyClaw roadmap
 
-This roadmap records the dependency-ordered capability delivery from `v0.1.1` through `v0.3.0`. A capability is released only when its implementation, migration, API/UI behavior, tests, documentation, and release evidence agree.
+This roadmap records the dependency-ordered capability delivery from `v0.1.1` through `v0.3.1`. A capability is released only when its implementation, migration, API/UI behavior, tests, documentation, and release evidence agree.
 
 ## Current baseline
 
 | Capability | Status | Release |
 | --- | --- | --- |
-| Group diagnostics and loop guardrails | Delivered | `v0.1.2` |
-| Runtime management console | Delivered | `v0.1.2` |
-| Usage and cost ledger | Delivered | `v0.2.0` |
-| Agent evaluation and version gates | Delivered | `v0.2.0` |
-| Minimum Tenant boundary | Delivered | `v0.3.0` |
-| Local knowledge base | Delivered | `v0.3.0` |
+| Group diagnostics and loop guardrails | Core delivered | `v0.1.2` |
+| Runtime management console | Core delivered | `v0.1.2` + `v0.3.1` hardening |
+| Usage and cost ledger | Core delivered | `v0.2.0` |
+| Agent evaluation and version gates | Core delivered | `v0.2.0` |
+| Minimum Tenant boundary | Core delivered | `v0.3.0` |
+| Local knowledge base | Core delivered | `v0.3.0` + `v0.3.1` hardening |
 
 The milestones remain intentionally bounded. The ledger is not customer billing, an Eval gate does not prove general model quality, the local Tenant boundary is not a production SaaS identity plane, and Memory is not a document knowledge base.
+
+`Core delivered` means the named user-facing capability, its authoritative
+records and its local/UAT safety boundary are implemented. It does not silently
+promote the hardening items listed below to delivered status. This distinction
+was added by the post-`v0.3.0` completion audit so the roadmap remains a testable
+contract rather than an aspirational feature list.
 
 ## Dependency order
 
@@ -33,7 +39,7 @@ Minimum Tenant boundary ─> local knowledge ownership and retrieval isolation
 
 The guardrail layer must remain mechanical and auditable. It may bound or reject actions from persisted causal facts; it must not turn role names, free-text keywords, or an inferred fixed graph into a hidden workflow.
 
-Delivered:
+Core delivered:
 
 - persist a stable diagnostic code, causal chain, triggering limits and safe human-readable explanation for every blocked delegation or forced stop;
 - retain the existing self/cycle/depth checks and add bounded fan-out, repeated delegation fingerprint and A↔B ping-pong detection within one Run;
@@ -55,7 +61,7 @@ Verification gate:
 
 The console is an operational projection over authoritative Runtime records. It must never edit database status directly or invent a second lifecycle.
 
-Delivered:
+Core delivered:
 
 - add global views for Runs, WorkItems, Runners, ProviderAttempts, ToolInvocations, AgentInvocations and Outbox backlog;
 - expose status, age, current wait reason, lease/epoch, attempt count, budget use, last progress fact and terminal reason;
@@ -64,7 +70,7 @@ Delivered:
 - make the default console read-only; cancellation and retry use the existing governed APIs with idempotency, authorization and PlatformAuditEvent;
 - redact credentials, private prompts, raw Chain-of-Thought and cross-principal content from all diagnostics.
 
-Verification gate:
+Verified core gate:
 
 - an operator can answer “what is running, why is it waiting, who owns the next action, what budget remains, and why did it stop” without reading the database;
 - refresh, reconnect and pagination do not duplicate or reorder authoritative events;
@@ -76,45 +82,58 @@ Verification gate:
 
 The ledger measures actual platform consumption and estimated/contracted cost. It is not customer billing and must not silently treat unknown pricing as zero.
 
-Delivered:
+Core delivered:
 
 - introduce append-only usage entries attributed to Tenant/account, Session, Run, GroupRun, AgentVersion, Turn/Attempt and Tool/Sandbox operation where applicable;
-- record normalized dimensions such as input/output/cached tokens, requests, active milliseconds, Tool units, Sandbox time, storage and egress;
+- record produced normalized dimensions for input/output/cached tokens, requests,
+  active milliseconds, Tool units and Sandbox time;
 - version price snapshots by Provider/model/Tool, currency, unit, effective window and source; bind every calculated amount to the exact snapshot used;
 - make retries, failed attempts and unknown outcomes visible rather than charging only successful final answers;
 - use stable source-operation keys so replay cannot double count; corrections append adjustment entries instead of rewriting history;
-- provide Run, Agent, model, Group and time-window rollups plus budget warnings/hard stops;
+- provide Run, Agent, model, Group and time-window rollups;
 - separate `measured`, `estimated`, `contracted` and `unknown` amounts in APIs and UI.
 
-Verification gate:
+Verified core gate:
 
 - the sum of source entries reconciles exactly with Run and aggregate views;
 - duplicate events, retry and Worker restart cannot duplicate usage or cost;
 - missing or stale prices remain explicitly unknown;
 - Group totals include all members, delegation, summaries, retries and Tool/Sandbox use;
-- budget enforcement reads the same authoritative ledger exposed to the user.
+
+Hardening queued:
+
+- wire storage and egress observations into first-class producers rather than
+  only reserving normalized ledger dimensions;
+- implement cost warning and hard-stop policies that read the same authoritative
+  ledger exposed to the user.
 
 ### Agent evaluation and version gates
 
 Provider Conformance answers whether a model adapter follows the protocol. Agent Eval answers whether one exact AgentVersion is safe and effective for its intended work. These remain separate gates.
 
-Delivered:
+Core delivered:
 
-- add versioned EvalSuite, EvalCase, EvalRun and EvalResult records with immutable inputs, fixtures, rubric versions and environment fingerprints;
-- run deterministic contract/security cases separately from real-model quality cases;
+- add versioned EvalSuite, EvalCase, EvalRun and case-result records with immutable inputs, assertions, weights and suite thresholds;
+- run every case as an isolated real Draft Test Run, then settle deterministic text, length and maximum-cost assertions from authoritative results;
 - bind results to the exact candidate Agent content hash, ModelVersion, Tool/Skill/Policy/Sandbox versions and Eval suite revision;
-- compare the candidate with the current published baseline for outcome quality, verified evidence, latency, cost, intervention, failure and safety metrics;
 - let Agent publication require configured suites to pass within thresholds; any changed dependency invalidates stale evidence;
-- allow audited override only for explicitly overridable gates; isolation, authorization and secret-safety failures cannot be bypassed;
 - retain all results as release evidence and show failures before the Builder can publish.
 
-Verification gate:
+Verified core gate:
 
 - a Draft can be tested repeatedly without becoming a published version;
 - publication cannot reuse results from another content hash or stale dependency set;
-- deterministic critical cases must all pass; stochastic suites use declared sample size and thresholds;
-- candidate-versus-baseline regression, latency and cost are visible before publication;
 - a published version links back to the exact passing gate evidence.
+
+Hardening queued:
+
+- separate deterministic contract/security suites from declared stochastic
+  real-model suites with sample size, rubric/environment fingerprints and
+  explicit critical-case semantics;
+- add candidate-versus-published-baseline quality, evidence, latency, cost,
+  intervention, failure and safety comparisons;
+- add narrowly scoped audited overrides for overridable gates while keeping
+  isolation, authorization and secret-safety failures non-bypassable.
 
 ## v0.3.0 — Data boundary and local knowledge
 
@@ -122,15 +141,17 @@ Verification gate:
 
 This milestone establishes an enforceable data boundary for one or more locally administered Tenants. It does not claim multi-tenant SaaS operations, enterprise OIDC, billing, SCIM or tenant self-service.
 
-Delivered:
+Core delivered:
 
 - introduce Tenant as a persisted authority and bootstrap one default Tenant for existing installations;
 - carry immutable `tenant_id + account_id` through AuthContext, Session creation, Run, AgentInvocation, Tool execution and audit;
-- add tenant ownership to aggregate roots including accounts, Agents/registries, Sessions, Groups, Memory, Workspace and Artifacts;
+- add tenant ownership to accounts, user Agents, Sessions, Groups, Memory,
+  Workspace, Artifacts and execution/evidence records; deployment-level Model,
+  Tool, Skill, Policy and Sandbox registries remain intentionally global;
 - use tenant-safe composite uniqueness/FKs or equally strong repository enforcement for cross-aggregate references;
 - require tenant scope in business queries and commands; remove global naked-ID lookup paths from user-facing APIs;
 - migrate by expand → backfill → validate → enforce, preserving existing local data under the default Tenant;
-- add two synthetic Tenant fixtures and negative tests across every ownership boundary.
+- add two synthetic Tenant fixtures and negative tests across the core ownership boundaries.
 
 Verification gate:
 
@@ -143,7 +164,7 @@ Verification gate:
 
 Knowledge is imported document evidence; Memory is a curated fact about a user or Agent. They must use separate models, policies and deletion semantics.
 
-Delivered:
+Core delivered:
 
 - add KnowledgeBase, source/document, chunk and immutable IndexRevision concepts scoped to Tenant and an explicit owner/sharing policy;
 - support local UTF-8 text, Markdown and PDF ingestion first, with checksum deduplication, bounded parsing and failure evidence;
@@ -152,7 +173,9 @@ Delivered:
 - return hybrid retrieval results with source, page/section, checksum, score and index revision so the Agent can cite what it used;
 - snapshot retrieved chunk references into the Runner for reproducibility and Eval;
 - support re-index, supersession, tombstone/delete and orphaned-body reconciliation;
-- require explicit Agent/Group access; importing a document never makes it visible to every Agent.
+- require explicit access for every Agent, including each Agent participating in
+  a Group; a Group never receives ambient access and importing a document never
+  makes it visible to every Agent.
 
 Verification gate:
 

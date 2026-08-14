@@ -12,7 +12,7 @@ import {
 import { agentsApi } from '@/api/agents'
 import {
   knowledgeApi, type KnowledgeBase, type KnowledgeDocument,
-  type KnowledgeSearchResult,
+  type KnowledgeSearchResult, type KnowledgeStorageReconciliation,
 } from '@/api/knowledge'
 
 
@@ -36,6 +36,7 @@ export default function KnowledgePage() {
   const [file, setFile] = useState<File | null>(null)
   const [searchText, setSearchText] = useState('')
   const [searchResults, setSearchResults] = useState<KnowledgeSearchResult[]>([])
+  const [reconciliation, setReconciliation] = useState<KnowledgeStorageReconciliation | null>(null)
 
   const bases = useQuery({ queryKey: ['knowledge-bases'], queryFn: knowledgeApi.list })
   const agents = useQuery({ queryKey: ['agents'], queryFn: agentsApi.list })
@@ -61,6 +62,7 @@ export default function KnowledgePage() {
     setSearchResults([])
     setSearchText('')
     setFile(null)
+    setReconciliation(null)
   }, [selected?.id, selected?.agent_ids])
 
   const refresh = async () => {
@@ -119,6 +121,19 @@ export default function KnowledgePage() {
     onError: () => message.error('重建索引失败'),
   })
 
+  const reconcileStorage = useMutation({
+    mutationFn: () => knowledgeApi.reconcileStorage(selected!.id, true),
+    onSuccess: async (result) => {
+      setReconciliation(result)
+      if (result.healthy) message.success('源文件与数据库记录一致')
+      else message.warning(
+        `发现 ${result.missing_sources.length} 个缺失、${result.corrupt_sources.length} 个损坏、${result.orphaned_bodies.length} 个无引用文件`,
+      )
+      await refresh()
+    },
+    onError: () => message.error('存储对账失败'),
+  })
+
   const removeDocument = useMutation({
     mutationFn: (document: KnowledgeDocument) => knowledgeApi.deleteDocument(selected!.id, document.id),
     onSuccess: async () => {
@@ -174,7 +189,8 @@ export default function KnowledgePage() {
 
       {!selected ? <Card><Empty description="选择或创建知识库" /></Card> : <div className="space-y-4">
         <Card title={selected.name} extra={<Space>
-          <Button icon={<ReloadOutlined />} loading={reindex.isPending} onClick={() => reindex.mutate()}>核对索引</Button>
+          <Button icon={<ReloadOutlined />} loading={reindex.isPending} onClick={() => reindex.mutate()}>重建当前索引</Button>
+          <Button loading={reconcileStorage.isPending} onClick={() => reconcileStorage.mutate()}>存储对账</Button>
           <Popconfirm title="停用这个知识库？" description="后续检索不可见，历史引用不会被改写。"
             onConfirm={() => removeBase.mutate()} okButtonProps={{ danger: true }}>
             <Button danger icon={<DeleteOutlined />}>停用</Button>
@@ -189,6 +205,10 @@ export default function KnowledgePage() {
               <Typography.Text code copyable>{selected.current_index_revision?.content_hash.slice(0, 16) ?? '—'}</Typography.Text>
             </Descriptions.Item>
           </Descriptions>
+          {reconciliation && <Alert className="mt-4" showIcon
+            type={reconciliation.healthy ? 'success' : 'warning'}
+            message={reconciliation.healthy ? '最近一次存储对账正常' : '最近一次存储对账发现异常'}
+            description={`检查 ${reconciliation.checked_source_count} 个 source；缺失 ${reconciliation.missing_sources.length}，损坏 ${reconciliation.corrupt_sources.length}，无引用文件 ${reconciliation.orphaned_bodies.length}；状态修复 ${reconciliation.changed_source_ids.length}。无引用文件仅报告，不自动删除。`} />}
         </Card>
 
         <Card title="Agent 访问范围">

@@ -604,6 +604,106 @@ async def build_index_revision(
     return revision
 
 
+async def reconcile_knowledge_storage(
+    db, *, knowledge_base: KnowledgeBase, account_id: str, repair: bool = True,
+) -> dict:
+    """Compare authoritative source metadata with local bodies and fail closed.
+
+    Historical source rows are never removed. When a current indexed body is
+    missing or corrupt, repair mode marks only that mutable availability state
+    failed and creates a new immutable index revision excluding it. A body that
+    later becomes valid can be restored to the current index without rewriting
+    the earlier evidence.
+    """
+
+    sources = list(await db.scalars(select(KnowledgeSource).where(
+        KnowledgeSource.tenant_id == knowledge_base.tenant_id,
+        KnowledgeSource.knowledge_base_id == knowledge_base.id,
+    ).order_by(KnowledgeSource.created_at, KnowledgeSource.id)))
+    documents = list(await db.scalars(select(KnowledgeDocument).where(
+        KnowledgeDocument.tenant_id == knowledge_base.tenant_id,
+        KnowledgeDocument.knowledge_base_id == knowledge_base.id,
+    )))
+    current_source_ids = {
+        item.current_source_id for item in documents
+        if item.status == "active" and item.current_source_id
+    }
+    expected_keys = {item.storage_key for item in sources}
+    missing: list[dict] = []
+    corrupt: list[dict] = []
+    restored: list[str] = []
+    changed: list[str] = []
+    reconciliation_codes = {
+        "knowledge_source_body_missing",
+        "knowledge_source_checksum_mismatch",
+    }
+    for source in sources:
+        error: KnowledgeError | None = None
+        try:
+            await asyncio.to_thread(load_source_bytes, source)
+        except KnowledgeError as caught:
+            error = caught
+            target = missing if caught.code == "knowledge_source_body_missing" else corrupt
+            target.append({
+                "source_id": source.id,
+                "storage_key": source.storage_key,
+                "code": caught.code,
+                "current": source.id in current_source_ids,
+            })
+        if not repair or source.id not in current_source_ids:
+            continue
+        if error is not None and source.status == "indexed":
+            source.status = "failed"
+            source.error_code = error.code
+            source.error_detail = str(error)
+            changed.append(source.id)
+        elif (
+            error is None
+            and source.status == "failed"
+            and source.error_code in reconciliation_codes
+        ):
+            source.status = "indexed"
+            source.error_code = None
+            source.error_detail = None
+            restored.append(source.id)
+            changed.append(source.id)
+
+    prefix = (
+        Path(settings.knowledge_root).resolve()
+        / knowledge_base.tenant_id / knowledge_base.id
+    )
+    orphaned_bodies: list[str] = []
+    if prefix.exists():
+        for target in await asyncio.to_thread(lambda: list(prefix.rglob("*"))):
+            if not target.is_file() or target.name.endswith(".tmp"):
+                continue
+            # Report the lexical in-root path without following a possible
+            # operator-created symlink outside KNOWLEDGE_ROOT.
+            storage_key = target.relative_to(prefix.parent.parent).as_posix()
+            if storage_key not in expected_keys:
+                orphaned_bodies.append(storage_key)
+    orphaned_bodies.sort()
+
+    revision = None
+    if repair and changed:
+        await db.flush()
+        revision = await build_index_revision(
+            db, knowledge_base=knowledge_base, account_id=account_id,
+        )
+    return {
+        "knowledge_base_id": knowledge_base.id,
+        "checked_source_count": len(sources),
+        "missing_sources": missing,
+        "corrupt_sources": corrupt,
+        "orphaned_bodies": orphaned_bodies,
+        "changed_source_ids": changed,
+        "restored_source_ids": restored,
+        "repair_applied": bool(repair),
+        "index_revision": index_revision_view(revision) if revision else None,
+        "healthy": not missing and not corrupt and not orphaned_bodies,
+    }
+
+
 def _cosine(left: dict[str, float], right: dict[str, float]) -> float:
     if len(left) > len(right):
         left, right = right, left
@@ -666,6 +766,7 @@ async def search_knowledge(
     query_terms = dict(Counter(tokenize(query)))
     query_vector = feature_vector(query_terms)
     scored = []
+    available_sources: dict[str, bool] = {}
     for chunk in chunks:
         lexical = _lexical(query_terms, chunk.term_frequencies or {})
         semantic = max(0.0, _cosine(query_vector, chunk.vector or {}))
@@ -675,6 +776,14 @@ async def search_knowledge(
         source = sources.get(chunk.source_id)
         base = bases_by_id.get(chunk.knowledge_base_id)
         if source is None or base is None or source.status == "deleted":
+            continue
+        if source.id not in available_sources:
+            try:
+                await asyncio.to_thread(load_source_bytes, source)
+                available_sources[source.id] = True
+            except KnowledgeError:
+                available_sources[source.id] = False
+        if not available_sources[source.id]:
             continue
         scored.append((score, chunk, source, base, lexical, semantic))
     scored.sort(key=lambda item: (-item[0], item[1].id))

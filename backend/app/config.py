@@ -37,6 +37,9 @@ class Settings(BaseSettings):
 
     # App
     myclaw_environment: str = "development"
+    # Product/deployment release identity. This is intentionally separate from
+    # runtime_release_id, which versions the persisted Runner protocol.
+    myclaw_release: str = "development"
     debug: bool = False
     cors_origins: list[str] = ["http://localhost", "http://localhost:80"]
     # Some controlled egress gateways (including the local UAT tunnel) use a
@@ -78,6 +81,8 @@ class Settings(BaseSettings):
     # process. Excess durable commands remain in the Outbox instead of being
     # claimed into an unbounded in-memory queue.
     runtime_worker_concurrency: int = Field(default=8, ge=1, le=256)
+    worker_heartbeat_seconds: int = Field(default=10, gt=0)
+    worker_heartbeat_stale_seconds: int = Field(default=35, gt=0)
     # A cached provider entry owns one async SDK client and therefore one
     # reusable HTTP connection pool. The cache is process-local and keyed by
     # provider type, endpoint, and credential fingerprint.
@@ -117,6 +122,7 @@ class Settings(BaseSettings):
     checkpoint_retention_days: int = Field(default=30, ge=30)
     trace_retention_days: int = Field(default=30, ge=1)
     delivery_attempt_retention_days: int = Field(default=90, ge=90)
+    worker_heartbeat_retention_days: int = Field(default=7, ge=1)
 
     # Initial admin
     init_admin_email: str = "admin@myclaw.com"
@@ -151,6 +157,8 @@ class Settings(BaseSettings):
                 )
         if self.runtime_runner_heartbeat_seconds >= self.runtime_runner_lease_seconds:
             raise ValueError("RUNTIME_RUNNER_HEARTBEAT_SECONDS must be below RUNTIME_RUNNER_LEASE_SECONDS")
+        if self.worker_heartbeat_seconds >= self.worker_heartbeat_stale_seconds:
+            raise ValueError("WORKER_HEARTBEAT_SECONDS must be below WORKER_HEARTBEAT_STALE_SECONDS")
         if self.knowledge_chunk_overlap_chars >= self.knowledge_chunk_chars:
             raise ValueError(
                 "KNOWLEDGE_CHUNK_OVERLAP_CHARS must be below KNOWLEDGE_CHUNK_CHARS"

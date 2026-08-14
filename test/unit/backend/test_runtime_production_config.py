@@ -183,6 +183,7 @@ def test_skill_storage_configuration_is_fail_closed():
         ("checkpoint_retention_days", 29),
         ("trace_retention_days", 0),
         ("delivery_attempt_retention_days", 89),
+        ("worker_heartbeat_retention_days", 0),
     ],
 )
 def test_retention_safety_floors_are_enforced(field: str, value: int):

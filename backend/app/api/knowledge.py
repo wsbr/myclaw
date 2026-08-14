@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.database import get_db
 from app.deps import CurrentAccount, get_current_account
-from app.models.common import utcnow
+from app.models.common import utcnow, uuid7
 from app.models.knowledge_v1 import (
     KnowledgeBase,
     KnowledgeDocument,
@@ -27,6 +27,7 @@ from app.services.knowledge_service import (
     ingest_source,
     knowledge_base_view,
     owned_knowledge_base,
+    reconcile_knowledge_storage,
     replace_agent_access,
     search_knowledge,
     source_view,
@@ -49,6 +50,10 @@ class KnowledgeAccessPatch(BaseModel):
 class KnowledgeSearchRequest(BaseModel):
     query: str = Field(min_length=1, max_length=1000)
     limit: int = Field(default=8, ge=1, le=20)
+
+
+class KnowledgeReconcileRequest(BaseModel):
+    repair: bool = True
 
 
 def _raise(error: KnowledgeError):
@@ -239,6 +244,45 @@ async def reindex_knowledge_base(
         _raise(error)
     await db.commit()
     return index_revision_view(revision)
+
+
+@router.post("/{knowledge_base_id}/reconcile-storage")
+async def reconcile_knowledge_base_storage(
+    knowledge_base_id: str,
+    body: KnowledgeReconcileRequest,
+    db: AsyncSession = Depends(get_db),
+    current: CurrentAccount = Depends(get_current_account),
+):
+    try:
+        item = await owned_knowledge_base(
+            db, tenant_id=current.tenant_id, account_id=current.account.id,
+            knowledge_base_id=knowledge_base_id, lock=body.repair,
+        )
+        result = await reconcile_knowledge_storage(
+            db, knowledge_base=item, account_id=current.account.id,
+            repair=body.repair,
+        )
+    except KnowledgeError as error:
+        _raise(error)
+    await PlatformAuditWriter(db).append(
+        category="knowledge", action="knowledge_base.storage_reconciled",
+        actor_type="account", actor_id=current.account.id,
+        actor_user_id=current.account.user_id,
+        resource_type="knowledge_base", resource_id=item.id,
+        resource_version=item.version, outcome="succeeded",
+        summary="Local knowledge storage reconciled",
+        changes={
+            "repair": body.repair,
+            "healthy": result["healthy"],
+            "missing_count": len(result["missing_sources"]),
+            "corrupt_count": len(result["corrupt_sources"]),
+            "orphaned_body_count": len(result["orphaned_bodies"]),
+            "changed_source_ids": result["changed_source_ids"],
+        },
+        dedupe_key=f"audit:knowledge_base:reconcile:{item.id}:{uuid7()}",
+    )
+    await db.commit()
+    return result
 
 
 @router.post("/{knowledge_base_id}/search")

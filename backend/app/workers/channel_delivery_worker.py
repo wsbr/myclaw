@@ -20,6 +20,7 @@ from app.persistence.reliable_writes import (
     OutboxWriter,
     tenant_command_error,
 )
+from app.services.worker_heartbeat_service import run_worker_heartbeat
 
 
 TERMINAL = {"succeeded", "failed", "cancelled", "outcome_unknown"}
@@ -42,6 +43,7 @@ class DeliveryClaim:
 class ChannelDeliveryWorker:
     def __init__(self, worker_id: str | None = None):
         self.worker_id = worker_id or f"delivery:{socket.gethostname()}:{os.getpid()}"
+        self._active_slots = 0
 
     async def claim_one(self) -> DeliveryClaim | None:
         async with AsyncSessionLocal.begin() as db:
@@ -266,14 +268,27 @@ class ChannelDeliveryWorker:
             return True
 
     async def run_forever(self, poll_seconds: float = 0.5) -> None:
-        while True:
-            if await self.recover_one():
-                continue
-            claim = await self.claim_one()
-            if claim is None:
-                await asyncio.sleep(poll_seconds)
-                continue
-            await self.deliver(claim)
+        heartbeat_stop = asyncio.Event()
+        heartbeat = asyncio.create_task(run_worker_heartbeat(
+            worker_id=self.worker_id, worker_kind="delivery", capacity=1,
+            active_slots=lambda: self._active_slots, stop=heartbeat_stop,
+        ), name=f"worker-heartbeat:{self.worker_id}")
+        try:
+            while True:
+                if await self.recover_one():
+                    continue
+                claim = await self.claim_one()
+                if claim is None:
+                    await asyncio.sleep(poll_seconds)
+                    continue
+                self._active_slots = 1
+                try:
+                    await self.deliver(claim)
+                finally:
+                    self._active_slots = 0
+        finally:
+            heartbeat_stop.set()
+            await asyncio.gather(heartbeat, return_exceptions=True)
 
     async def _mark_unknown(self, db, delivery: NotificationDelivery, *, error_code: str, detail: str) -> None:
         delivery.status = "outcome_unknown"

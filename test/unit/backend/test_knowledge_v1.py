@@ -1,5 +1,7 @@
 """Local KnowledgeBase indexing, citations, snapshots, and isolation."""
 
+from pathlib import Path
+
 import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -23,6 +25,7 @@ from app.services.knowledge_service import (
     delete_document,
     ingest_source,
     parse_source_bytes,
+    reconcile_knowledge_storage,
     search_knowledge,
 )
 
@@ -222,3 +225,72 @@ def test_bounded_parser_rejects_non_utf8_and_invalid_pdf():
     with pytest.raises(KnowledgeError) as pdf_error:
         parse_source_bytes(b"not-a-pdf", media_type="application/pdf")
     assert pdf_error.value.code == "knowledge_pdf_invalid"
+
+
+@pytest.mark.asyncio
+async def test_storage_reconciliation_fails_closed_and_restores_exact_body(knowledge_db):
+    body = b"Recovery requires the exact durable fencing token."
+    async with knowledge_db.begin() as db:
+        base = await create_knowledge_base(
+            db, tenant_id=TENANT_A, account_id=ACCOUNT_A,
+            name="Reconciliation", description="Storage recovery",
+            agent_ids=[AGENT_A],
+        )
+        _, source, first_revision, _ = await ingest_source(
+            db, knowledge_base=base, account_id=ACCOUNT_A,
+            filename="recovery.txt", data=body,
+        )
+        base_id = base.id
+        source_id = source.id
+        storage_key = source.storage_key
+        assert first_revision.revision_no == 1
+        first_revision_id = first_revision.id
+
+    source_path = Path(settings.knowledge_root) / storage_key
+    source_path.unlink()
+    orphan_path = source_path.parent / "orphaned-body.txt"
+    orphan_path.write_bytes(b"not referenced by authoritative metadata")
+
+    async with knowledge_db.begin() as db:
+        unavailable = await search_knowledge(
+            db, tenant_id=TENANT_A, account_id=ACCOUNT_A,
+            agent_id=AGENT_A, knowledge_base_id=base_id,
+            query="fencing token", limit=5,
+        )
+        assert unavailable["results"] == []
+        base = await db.get(KnowledgeBase, base_id)
+        report = await reconcile_knowledge_storage(
+            db, knowledge_base=base, account_id=ACCOUNT_A, repair=True,
+        )
+        assert [item["source_id"] for item in report["missing_sources"]] == [source_id]
+        assert report["orphaned_bodies"] == [
+            orphan_path.relative_to(Path(settings.knowledge_root)).as_posix(),
+        ]
+        assert report["changed_source_ids"] == [source_id]
+        assert report["index_revision"]["revision_no"] == 2
+        assert report["index_revision"]["chunk_count"] == 0
+        source = await db.get(KnowledgeSource, source_id)
+        assert source.status == "failed"
+        assert source.error_code == "knowledge_source_body_missing"
+
+    source_path.write_bytes(body)
+    async with knowledge_db.begin() as db:
+        base = await db.get(KnowledgeBase, base_id)
+        restored = await reconcile_knowledge_storage(
+            db, knowledge_base=base, account_id=ACCOUNT_A, repair=True,
+        )
+        assert restored["restored_source_ids"] == [source_id]
+        assert restored["index_revision"]["id"] == first_revision_id
+        assert restored["index_revision"]["revision_no"] == 1
+        assert restored["index_revision"]["chunk_count"] >= 1
+        source = await db.get(KnowledgeSource, source_id)
+        assert source.status == "indexed"
+        assert source.error_code is None
+
+    async with knowledge_db() as db:
+        available = await search_knowledge(
+            db, tenant_id=TENANT_A, account_id=ACCOUNT_A,
+            agent_id=AGENT_A, knowledge_base_id=base_id,
+            query="fencing token", limit=5,
+        )
+        assert available["results"]

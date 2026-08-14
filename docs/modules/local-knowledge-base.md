@@ -67,11 +67,17 @@ snapshot.
 
 Open **Knowledge** in the sidebar to create a base, grant Agents, upload or
 replace documents, inspect checksums and revision counts, run a direct local
-search, rebuild the current index, or tombstone documents and bases. The page
+search, rebuild the current index, reconcile database metadata with local
+source bodies, or tombstone documents and bases. Reconciliation reports missing,
+checksum-mismatched and unreferenced bodies. In repair mode a missing/corrupt
+current source is failed closed and a new index revision excludes it; restoring
+the exact checksum can safely re-admit it. Unreferenced files are reported but
+never deleted automatically. The page
 also reminds operators that both the explicit grant and AgentVersion Tool
 selection are necessary.
 
 The local source root must be included in backup/restore together with MySQL.
-Missing bodies and checksum mismatches fail closed. OCR, remote object storage,
-cross-account sharing, automatic ingestion pipelines and background
-reconciliation are deliberately deferred.
+Missing bodies and checksum mismatches fail closed during retrieval and during
+operator reconciliation. OCR, remote object storage, cross-account sharing,
+automatic ingestion pipelines and scheduled background reconciliation are
+deliberately deferred.

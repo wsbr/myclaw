@@ -13,7 +13,7 @@ from app.models.channel_v1 import NotificationDeliveryAttempt
 from app.models.common import utcnow, uuid7
 from app.models.foundation import IdempotencyRecord, OutboxCommand, PlatformAuditEvent
 from app.models.observability_v1 import ObservabilitySpan, ObservabilitySpanLink, RunnerTrace
-from app.models.runtime_v1 import RunnerCheckpoint, WorkItem
+from app.models.runtime_v1 import RunnerCheckpoint, WorkerInstance, WorkItem
 
 
 TERMINAL_WORK_STATUSES = {
@@ -34,6 +34,7 @@ class RetentionResult:
     observability_spans: int = 0
     runner_traces: int = 0
     notification_delivery_attempts: int = 0
+    worker_instances: int = 0
 
 
 async def _ids(db: AsyncSession, statement, limit: int) -> list[str]:
@@ -132,6 +133,17 @@ async def run_retention_cleanup(
     if attempt_ids:
         result.notification_delivery_attempts = (await db.execute(
             delete(NotificationDeliveryAttempt).where(NotificationDeliveryAttempt.id.in_(attempt_ids))
+        )).rowcount or 0
+
+    worker_cutoff = now - timedelta(days=settings.worker_heartbeat_retention_days)
+    worker_ids = await _ids(
+        db, select(WorkerInstance.worker_id).where(
+            WorkerInstance.heartbeat_at < worker_cutoff,
+        ).order_by(WorkerInstance.heartbeat_at, WorkerInstance.worker_id), batch_size,
+    )
+    if worker_ids:
+        result.worker_instances = (await db.execute(
+            delete(WorkerInstance).where(WorkerInstance.worker_id.in_(worker_ids))
         )).rowcount or 0
 
     counts = asdict(result)

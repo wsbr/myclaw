@@ -171,6 +171,7 @@ run_migration_gate() {
         integration/test_skill_runtime_mysql.py \
         integration/test_usage_ledger_mysql.py \
         integration/test_agent_eval_mysql.py \
+        integration/test_knowledge_mysql.py \
         -m integration -v --tb=short \
       --junitxml="$RESULTS_ROOT/mysql-tool-contracts.xml"
   )

@@ -47,6 +47,7 @@ from app.services.workspace_lock_service import (
 )
 from app.services.run_reliability_service import record_late_result
 from app.services.usage_ledger_service import record_tool_attempt_usage
+from app.services.worker_heartbeat_service import run_worker_heartbeat
 
 
 logger = logging.getLogger(__name__)
@@ -151,6 +152,7 @@ class SandboxWorker:
             raise ValueError("worker_kind must be sandbox, browser, or connector")
         self.worker_kind = worker_kind
         self.worker_id = worker_id or f"{worker_kind}:{socket.gethostname()}:{os.getpid()}"
+        self._active_slots = 0
 
     def _tool_scope(self):
         browser_tool = ToolInvocation.tool_key.startswith("browser_", autoescape=True)
@@ -415,9 +417,11 @@ class SandboxWorker:
             )
 
     async def execute(self, claim: SandboxClaim) -> None:
+        self._active_slots = 1
         if not await self._mark_attempt_started(
             claim, side_effect_started=claim.preflight_error is None,
         ):
+            self._active_slots = 0
             return
         stop = asyncio.Event()
         heartbeat = asyncio.create_task(self._heartbeat_loop(claim, stop))
@@ -489,6 +493,7 @@ class SandboxWorker:
                     )
             await self.settle(claim, result)
         finally:
+            self._active_slots = 0
             stop.set()
             await asyncio.gather(heartbeat, return_exceptions=True)
             await record_runner_fact_spans(
@@ -804,28 +809,38 @@ class SandboxWorker:
 
     async def run_forever(self, poll_seconds: float | None = None) -> None:
         poll_seconds = settings.sandbox_worker_poll_seconds if poll_seconds is None else poll_seconds
-        while True:
-            try:
-                if self.worker_kind == "sandbox":
-                    async with AsyncSessionLocal.begin() as db:
-                        if await reconcile_one_publishing_artifact(db):
-                            continue
-                if await self.recover_one(stale_seconds=settings.sandbox_attempt_stale_seconds):
-                    continue
-                claim = await self.claim_one()
-                if claim is None:
+        heartbeat_stop = asyncio.Event()
+        heartbeat = asyncio.create_task(run_worker_heartbeat(
+            worker_id=self.worker_id, worker_kind=self.worker_kind,
+            capacity=1, active_slots=lambda: self._active_slots,
+            stop=heartbeat_stop,
+        ), name=f"worker-heartbeat:{self.worker_id}")
+        try:
+            while True:
+                try:
+                    if self.worker_kind == "sandbox":
+                        async with AsyncSessionLocal.begin() as db:
+                            if await reconcile_one_publishing_artifact(db):
+                                continue
+                    if await self.recover_one(stale_seconds=settings.sandbox_attempt_stale_seconds):
+                        continue
+                    claim = await self.claim_one()
+                    if claim is None:
+                        await asyncio.sleep(poll_seconds)
+                        continue
+                    await self.execute(claim)
+                except Exception:
+                    # A durable attempt remains recoverable from ToolAttempt and
+                    # OutboxCommand state. Keep the worker alive so its recovery
+                    # loop can fence or resume that work on the next iteration.
+                    logger.exception(
+                        "%s worker iteration failed; durable recovery will retry",
+                        self.worker_kind.capitalize(),
+                    )
                     await asyncio.sleep(poll_seconds)
-                    continue
-                await self.execute(claim)
-            except Exception:
-                # A durable attempt remains recoverable from ToolAttempt and
-                # OutboxCommand state. Keep the worker alive so its recovery
-                # loop can fence or resume that work on the next iteration.
-                logger.exception(
-                    "%s worker iteration failed; durable recovery will retry",
-                    self.worker_kind.capitalize(),
-                )
-                await asyncio.sleep(poll_seconds)
+        finally:
+            heartbeat_stop.set()
+            await asyncio.gather(heartbeat, return_exceptions=True)
 
     @staticmethod
     def _complete_command(command: OutboxCommand) -> None:

@@ -72,6 +72,19 @@ export interface KnowledgeSearchResult {
   citation: Record<string, unknown>
 }
 
+export interface KnowledgeStorageReconciliation {
+  knowledge_base_id: string
+  checked_source_count: number
+  missing_sources: Array<{ source_id: string; storage_key: string; code: string; current: boolean }>
+  corrupt_sources: Array<{ source_id: string; storage_key: string; code: string; current: boolean }>
+  orphaned_bodies: string[]
+  changed_source_ids: string[]
+  restored_source_ids: string[]
+  repair_applied: boolean
+  index_revision: KnowledgeIndexRevision | null
+  healthy: boolean
+}
+
 export const knowledgeApi = {
   list: () => client.get<{ items: KnowledgeBase[] }>('/knowledge-bases').then(r => r.data.items),
   create: (data: { name: string; description: string; agent_ids: string[] }) =>
@@ -91,6 +104,10 @@ export const knowledgeApi = {
     ).then(r => r.data),
   reindex: (id: string) =>
     client.post<KnowledgeIndexRevision>(`/knowledge-bases/${id}/reindex`).then(r => r.data),
+  reconcileStorage: (id: string, repair = true) =>
+    client.post<KnowledgeStorageReconciliation>(
+      `/knowledge-bases/${id}/reconcile-storage`, { repair },
+    ).then(r => r.data),
   deleteDocument: (id: string, documentId: string) =>
     client.delete(`/knowledge-bases/${id}/documents/${documentId}`).then(r => r.data),
   deleteBase: (id: string) => client.delete(`/knowledge-bases/${id}`).then(r => r.data),
