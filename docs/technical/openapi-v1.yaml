@@ -38,6 +38,7 @@ tags:
   - name: Groups
   - name: Actions
   - name: Artifacts
+  - name: Knowledge
   - name: Events
   - name: Operations
 
@@ -1694,6 +1695,122 @@ paths:
         '204': {description: Memory tombstone committed; future recall stops immediately.}
         default: {$ref: '#/components/responses/Error'}
 
+  /knowledge-bases:
+    get:
+      tags: [Knowledge]
+      operationId: listKnowledgeBases
+      parameters: [{$ref: '#/components/parameters/RawUserId'}]
+      responses:
+        '200': {description: Current account active local knowledge bases., content: {application/json: {schema: {$ref: '#/components/schemas/KnowledgeBasePage'}}}}
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Knowledge]
+      operationId: createKnowledgeBase
+      parameters: [{$ref: '#/components/parameters/RawUserId'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/KnowledgeBaseCreate'}}}
+      responses:
+        '201': {description: Tenant/account-owned knowledge base created., content: {application/json: {schema: {$ref: '#/components/schemas/KnowledgeBase'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /knowledge-bases/{knowledge_base_id}:
+    parameters:
+      - {$ref: '#/components/parameters/KnowledgeBaseId'}
+      - {$ref: '#/components/parameters/RawUserId'}
+    get:
+      tags: [Knowledge]
+      operationId: getKnowledgeBase
+      responses:
+        '200': {description: Owned knowledge base projection., content: {application/json: {schema: {$ref: '#/components/schemas/KnowledgeBase'}}}}
+        default: {$ref: '#/components/responses/Error'}
+    delete:
+      tags: [Knowledge]
+      operationId: deleteKnowledgeBase
+      responses:
+        '200': {description: Knowledge base and current documents tombstoned., content: {application/json: {schema: {$ref: '#/components/schemas/JsonObject'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /knowledge-bases/{knowledge_base_id}/access:
+    patch:
+      tags: [Knowledge]
+      operationId: replaceKnowledgeBaseAgentAccess
+      parameters:
+        - {$ref: '#/components/parameters/KnowledgeBaseId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/KnowledgeAccessPatch'}}}
+      responses:
+        '200': {description: Exact Agent grant set replaced., content: {application/json: {schema: {$ref: '#/components/schemas/KnowledgeBase'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /knowledge-bases/{knowledge_base_id}/documents:
+    get:
+      tags: [Knowledge]
+      operationId: listKnowledgeDocuments
+      parameters:
+        - {$ref: '#/components/parameters/KnowledgeBaseId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+      responses:
+        '200': {description: Current active documents., content: {application/json: {schema: {$ref: '#/components/schemas/KnowledgeDocumentPage'}}}}
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Knowledge]
+      operationId: uploadKnowledgeDocument
+      parameters:
+        - {$ref: '#/components/parameters/KnowledgeBaseId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [file]
+              properties: {file: {type: string, format: binary}}
+      responses:
+        '201': {description: Source stored and immutable current index reconciled., content: {application/json: {schema: {$ref: '#/components/schemas/KnowledgeIngestResult'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /knowledge-bases/{knowledge_base_id}/documents/{document_id}:
+    delete:
+      tags: [Knowledge]
+      operationId: deleteKnowledgeDocument
+      parameters:
+        - {$ref: '#/components/parameters/KnowledgeBaseId'}
+        - {$ref: '#/components/parameters/KnowledgeDocumentId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+      responses:
+        '200': {description: Document tombstoned and a new retrieval revision selected., content: {application/json: {schema: {$ref: '#/components/schemas/KnowledgeDeleteResult'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /knowledge-bases/{knowledge_base_id}/reindex:
+    post:
+      tags: [Knowledge]
+      operationId: reindexKnowledgeBase
+      parameters:
+        - {$ref: '#/components/parameters/KnowledgeBaseId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+      responses:
+        '200': {description: Current immutable index revision., content: {application/json: {schema: {$ref: '#/components/schemas/KnowledgeIndexRevision'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /knowledge-bases/{knowledge_base_id}/search:
+    post:
+      tags: [Knowledge]
+      operationId: searchKnowledgeBase
+      parameters:
+        - {$ref: '#/components/parameters/KnowledgeBaseId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/KnowledgeSearchRequest'}}}
+      responses:
+        '200': {description: Bounded local retrieval with exact citations., content: {application/json: {schema: {$ref: '#/components/schemas/KnowledgeSearchResponse'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
   /sessions/{session_id}/events:
     get:
       tags: [Events]
@@ -1808,6 +1925,8 @@ components:
     ApprovalId: {name: approval_id, in: path, required: true, schema: {type: string, format: uuid}}
     ArtifactId: {name: artifact_id, in: path, required: true, schema: {type: string, format: uuid}}
     MemoryId: {name: memory_id, in: path, required: true, schema: {type: string, format: uuid}}
+    KnowledgeBaseId: {name: knowledge_base_id, in: path, required: true, schema: {type: string, format: uuid}}
+    KnowledgeDocumentId: {name: document_id, in: path, required: true, schema: {type: string, format: uuid}}
     IdempotencyKey:
       name: Idempotency-Key
       in: header
@@ -3399,6 +3518,148 @@ components:
       additionalProperties: false
       required: [items, next_cursor]
       properties: {items: {type: array, items: {$ref: '#/components/schemas/Memory'}}, next_cursor: {type: [string, 'null']}}
+
+    KnowledgeIndexRevision:
+      type: object
+      additionalProperties: false
+      required: [id, revision_no, status, source_manifest_hash, document_count, chunk_count, content_hash, built_at]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        revision_no: {type: integer, format: int64, minimum: 1}
+        status: {type: string, enum: [ready, failed]}
+        source_manifest_hash: {$ref: '#/components/schemas/Sha256'}
+        document_count: {type: integer, minimum: 0}
+        chunk_count: {type: integer, minimum: 0}
+        content_hash: {$ref: '#/components/schemas/Sha256'}
+        built_at: {$ref: '#/components/schemas/Timestamp'}
+    KnowledgeBase:
+      type: object
+      additionalProperties: false
+      required: [id, tenant_id, owner_account_id, name, description, sharing_policy, status, agent_ids, current_index_revision, document_count, chunking_profile, embedding_profile, version, created_at, updated_at]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        tenant_id: {$ref: '#/components/schemas/Uuid'}
+        owner_account_id: {$ref: '#/components/schemas/Uuid'}
+        name: {type: string, minLength: 1, maxLength: 200}
+        description: {type: string, maxLength: 5000}
+        sharing_policy: {type: string, enum: [owner_only, selected_agents]}
+        status: {type: string, enum: [active, deleted]}
+        agent_ids: {type: array, maxItems: 100, uniqueItems: true, items: {$ref: '#/components/schemas/Uuid'}}
+        current_index_revision: {oneOf: [{$ref: '#/components/schemas/KnowledgeIndexRevision'}, {type: 'null'}]}
+        document_count: {type: integer, minimum: 0}
+        chunking_profile: {$ref: '#/components/schemas/JsonObject'}
+        embedding_profile: {$ref: '#/components/schemas/JsonObject'}
+        version: {type: integer, format: int64, minimum: 1}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        updated_at: {$ref: '#/components/schemas/Timestamp'}
+    KnowledgeBasePage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/KnowledgeBase'}}}
+    KnowledgeBaseCreate:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 200}
+        description: {type: string, maxLength: 5000, default: ''}
+        agent_ids: {type: array, maxItems: 100, uniqueItems: true, items: {$ref: '#/components/schemas/Uuid'}, default: []}
+    KnowledgeAccessPatch:
+      type: object
+      additionalProperties: false
+      required: [agent_ids]
+      properties:
+        agent_ids: {type: array, maxItems: 100, uniqueItems: true, items: {$ref: '#/components/schemas/Uuid'}}
+    KnowledgeSource:
+      type: object
+      additionalProperties: false
+      required: [id, document_id, checksum, filename, media_type, size_bytes, status, parse_metadata, error_code, error_detail, created_at]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        document_id: {$ref: '#/components/schemas/Uuid'}
+        checksum: {$ref: '#/components/schemas/Sha256'}
+        filename: {type: string, minLength: 1, maxLength: 500}
+        media_type: {type: string, enum: [text/plain, text/markdown, application/pdf]}
+        size_bytes: {type: integer, format: int64, minimum: 1}
+        status: {type: string, enum: [indexed, superseded, deleted, failed]}
+        parse_metadata: {$ref: '#/components/schemas/JsonObject'}
+        error_code: {type: [string, 'null']}
+        error_detail: {type: [string, 'null']}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+    KnowledgeDocument:
+      type: object
+      additionalProperties: false
+      required: [id, knowledge_base_id, title, logical_key, status, current_source, version, created_at, updated_at]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        knowledge_base_id: {$ref: '#/components/schemas/Uuid'}
+        title: {type: string, minLength: 1, maxLength: 500}
+        logical_key: {type: string, minLength: 1, maxLength: 500}
+        status: {type: string, enum: [active, deleted]}
+        current_source: {oneOf: [{$ref: '#/components/schemas/KnowledgeSource'}, {type: 'null'}]}
+        version: {type: integer, format: int64, minimum: 1}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        updated_at: {$ref: '#/components/schemas/Timestamp'}
+    KnowledgeDocumentPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/KnowledgeDocument'}}}
+    KnowledgeIngestResult:
+      type: object
+      additionalProperties: false
+      required: [document, source, index_revision, idempotent_replay]
+      properties:
+        document: {$ref: '#/components/schemas/KnowledgeDocument'}
+        source: {$ref: '#/components/schemas/KnowledgeSource'}
+        index_revision: {oneOf: [{$ref: '#/components/schemas/KnowledgeIndexRevision'}, {type: 'null'}]}
+        idempotent_replay: {type: boolean}
+    KnowledgeDeleteResult:
+      type: object
+      additionalProperties: false
+      required: [document, index_revision]
+      properties:
+        document: {$ref: '#/components/schemas/KnowledgeDocument'}
+        index_revision: {$ref: '#/components/schemas/KnowledgeIndexRevision'}
+    KnowledgeSearchRequest:
+      type: object
+      additionalProperties: false
+      required: [query]
+      properties:
+        query: {type: string, minLength: 1, maxLength: 1000}
+        limit: {type: integer, minimum: 1, maximum: 20, default: 8}
+    KnowledgeSearchResult:
+      type: object
+      additionalProperties: false
+      required: [knowledge_base_id, knowledge_base_name, index_revision_id, document_id, source_id, chunk_id, filename, page_number, section, source_checksum, chunk_checksum, score, lexical_score, local_vector_score, excerpt, citation]
+      properties:
+        knowledge_base_id: {$ref: '#/components/schemas/Uuid'}
+        knowledge_base_name: {type: string}
+        index_revision_id: {$ref: '#/components/schemas/Uuid'}
+        document_id: {$ref: '#/components/schemas/Uuid'}
+        source_id: {$ref: '#/components/schemas/Uuid'}
+        chunk_id: {$ref: '#/components/schemas/Uuid'}
+        filename: {type: string}
+        page_number: {type: [integer, 'null'], minimum: 1}
+        section: {type: [string, 'null']}
+        source_checksum: {$ref: '#/components/schemas/Sha256'}
+        chunk_checksum: {$ref: '#/components/schemas/Sha256'}
+        score: {type: number, minimum: 0}
+        lexical_score: {type: number, minimum: 0}
+        local_vector_score: {type: number, minimum: 0}
+        excerpt: {type: string, maxLength: 1600}
+        citation: {$ref: '#/components/schemas/JsonObject'}
+    KnowledgeSearchResponse:
+      type: object
+      additionalProperties: false
+      required: [query, count, results, revision_manifest, retrieval_profile]
+      properties:
+        query: {type: string}
+        count: {type: integer, minimum: 0, maximum: 20}
+        results: {type: array, maxItems: 20, items: {$ref: '#/components/schemas/KnowledgeSearchResult'}}
+        revision_manifest: {type: array, items: {$ref: '#/components/schemas/JsonObject'}}
+        retrieval_profile: {$ref: '#/components/schemas/JsonObject'}
 
     ExecutionEvent:
       type: object

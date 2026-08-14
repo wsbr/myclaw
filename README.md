@@ -14,7 +14,7 @@ MyClaw is an Agent-native runtime for durable Chat, plan-first execution, govern
 
 这次流转从 Recovery 的正常 Chat 开始；Recovery 只建立最小项目组并立即向用户返回，Evidence 完成自己的审查后按语义把安全核查交给 Security。定向消息只唤醒接收者，Group 留痕只保存收紧后的进度、分歧和结果。
 
-> **Release status:** `v0.1.1` is a single-machine/UAT release for development and architectural evaluation. The repository contains a production reference architecture, but the local Compose profile is not a production security or HA profile.
+> **Release status:** `v0.3.0` is a single-machine/UAT release for development and architectural evaluation. The repository contains a production reference architecture, but the local Compose profile is not a production security or HA profile.
 
 ## Run it locally
 
@@ -34,6 +34,8 @@ make up
 - **Asynchronous handoff:** Group成员通过定向、human-visible的`@请求`和`@交付`协作，不同步阻塞上游Agent。
 - **Governed actions:** CapabilitySnapshot、Approval、ToolInvocation、Sandbox和Artifact把模型意图转换成可审计行动。
 - **Evidence over claims:** Tool结果、测试、checksum、Artifact和Verification与模型文字声明分离。
+- **Operational controls:** Group防循环诊断、Runtime控制台、Usage/成本账本和Agent版本评测门禁让执行质量可解释、可核算、可阻断。
+- **Scoped local knowledge:** Tenant隔离的TXT/Markdown/PDF知识库在本机建立不可变索引，只有显式授权并启用Tool的Agent才能检索精确引用。
 
 ## Group model
 
@@ -159,17 +161,21 @@ Real-model full-stack acceptance requires explicit Provider credentials and cont
 
 ## Project maturity
 
-| Area | v0.1.1 status |
+| Area | v0.3.0 status |
 | --- | --- |
 | Durable Runtime, Outbox, lease/fencing | Implemented and unit tested |
 | Chat / Plan / Group unified loop | Implemented; real-model behavior requires UAT |
-| Emergent Group and async handoff | Implemented; active stabilization focus |
+| Emergent Group, async handoff, diagnostics/loop guards | Implemented; real-model behavior requires UAT |
+| Runtime Console and Usage/cost ledger | Implemented for local administration and estimation; not customer billing |
+| Agent Eval suites and publish gates | Implemented; configured suites bind to exact candidate assembly evidence |
+| Minimum Tenant boundary | Persisted and enforced locally; not a production multi-tenant SaaS claim |
+| Local KnowledgeBase and citations | Implemented for bounded TXT/Markdown/PDF; no OCR or remote object storage |
 | Tool, Skill, Browser, MCP, Artifact | Implemented in the local/UAT profile |
 | Local Workspace and Sandbox | Development/UAT only; not strong untrusted-code isolation |
-| Multi-tenant SaaS, OIDC/OBO/SCIM | Designed, not implemented as a production profile |
+| Production OIDC/OBO/SCIM and Tenant operations | Designed, not implemented as a production profile |
 | Kubernetes, multi-AZ, committed SLO/RPO/RTO | Reference architecture only |
 
-See [`ROADMAP.md`](ROADMAP.md) for the planned post-`v0.1.1` work, [`PRODUCT.md`](PRODUCT.md) for product semantics, [`TECH.md`](TECH.md) for target architecture, and [`docs/README.md`](docs/README.md) for the authoritative documentation map.
+See [`ROADMAP.md`](ROADMAP.md) for the delivery record through `v0.3.0`, [`PRODUCT.md`](PRODUCT.md) for product semantics, [`TECH.md`](TECH.md) for target architecture, and [`docs/README.md`](docs/README.md) for the authoritative documentation map.
 
 ## Contributing and security
 

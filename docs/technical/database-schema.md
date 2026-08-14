@@ -254,6 +254,18 @@ Provider 原始秘密、完整授权头和不允许持久化的 reasoning 不进
 
 Memory 的修改创建新 MemoryVersion 并 CAS 更新 current pointer；删除只写 tombstone/status，历史来源保持。Recall 只能用 `tenant_id + account_id + scope + agent_id` 索引查询 active head。Group history summary 按 group+agent 隔离，不能用一份全群摘要绕过 visibility。
 
+### `knowledge_base`、文档源、索引与检索快照
+
+- `knowledge_base`：`id PK`、`tenant_id`、`owner_account_id`、`name`、`description`、`sharing_policy owner_only|selected_agents`、`status active|deleted`、`current_index_revision_id NULL`、`next_revision_no`、`chunking_profile_json`、`embedding_profile_json`、`version`；唯一 `(tenant_id,owner_account_id,name)` 和 `(id,tenant_id)`；
+- `knowledge_base_agent_access`：`id PK`、`tenant_id`、`knowledge_base_id`、`agent_id`、`granted_by_account_id`、`created_at`；唯一 `(knowledge_base_id,agent_id)`，三个父关系均使用 Tenant 复合 FK；
+- `knowledge_document`：`id PK`、`tenant_id`、`knowledge_base_id`、`logical_key`、`title`、`status active|deleted`、`current_source_id NULL`、`deleted_at NULL`、`version`；唯一 `(knowledge_base_id,logical_key)`；
+- `knowledge_source`：`id PK`、`tenant_id`、`knowledge_base_id`、`document_id`、`checksum`、`filename`、`media_type`、`size_bytes`、`storage_key UNIQUE`、`status indexed|superseded|deleted|failed`、`parse_metadata_json`、`error_code/detail NULL`、`created_by_account_id`、`created_at`；同一 KnowledgeBase 内 checksum 唯一；
+- `knowledge_index_revision`：`id PK`、`tenant_id`、`knowledge_base_id`、`revision_no`、`status ready|failed`、`source_manifest_json`、`source_manifest_hash`、`chunking_profile_json`、`embedding_profile_json`、`document_count`、`chunk_count`、`content_hash`、`error_code/detail NULL`、`created_by_account_id`、`built_at`；revision_no 和 content_hash 均在 KnowledgeBase 内唯一；
+- `knowledge_chunk`：`id PK`、`tenant_id`、`index_revision_id`、`knowledge_base_id`、`document_id`、`source_id`、`ordinal`、`page_number/section NULL`、`content`、`content_hash`、`term_frequencies_json`、`vector_json`、`token_count`；唯一 `(index_revision_id,source_id,ordinal)`；
+- `knowledge_retrieval_snapshot`：`id PK`、`tenant_id`、`runner_id`、`knowledge_base_id NULL`、`agent_id`、`query_hash`、`query_length`、`limit_count`、`revision_manifest_json`、`result_refs_json`、`created_at`；唯一 `(runner_id,query_hash,knowledge_base discriminator)`。
+
+源字节位于受配置约束的本地 checksum-addressed root，不进入 JSON；数据库保存 storage key 和 checksum。当前 source/index 指针可推进，但 Source、IndexRevision、Chunk 和 RetrievalSnapshot 是历史证据，不原地改写。Agent 检索必须同时匹配原始 `tenant_id + owner_account_id`、显式 Agent grant 和 Runner authority；删除通过新空/缩减 IndexRevision 停止未来检索，历史 Runner 引用仍可解析。
+
 ## 7. Tool 与 Agent 调用
 
 ### `tool_invocation`、`tool_attempt`
@@ -473,5 +485,6 @@ Trigger 必须版本化进入 Alembic，并有正向和拒绝测试；不能只�
 - 等待动作：`tenant + target_account + status + created_at`；
 - Group quiescence：`run/work_item/invocation/approval/shared_task status`；
 - Artifact 列表和下载授权：`tenant + owner_account + session + created_at`。
+- KnowledgeBase/文档列表：`tenant + owner_account/status`、`tenant + knowledge_base/status`；检索：`tenant + index_revision + ordinal`。
 
 不得用新增 Redis 权威状态掩盖缺失索引；具体容量、SLO 和 HA Gate 见[生产就绪要求](../operations/production-readiness.md)。

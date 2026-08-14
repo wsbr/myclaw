@@ -4,6 +4,7 @@ import {
   Activity,
   Bot,
   Brain,
+  BookOpen,
   Coins,
   ChevronRight,
   Cpu,
@@ -37,6 +38,7 @@ const AuditPage = lazy(() => import('@/pages/Admin/AuditPage'))
 const RuntimePage = lazy(() => import('@/pages/Admin/RuntimePage'))
 const UsagePage = lazy(() => import('@/pages/Admin/UsagePage'))
 const MemoriesPage = lazy(() => import('@/pages/Memories'))
+const KnowledgePage = lazy(() => import('@/pages/Knowledge'))
 const AccountPage = lazy(() => import('@/pages/Account'))
 const AgentNetworkPage = lazy(() => import('@/pages/AgentNetwork'))
 
@@ -46,6 +48,7 @@ const navItems: { key: string; label: string; icon: typeof Bot; roles?: string[]
   { key: '/agents', label: 'Agents', icon: Bot },
   { key: '/network', label: 'Agent Network', icon: Network },
   { key: '/memories', label: 'Memory', icon: Brain },
+  { key: '/knowledge', label: '本地知识库', icon: BookOpen },
   { key: '/account', label: '我的账号', icon: UserRound },
   { key: '/users', label: '用户管理', icon: Users, roles: ['admin'] },
   { key: '/tools', label: 'Tool 管理', icon: Wrench, roles: ['admin'] },
@@ -61,6 +64,7 @@ const breadcrumbMap: Record<string, string> = {
   '/agents': 'Agents',
   '/network': 'Agent Network',
   '/memories': 'Memory',
+  '/knowledge': '本地知识库',
   '/account': '我的账号',
   '/users': '用户管理',
   '/tools': 'Tool 管理',
@@ -219,6 +223,7 @@ export default function WorkspaceLayout() {
                   聊天状态会被清空 */}
               <Route path="/agents/:agentId/chat/:sessionId?" element={<SessionPage />} />
               <Route path="/memories" element={<MemoriesPage />} />
+              <Route path="/knowledge" element={<KnowledgePage />} />
               <Route path="/account" element={<AccountPage />} />
               <Route path="/users" element={<UsersPage />} />
               <Route path="/tools" element={<ToolsPage />} />

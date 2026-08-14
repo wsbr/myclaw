@@ -277,7 +277,17 @@ VerificationResult 只引用真实 ToolAttempt、Artifact、文件 checksum 或�
 
 普通 API 不允许把 `account_id`、source Session/Message、policy version 或 agent scope owner 写入 body；这些从既有 Memory 与 AuthContext 派生。修改创建新 MemoryVersion，不覆盖历史；删除后立即停止召回，历史 Runner 的 Capability/Context snapshot 不变化。`scope=agent` 在 v1 不向普通用户开放写入。
 
-## 13. ExecutionEvent REST 与 SSE
+## 13. Local KnowledgeBase
+
+- `GET/POST /knowledge-bases`：列出当前 Tenant/account 的 active 知识库或创建一个 owner-only/selected-Agents 知识库；
+- `GET /knowledge-bases/{id}`、`PATCH /knowledge-bases/{id}/access`：读取安全投影或原子替换显式 Agent grants；
+- `GET/POST /knowledge-bases/{id}/documents`：列出当前文档或上传一个有界的 UTF-8 TXT、Markdown、PDF 源；
+- `POST /knowledge-bases/{id}/reindex`、`POST /knowledge-bases/{id}/search`：核对不可变当前索引或执行 owner 直接检索；
+- `DELETE /knowledge-bases/{id}/documents/{document_id}`、`DELETE /knowledge-bases/{id}`：写 tombstone 并停止未来检索，不删除历史 revision、chunk 和 Runner 引用。
+
+Tenant/account 来自 AuthContext，不接受 body/header 覆盖。Agent Runtime 只能通过已装配的 `knowledge_search` Tool 检索，并同时满足当前账号所有权和显式 Agent grant。上传采用 multipart `file`，文件、PDF 页数、chunk 数和查询/返回数都有配置硬界限。检索结果固定包含 source/index/chunk identity、checksum、页码或章节、分数和有界 excerpt；Runner Tool 调用另写不含正文的 RetrievalSnapshot。
+
+## 14. ExecutionEvent REST 与 SSE
 
 - `GET /sessions/{id}/events?after_sequence=123&scan_limit=500&limit=100`；
 - `GET /sessions/{id}/events/stream?after_sequence=123`；
@@ -312,7 +322,7 @@ data: {"scanned_through_sequence":130}
 
 客户端优先使用 `Last-Event-ID`；query 参数兼容时取更大值。网络至少一次，按 event_id 去重；sequence 不要求连续。cursor 早于保留窗口返回 410，并给 `earliest_sequence` 和重新同步链接。
 
-## 14. 实时 Token
+## 15. 实时 Token
 
 Redis bridge 只承载非权威 `message.delta`：
 
@@ -322,7 +332,7 @@ Redis bridge 只承载非权威 `message.delta`：
 - Redis/API/浏览器重启后，从最后可靠 sequence 续读；
 - 不允许用 Redis 中“最后 token”推断 Run 完成。
 
-## 15. 必须稳定的错误码
+## 16. 必须稳定的错误码
 
 | code | 含义 |
 | --- | --- |
@@ -358,7 +368,7 @@ Redis bridge 只承载非权威 `message.delta`：
 
 错误 details 只返回调用者有权查看的安全字段，不回显 Prompt、Credential、内部路径或其他用户资源。
 
-## 16. API 契约门禁
+## 17. API 契约门禁
 
 [OpenAPI 3.1](openapi-v1.yaml) 已作为目标机器契约纳入文档基线。实现进入 UAT/生产前必须生成或校验服务端路由和客户端类型，并通过：
 

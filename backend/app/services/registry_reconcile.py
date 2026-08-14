@@ -375,6 +375,7 @@ def builtin_tool_specs() -> list[CodeToolSpec]:
         "publish_artifact": ("never", {"workspace_access": "write"}, "durable_async", "idempotent"),
         "memory_search": ("never", {}, "inline", "none"),
         "memory_propose": ("never", {}, "inline", "idempotent"),
+        "knowledge_search": ("never", {}, "inline", "none"),
         "web_search": ("never", {"network_policy": {"egress": "configured_provider_only"}}, "durable_async", "none"),
         "web_fetch": ("never", {"network_policy": {"egress": "public_http_https"}}, "durable_async", "none"),
         "browser_navigate": ("never", {"network_policy": {"egress": "public_http_https"}}, "durable_async", "idempotent"),

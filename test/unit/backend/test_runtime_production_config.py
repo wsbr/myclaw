@@ -40,6 +40,14 @@ def test_runtime_heartbeat_must_be_shorter_than_runner_lease():
         _production_settings(runtime_runner_lease_seconds=10, runtime_runner_heartbeat_seconds=10)
 
 
+def test_knowledge_chunk_overlap_must_be_smaller_than_chunk_size():
+    with pytest.raises(ValidationError, match="KNOWLEDGE_CHUNK_OVERLAP_CHARS"):
+        _production_settings(
+            knowledge_chunk_chars=512,
+            knowledge_chunk_overlap_chars=512,
+        )
+
+
 def test_sandbox_heartbeat_must_be_shorter_than_attempt_lease():
     with pytest.raises(ValidationError, match="SANDBOX_ATTEMPT_HEARTBEAT_SECONDS"):
         _production_settings(

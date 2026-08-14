@@ -44,6 +44,14 @@ class Settings(BaseSettings):
     # default; literal IP URLs and local/internal hostnames remain prohibited.
     trusted_synthetic_dns_cidrs: list[str] = []
     sandbox_root: str = "/var/lib/myclaw/workspaces"
+    knowledge_root: str = "/var/lib/myclaw/knowledge"
+    knowledge_max_source_bytes: int = Field(
+        default=20 * 1024 * 1024, gt=0, le=100 * 1024 * 1024,
+    )
+    knowledge_max_pdf_pages: int = Field(default=300, gt=0, le=2000)
+    knowledge_max_chunks_per_base: int = Field(default=10_000, gt=0, le=100_000)
+    knowledge_chunk_chars: int = Field(default=1200, ge=256, le=8000)
+    knowledge_chunk_overlap_chars: int = Field(default=150, ge=0, le=2000)
     skill_package_root: str = "/var/lib/myclaw/skill-packages"
     shared_skill_root: str = "/var/lib/myclaw/shared-skills"
     skill_storage_backend: str = "local"
@@ -143,6 +151,10 @@ class Settings(BaseSettings):
                 )
         if self.runtime_runner_heartbeat_seconds >= self.runtime_runner_lease_seconds:
             raise ValueError("RUNTIME_RUNNER_HEARTBEAT_SECONDS must be below RUNTIME_RUNNER_LEASE_SECONDS")
+        if self.knowledge_chunk_overlap_chars >= self.knowledge_chunk_chars:
+            raise ValueError(
+                "KNOWLEDGE_CHUNK_OVERLAP_CHARS must be below KNOWLEDGE_CHUNK_CHARS"
+            )
         if self.sandbox_attempt_heartbeat_seconds >= self.sandbox_attempt_lease_seconds:
             raise ValueError("SANDBOX_ATTEMPT_HEARTBEAT_SECONDS must be below SANDBOX_ATTEMPT_LEASE_SECONDS")
         if (

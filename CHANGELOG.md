@@ -4,6 +4,8 @@ All notable changes to MyClaw are documented in this file. The format follows [K
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-14
+
 ### Added
 
 - Defined the post-`v0.1.1` roadmap for Group diagnostics and loop guardrails, the usage/cost ledger, Agent evaluation and version gates, the Runtime management console, a minimum Tenant boundary, and a local knowledge base.
@@ -14,6 +16,11 @@ All notable changes to MyClaw are documented in this file. The format follows [K
 - Added an append-only Usage/cost ledger with effective-dated immutable price snapshots, automatic Provider and durable Tool/Sandbox attempt attribution, explicit unknown cost, reconciled rollups, audited adjustments, owned-Run APIs, and an administrator Usage console.
 - Added versioned Agent evaluation suites that execute real isolated draft-test Runs, deterministically settle quality and cost assertions, bind evidence to the exact candidate assembly hash, and block publication when an active current suite has not passed that candidate.
 - Added a persisted minimum Tenant authority with default-Tenant migration, active membership validation, tenant-scoped user APIs, composite MySQL ownership constraints, Tenant-bound Outbox/Worker fencing, a visible Account-page Tenant identity, and two-Tenant negative isolation tests.
+- Added a Tenant-scoped local KnowledgeBase for bounded UTF-8 text, Markdown and PDF ingestion, checksum-idempotent source history, immutable local index revisions, hybrid retrieval with exact citations, Runner retrieval snapshots, explicit per-Agent grants, a governed `knowledge_search` Tool, and a user-facing Knowledge console.
+
+### Release scope
+
+- This release completes the six dependency-ordered roadmap capabilities for the local/UAT profile. It does not claim customer billing, production multi-tenant identity operations, OCR, remote knowledge storage, production HA, or strong untrusted-code isolation.
 
 ## [0.1.1] - 2026-08-14
 

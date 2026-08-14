@@ -11,6 +11,7 @@ from app.core.tool_registry.builtin.workspace_catalog import (
     ApplyPatchTool, DeletePathTool, ListFilesTool, SearchFilesTool,
 )
 from app.core.tool_registry.builtin.memory_tools import MemoryProposeTool, MemorySearchTool
+from app.core.tool_registry.builtin.knowledge_search import KnowledgeSearchTool
 from app.core.tool_registry.builtin.web_tools import WebFetchTool, WebSearchTool
 from app.core.tool_registry.builtin.browser_tools import (
     BrowserInteractTool, BrowserNavigateTool, BrowserObserveTool, BrowserScreenshotTool,
@@ -22,6 +23,7 @@ BUILTIN_TOOLS: dict[str, BaseTool] = {
         ReadFileTool, WriteFileTool, ExecuteTool, SearchGroupHistoryTool,
         PublishArtifactTool, ListFilesTool, SearchFilesTool, ApplyPatchTool,
         DeletePathTool, MemorySearchTool, MemoryProposeTool,
+        KnowledgeSearchTool,
         WebSearchTool, WebFetchTool,
         BrowserNavigateTool, BrowserObserveTool, BrowserInteractTool, BrowserScreenshotTool,
     ]
@@ -94,6 +96,7 @@ class ToolRegistry:
             from app.services.workspace_file_service import WorkspaceFileError
             from app.services.memory_service import MemoryConflict
             from app.services.artifact_service import ArtifactPublishError
+            from app.services.knowledge_service import KnowledgeError
             if isinstance(error, WorkspaceFileError):
                 return ToolResult(
                     status="failed", summary=str(error), error=str(error),
@@ -110,6 +113,16 @@ class ToolRegistry:
                 return ToolResult(
                     status="failed", summary=str(error), error=str(error),
                     error_code="artifact_publish_conflict", error_category="conflict",
+                    retryable=False,
+                )
+            if isinstance(error, KnowledgeError):
+                return ToolResult(
+                    status="failed", summary=str(error), error=str(error),
+                    error_code=error.code,
+                    error_category=(
+                        "authorization" if error.status_code in {401, 403, 404}
+                        else "validation"
+                    ),
                     retryable=False,
                 )
             return ToolResult(

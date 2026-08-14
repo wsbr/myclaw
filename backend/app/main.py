@@ -107,7 +107,7 @@ async def _init_phase_one_registries():
 
 app = FastAPI(
     title="MyClaw Agent Platform",
-    version="0.1.1",
+    version="0.3.0",
     lifespan=lifespan,
 )
 

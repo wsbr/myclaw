@@ -203,6 +203,13 @@ BUILTIN_RESULT_DATA_SCHEMAS: dict[str, dict[str, Any]] = {
         "source_message_ids": _A, "observed_head_version": {"type": ["integer", "null"]},
         "memory_id": _N_S, "rejection_code": _N_S,
     }),
+    "knowledge_search": _object(
+        "query", "count", "results", "revision_manifest", "retrieval_profile",
+        properties={
+            "query": _S, "count": _I, "results": _A,
+            "revision_manifest": _A, "retrieval_profile": {"type": "object"},
+        },
+    ),
     "web_search": _object("query", "original_query", "effective_query", "results", "count", "retrieved_at", properties={
         "query": _S, "original_query": _S, "effective_query": _S,
         "results": _A, "count": _I, "retrieved_at": _S,

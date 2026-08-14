@@ -13,7 +13,7 @@ MYCLAW_ENV_FILE=.env.example \
 docker compose --env-file deploy/uat/.env.example \
   -f deploy/docker-compose.uat.yml config --quiet
 MYCLAW_ACCEPTANCE_COMMIT_SHA=0000000000000000000000000000000000000000 \
-MYCLAW_RELEASE=v0.1.1-config-check \
+MYCLAW_RELEASE=v0.3.0-config-check \
   docker compose --env-file deploy/uat_single_node/.env.example \
   -f deploy/uat_single_node/docker-compose.yml config --quiet
 docker compose --env-file test/.env.test \

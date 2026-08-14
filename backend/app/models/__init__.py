@@ -1,4 +1,13 @@
 from app.models.tenant_v1 import Tenant, TenantMembership
+from app.models.knowledge_v1 import (
+    KnowledgeBase,
+    KnowledgeBaseAgentAccess,
+    KnowledgeChunk,
+    KnowledgeDocument,
+    KnowledgeIndexRevision,
+    KnowledgeRetrievalSnapshot,
+    KnowledgeSource,
+)
 from app.models.foundation import (
     UserIdentity,
     PlatformAccount,

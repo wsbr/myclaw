@@ -77,6 +77,9 @@ Runtime 让模型决定如何理解、计划、行动和协作；Kernel 只负�
 | `GroupSession` / `GroupMembership` | Chat 模型从治理后候选目录按诉求选择、Chat 后形成的 Agent 协作空间和成员事件 |
 | `GroupRun` | Group 中一次目标的协作聚合；与 Run 一对一且不复制状态 |
 | `Workspace` / `Artifact` | 强制分区的运行文件空间和不可变正式交付快照 |
+| `KnowledgeBase` / `KnowledgeSource` | Tenant/账号归属的本地文档集合和不可变源字节证据 |
+| `KnowledgeIndexRevision` / `KnowledgeChunk` | 版本化本地检索配置、源清单、chunk 与可解析引用 |
+| `KnowledgeRetrievalSnapshot` | Runner 实际使用的查询 hash、索引 revision 和 chunk 引用快照 |
 | `ExecutionEvent` / `RunnerCheckpoint` | 可靠时间线和恢复快照 |
 | `OutboxCommand` | 至少一次的后台调度命令 |
 
