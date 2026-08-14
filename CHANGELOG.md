@@ -4,6 +4,10 @@ All notable changes to MyClaw are documented in this file. The format follows [K
 
 ## [Unreleased]
 
+### Added
+
+- Defined the post-`v0.1.1` roadmap for Group diagnostics and loop guardrails, the usage/cost ledger, Agent evaluation and version gates, the Runtime management console, a minimum Tenant boundary, and a local knowledge base.
+
 ## [0.1.1] - 2026-08-14
 
 ### Added

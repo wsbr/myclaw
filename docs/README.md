@@ -5,6 +5,7 @@ Start with the repository [README](../README.md). It contains the supported loca
 ## Product and architecture
 
 - [Product overview](../PRODUCT.md): user experience and product semantics.
+- [Roadmap](../ROADMAP.md): dependency-ordered work planned after `v0.1.1`.
 - [Design philosophy](DESIGN_PHILOSOPHY.md): principles that constrain every module.
 - [Technical overview](../TECH.md): runtime architecture and deployment boundaries.
 - [Validation](VALIDATION.md): CI, local release gates, real-model acceptance, and evidence policy.

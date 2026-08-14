@@ -169,7 +169,7 @@ Real-model full-stack acceptance requires explicit Provider credentials and cont
 | Multi-tenant SaaS, OIDC/OBO/SCIM | Designed, not implemented as a production profile |
 | Kubernetes, multi-AZ, committed SLO/RPO/RTO | Reference architecture only |
 
-See [`PRODUCT.md`](PRODUCT.md) for product semantics, [`TECH.md`](TECH.md) for target architecture, and [`docs/README.md`](docs/README.md) for the authoritative documentation map.
+See [`ROADMAP.md`](ROADMAP.md) for the planned post-`v0.1.1` work, [`PRODUCT.md`](PRODUCT.md) for product semantics, [`TECH.md`](TECH.md) for target architecture, and [`docs/README.md`](docs/README.md) for the authoritative documentation map.
 
 ## Contributing and security
 
