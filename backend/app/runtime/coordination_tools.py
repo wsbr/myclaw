@@ -7,10 +7,21 @@ import json
 
 from sqlalchemy import select
 
+from app.config import settings
 from app.core.tool_registry.base import RuntimeContext, ToolResult
+from app.core.tool_registry.builtin.search_group_history import SearchGroupHistoryTool
 from app.core.tool_registry.schema import runtime_result_schema
 from app.models.common import uuid7
-from app.models.runtime_v1 import CapabilitySnapshot, DurableRunner, Clarification, Message, Run, WorkItem
+from app.models.foundation import ExecutionEvent
+from app.models.runtime_v1 import (
+    AgentInvocation,
+    CapabilitySnapshot,
+    DurableRunner,
+    Clarification,
+    Message,
+    Run,
+    WorkItem,
+)
 from app.persistence.reliable_writes import ExecutionEventWriter
 from app.services.working_plan_service import WorkingPlanConflict, update_working_plan
 from app.services.agent_directory_service import agent_card_view, discover_agent_cards
@@ -113,10 +124,42 @@ RUNTIME_COORDINATION_DEFINITIONS = ({
     },
     "source": "runtime",
 }, {
+    "name": "select_group_members",
+    "description": (
+        "WHEN: during the root normal Chat, the current user request can materially benefit from a Group follow-up. "
+        "Select the smallest semantically relevant peer set from the exact candidate Agent catalog in the prompt; "
+        "the current Chat Agent is retained automatically as the conversation anchor when eligible. "
+        "WHEN NOT: do not use outside root Chat, do not select unknown IDs, and never select every candidate by "
+        "default. RETURNS: one durable, immutable full member selection that is applied only after Chat completes. "
+        "RECOVERY: if no suitable peer exists, continue the normal Chat without selecting a Group."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "selected_agent_ids": {
+                "type": "array", "minItems": 1,
+                "maxItems": settings.emergent_group_max_members,
+                "uniqueItems": True,
+                "items": {"type": "string", "minLength": 1, "maxLength": 191},
+            },
+            "rationale": {"type": "string", "minLength": 1, "maxLength": 4000},
+        },
+        "required": ["selected_agent_ids", "rationale"],
+        "additionalProperties": False,
+    },
+    "source": "runtime",
+    "side_effect": "idempotent",
+    "chat_only": True,
+}, {
     "name": "invoke_agent",
     "description": (
-        "WHEN: delegate a bounded request to an authorized discovered Agent. WHEN NOT: do not invoke unknown IDs. "
-        "RETURNS: a durable AgentInvocation wait. RECOVERY: inspect authorization or the returned Agent result."
+        "WHEN: delegate or hand off a bounded request to an authorized discovered Agent. In Group, dispatch is "
+        "asynchronous: the request is immediately persisted as a human-visible directed @ message, this Turn "
+        "continues, its final response is retained as the concise handoff status, and the returned result later "
+        "arrives as a new directed @ message in a new Turn. In Chat and "
+        "Plan, the caller still durably waits for the result. WHEN NOT: do not invoke unknown IDs, do not fan out "
+        "by default, and do not duplicate the returned result with send_group_message. RECOVERY: inspect "
+        "authorization or the later directed Agent result."
     ),
     "input_schema": {
         "type": "object",
@@ -130,9 +173,18 @@ RUNTIME_COORDINATION_DEFINITIONS = ({
     },
     "source": "runtime",
 }, {
+    "name": "search_group_history",
+    "description": SearchGroupHistoryTool.description,
+    "input_schema": SearchGroupHistoryTool.input_schema,
+    "source": "runtime",
+    "group_only": True,
+}, {
     "name": "send_group_message",
     "description": (
-        "WHEN: contribute or direct a message inside the current governed Group. WHEN NOT: do not contact outsiders. "
+        "WHEN: send a directed @ message to one governed member, or append a concise group-wide history note about "
+        "material progress, disagreement, risk, or result. A group-wide note wakes nobody and is not injected into "
+        "other members' ambient context; they must retrieve it with search_group_history. WHEN NOT: do not contact "
+        "outsiders, do not post detailed working traces group-wide, and do not duplicate an invoke_agent deliverable. "
         "RETURNS: the committed Group message and wake decision. RECOVERY: correct recipient/visibility after policy errors."
     ),
     "input_schema": {
@@ -296,6 +348,158 @@ async def dispatch_coordination_tool(
             data={"candidates": [agent_card_view(card) for card in cards]},
         ), False, None
 
+    if name == "select_group_members":
+        runner = await db.get(DurableRunner, context.runner_id)
+        work = await db.get(WorkItem, work_item_id)
+        run = await db.get(Run, run_id)
+        if (
+            runner is None or work is None or run is None
+            or runner.run_id != run.id or work.run_id != run.id
+            or run.mode != "chat" or work.id != run.root_work_item_id
+            or work.parent_work_item_id is not None
+        ):
+            return ToolResult(
+                status="failed", summary="Group selection is available only in the root normal Chat",
+                error_code="group_selection_chat_root_only",
+                error="Group selection is available only in the root normal Chat",
+                error_category="authorization",
+            ), False, None
+        invoked_peer = await db.scalar(select(AgentInvocation.id).where(
+            AgentInvocation.run_id == run.id,
+            AgentInvocation.caller_work_item_id == work.id,
+            AgentInvocation.target_work_item_id.is_not(None),
+        ).limit(1))
+        if invoked_peer is not None:
+            return ToolResult(
+                status="failed",
+                summary="This Chat already delegated work and cannot also emerge a duplicate Group",
+                error_code="group_selection_after_agent_invocation",
+                error="This Chat already delegated work and cannot also emerge a duplicate Group",
+                error_category="conflict",
+            ), False, None
+        emergence = dict((runner.input_snapshot or {}).get("group_emergence") or {})
+        candidates = list(emergence.get("candidates") or [])
+        if emergence.get("status") != "ready" or len(candidates) < 2:
+            return ToolResult(
+                status="failed", summary="A complete Group candidate catalog is unavailable",
+                error_code=str(emergence.get("reason") or "group_candidate_catalog_unavailable"),
+                error="A complete Group candidate catalog is unavailable",
+                error_category="authorization",
+            ), False, None
+        requested_ids = [
+            str(item).strip() for item in arguments.get("selected_agent_ids") or []
+        ]
+        if len(requested_ids) != len(set(requested_ids)) or not requested_ids:
+            return ToolResult(
+                status="failed", summary="Select at least one unique Group peer candidate",
+                error_code="invalid_group_selection",
+                error="Select at least one unique Group peer candidate",
+                error_category="validation",
+            ), False, None
+        candidates_by_id = {str(item.get("agent_id")): item for item in candidates}
+        unknown_ids = [item for item in requested_ids if item not in candidates_by_id]
+        if unknown_ids:
+            return ToolResult(
+                status="failed", summary="Selection contains an Agent outside the frozen candidate catalog",
+                error_code="group_candidate_not_available",
+                error="Selection contains an Agent outside the frozen candidate catalog",
+                error_category="authorization",
+                error_details={"unknown_agent_ids": unknown_ids},
+            ), False, None
+        anchor_id = str(emergence.get("current_chat_agent_id") or "").strip()
+        selected_ids = list(requested_ids)
+        if anchor_id in candidates_by_id:
+            selected_ids = [anchor_id, *(
+                item for item in selected_ids if item != anchor_id
+            )]
+        if len(selected_ids) < 2:
+            return ToolResult(
+                status="failed", summary="A Group requires the Chat anchor and at least one peer",
+                error_code="invalid_group_selection",
+                error="A Group requires the Chat anchor and at least one peer",
+                error_category="validation",
+            ), False, None
+        if len(selected_ids) > settings.emergent_group_max_members:
+            return ToolResult(
+                status="failed", summary="Selected Group exceeds the configured member bound",
+                error_code="group_member_limit_exceeded",
+                error="Selected Group exceeds the configured member bound",
+                error_category="validation",
+                error_details={
+                    "selected_count": len(selected_ids),
+                    "max_members": settings.emergent_group_max_members,
+                },
+            ), False, None
+        rationale = str(arguments.get("rationale") or "").strip()
+        event_key = f"group-emergence-selection:{run.id}"
+        existing = await db.scalar(select(ExecutionEvent).where(
+            ExecutionEvent.session_id == run.session_id,
+            ExecutionEvent.event_dedupe_key == event_key,
+        ))
+        if existing is not None:
+            existing_ids = list((existing.payload or {}).get("selected_agent_ids") or [])
+            if existing_ids != selected_ids:
+                return ToolResult(
+                    status="failed", summary="This Chat already has an immutable Group selection",
+                    error_code="group_selection_already_recorded",
+                    error="This Chat already has an immutable Group selection",
+                    error_category="conflict",
+                ), False, None
+            return ToolResult(
+                status="succeeded", summary=f"Reused the {len(existing_ids)}-Agent Group selection",
+                data={
+                    "selected_agent_ids": existing_ids,
+                    "rationale": str((existing.payload or {}).get("rationale") or ""),
+                    "candidate_catalog_hash": str(
+                        (existing.payload or {}).get("candidate_catalog_hash") or ""
+                    ),
+                },
+            ), False, None
+        selected_cards = [candidates_by_id[item] for item in selected_ids]
+        candidate_versions = dict(emergence.get("candidate_versions") or {})
+        selected_versions = {
+            item: dict(candidate_versions.get(item) or {}) for item in selected_ids
+        }
+        if any(not item.get("agent_version_id") for item in selected_versions.values()):
+            return ToolResult(
+                status="failed", summary="The frozen Agent version catalog is incomplete",
+                error_code="group_candidate_catalog_unavailable",
+                error="The frozen Agent version catalog is incomplete",
+                error_category="authorization",
+            ), False, None
+        await ExecutionEventWriter(db).append(
+            session_id=run.session_id,
+            run_id=run.id,
+            event_type="group.emergence_selected",
+            event_dedupe_key=event_key,
+            actor_type="agent",
+            actor_id=runner.agent_id,
+            entity_type="run",
+            entity_id=run.id,
+            entity_version=run.version,
+            visibility="user",
+            summary=f"Chat model selected {len(selected_ids)} Agents for Group emergence",
+            payload={
+                "selected_agent_ids": selected_ids,
+                "selected_agents": selected_cards,
+                "selected_agent_versions": selected_versions,
+                "rationale": rationale,
+                "candidate_catalog_hash": str(emergence.get("catalog_hash") or ""),
+                "candidate_count": len(candidates),
+                "source_turn_id": source_turn_id,
+                "provider_call_id": provider_call_id,
+            },
+            correlation_id=run.id,
+        )
+        return ToolResult(
+            status="succeeded", summary=f"Selected {len(selected_ids)} Agents for post-Chat Group emergence",
+            data={
+                "selected_agent_ids": selected_ids,
+                "rationale": rationale,
+                "candidate_catalog_hash": str(emergence.get("catalog_hash") or ""),
+            },
+        ), False, None
+
     if name == "invoke_agent":
         caller_runner = await db.get(DurableRunner, context.runner_id)
         caller_work = await db.get(WorkItem, work_item_id)
@@ -325,10 +529,32 @@ async def dispatch_coordination_tool(
                 error_code=error.code, error=str(error),
                 error_category="authorization",
             ), False, None
+        if run.mode == "group":
+            return ToolResult(
+                status="succeeded",
+                summary=(
+                    "Handoff dispatched asynchronously; continue this Turn with a concise status. "
+                    "That final status is retained automatically; do not send it again with send_group_message. "
+                    "The directed result will arrive in a new Turn."
+                ),
+                data={
+                    "agent_invocation_id": invocation.id,
+                    "status": invocation.status,
+                    "delivery_mode": "async_handoff",
+                },
+            ), False, None
         return ToolResult(
             status="succeeded", summary="Waiting for the invoked Agent",
-            data={"agent_invocation_id": invocation.id, "status": invocation.status},
+            data={
+                "agent_invocation_id": invocation.id,
+                "status": invocation.status,
+                "delivery_mode": "awaited",
+            },
         ), True, "agent"
+
+    if name == "search_group_history":
+        result = await SearchGroupHistoryTool().execute(arguments, context, db=db)
+        return result, False, None
 
     if name == "send_group_message":
         try:

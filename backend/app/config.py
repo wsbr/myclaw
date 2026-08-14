@@ -66,6 +66,14 @@ class Settings(BaseSettings):
     # below the Runner lease so a transient scheduling pause does not fence a
     # healthy worker.
     runtime_worker_poll_seconds: float = Field(default=0.5, gt=0)
+    # Number of concurrently active Runner coroutines in one Runtime Worker
+    # process. Excess durable commands remain in the Outbox instead of being
+    # claimed into an unbounded in-memory queue.
+    runtime_worker_concurrency: int = Field(default=8, ge=1, le=256)
+    # A cached provider entry owns one async SDK client and therefore one
+    # reusable HTTP connection pool. The cache is process-local and keyed by
+    # provider type, endpoint, and credential fingerprint.
+    runtime_provider_pool_max_entries: int = Field(default=32, ge=1, le=256)
     runtime_outbox_claim_lease_seconds: int = Field(default=30, gt=0)
     runtime_runner_lease_seconds: int = Field(default=30, gt=0)
     runtime_runner_heartbeat_seconds: int = Field(default=10, gt=0)
@@ -82,6 +90,12 @@ class Settings(BaseSettings):
     context_policy_version: str = "context.v2"
     compaction_policy_version: str = "compaction.v2"
     continuation_policy_version: str = "continuation.v2"
+    # Every governed Group candidate is shown to the Chat model as a compact
+    # id/name/description catalog. Refuse emergence when that complete catalog
+    # cannot fit this bound; never make a semantic choice from a truncated set.
+    emergent_group_max_candidates: int = Field(default=100, ge=2, le=500)
+    # The model must select a bounded subset from that complete catalog.
+    emergent_group_max_members: int = Field(default=64, ge=2, le=500)
 
     # Retention maintenance. Authoritative Session/Run/Event/Artifact rows are
     # not deleted by this job; only disposable operational records are pruned.

@@ -33,7 +33,8 @@ def _decode_cursor(value: str) -> tuple[int, int]:
 class SearchGroupHistoryTool(BaseTool):
     name = "search_group_history"
     description = (
-        "WHEN: retrieve prior shared or directly addressed evidence from the current governed Group. "
+        "WHEN: actively retrieve the human-visible Group transcript, including concise shared notes "
+        "and directed @ exchanges between other members, from the current governed Group. "
         "WHEN NOT: never use outside a Group or to access another member's private runtime data. "
         "RETURNS: bounded visible messages, Artifacts, events, sequence bounds, and a stable cursor. "
         "RECOVERY: narrow terms or continue with next_cursor when more evidence remains."
@@ -118,6 +119,17 @@ class SearchGroupHistoryTool(BaseTool):
                 ),
             )),
         )
+        # Directed @ messages are human-visible Group transcript facts. They
+        # are not ambient context for uninvolved members, but any current
+        # member may deliberately retrieve them through this Tool. Keep the
+        # exception message-scoped so private direct runtime events remain
+        # inaccessible.
+        searchable_group_direct_message = and_(
+            ExecutionEvent.visibility == "direct",
+            Message.id.is_not(None),
+            Message.scope_type == "group",
+            Message.group_session_id == context.group_session_id,
+        )
         search_conditions = [or_(
             func.lower(ExecutionEvent.summary).contains(term),
             and_(Message.id.is_not(None), func.lower(Message.content).contains(term)),
@@ -134,7 +146,11 @@ class SearchGroupHistoryTool(BaseTool):
             ExecutionEvent.group_session_id == context.group_session_id,
             ExecutionEvent.sequence > after,
             ExecutionEvent.sequence <= upper,
-            or_(ExecutionEvent.visibility == "group", direct_to_principal),
+            or_(
+                ExecutionEvent.visibility == "group",
+                direct_to_principal,
+                searchable_group_direct_message,
+            ),
             *search_conditions,
         )
         agent_ids = args.get("agent_ids")

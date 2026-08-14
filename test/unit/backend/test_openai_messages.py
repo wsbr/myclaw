@@ -98,7 +98,7 @@ async def test_stream_forwards_frozen_temperature_and_output_limit():
         [{"role": "user", "content": "return json"}], None,
         {"model_id": "model", "temperature": 0, "max_tokens": 4096},
     )]
-    assert [chunk.type for chunk in chunks] == ["transport_payload", "done"]
+    assert [chunk.type for chunk in chunks] == ["done"]
     assert captured["temperature"] == 0
     assert captured["max_tokens"] == 4096
 
@@ -124,7 +124,7 @@ async def test_stream_forwards_declared_structured_response_format():
         [{"role": "user", "content": "return json"}], None,
         {"model_id": "model", "response_format": response_format},
     )]
-    assert [chunk.type for chunk in chunks] == ["transport_payload", "done"]
+    assert [chunk.type for chunk in chunks] == ["done"]
     assert captured["response_format"] == response_format
 
 
@@ -149,7 +149,7 @@ async def test_stream_forwards_immutable_provider_extra_body_parameters():
         [{"role": "user", "content": "call a tool"}], None,
         {"model_id": "model", "extra_body": extra_body},
     )]
-    assert [chunk.type for chunk in chunks] == ["transport_payload", "done"]
+    assert [chunk.type for chunk in chunks] == ["done"]
     assert captured["extra_body"] == extra_body
     assert captured["extra_body"] is not extra_body
 
@@ -178,7 +178,7 @@ async def test_stream_exposes_native_tools_without_forcing_a_control_envelope():
         [{"role": "user", "content": "finish"}], tools,
         {"model_id": "model"},
     )]
-    assert [chunk.type for chunk in chunks] == ["transport_payload", "done"]
+    assert [chunk.type for chunk in chunks] == ["done"]
     assert "tool_choice" not in captured
     assert captured["tools"][0]["function"]["name"] == "read_file"
 
@@ -231,6 +231,51 @@ async def test_model_adapter_retries_incomplete_chunked_read_before_output():
                 yield SimpleNamespace(
                     usage=None,
                     choices=[SimpleNamespace(delta=SimpleNamespace(content="recovered", tool_calls=None))],
+                )
+
+            return chunks()
+
+    model = OpenAILLM("unused-test-key")
+    await model.client.close()
+    model.client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+    result = await ModelAdapter(model).invoke(ProviderRequest(
+        messages=({"role": "user", "content": "return json"},),
+        tools=(), parameters={"model_id": "model"},
+    ))
+    assert calls == 2
+    assert result.assistant_messages[0].text == "recovered"
+
+
+@pytest.mark.asyncio
+async def test_model_adapter_retries_after_metadata_only_chunk():
+    calls = 0
+
+    class Completions:
+        async def create(self, **kwargs):
+            nonlocal calls
+            calls += 1
+
+            async def chunks():
+                if calls == 1:
+                    yield SimpleNamespace(
+                        id="response-metadata", model="model", usage=None,
+                        choices=[SimpleNamespace(
+                            finish_reason=None,
+                            delta=SimpleNamespace(
+                                content=None, tool_calls=None, role="assistant",
+                                reasoning_content="internal reasoning",
+                            ),
+                        )],
+                    )
+                    raise RuntimeError(
+                        "peer closed connection without sending complete message body "
+                        "(incomplete chunked read)"
+                    )
+                yield SimpleNamespace(
+                    usage=None,
+                    choices=[SimpleNamespace(
+                        delta=SimpleNamespace(content="recovered", tool_calls=None),
+                    )],
                 )
 
             return chunks()

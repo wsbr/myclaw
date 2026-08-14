@@ -214,7 +214,7 @@ async def get_group_interaction_graph(
     db: AsyncSession = Depends(get_db),
     actor: SessionActor = Depends(get_session_actor),
 ):
-    """Project only real directed Message and AgentInvocation facts."""
+    """Project persisted collaboration facts for exactly one GroupRun."""
     group_run = await db.get(GroupRun, group_run_id)
     if group_run is None:
         raise HTTPException(status_code=404, detail="GroupRun not found")
@@ -226,27 +226,64 @@ async def get_group_interaction_graph(
     messages = list(await db.scalars(select(Message).where(
         Message.group_run_id == group_run.id,
         Message.sender_agent_id.is_not(None),
-        Message.recipient_agent_id.is_not(None),
         Message.status == "committed",
     ).order_by(Message.created_at, Message.id)))
     invocations = list(await db.scalars(select(AgentInvocation).where(
         AgentInvocation.group_run_id == group_run.id,
     ).order_by(AgentInvocation.created_at, AgentInvocation.id)))
-    edges = [{
-        "source_agent_id": item.sender_agent_id,
-        "target_agent_id": item.recipient_agent_id,
-        "cause_type": "message",
-        "cause_id": item.id,
-        "status": "committed",
-        "created_at": item.created_at.isoformat(),
-    } for item in messages if item.sender_agent_id in member_ids and item.recipient_agent_id in member_ids]
+    invocation_result_message_ids = {
+        item.result_message_id for item in invocations if item.result_message_id
+    }
+    invocation_request_message_ids = {
+        str((item.context_snapshot or {}).get("request_message_id"))
+        for item in invocations
+        if (item.context_snapshot or {}).get("request_message_id")
+    }
+    edges = []
+    for item in messages:
+        if item.sender_agent_id not in member_ids:
+            continue
+        # AgentInvocation projects a human-visible directed request and result
+        # into the transcript. The graph folds both into its single durable
+        # invocation edge so one collaboration is not counted three times.
+        if item.id in (
+            invocation_request_message_ids | invocation_result_message_ids
+        ):
+            continue
+        if item.visibility == "group" and item.recipient_agent_id is None:
+            edges.append({
+                "source_agent_id": item.sender_agent_id,
+                "target_agent_id": None,
+                "target_node_id": f"group:{group_run.id}",
+                "cause_type": "group_message",
+                "cause_id": item.id,
+                "status": "committed",
+                "created_at": item.created_at.isoformat(),
+                "result_message_id": None,
+                "completed_at": None,
+            })
+        elif item.recipient_agent_id in member_ids:
+            edges.append({
+                "source_agent_id": item.sender_agent_id,
+                "target_agent_id": item.recipient_agent_id,
+                "target_node_id": item.recipient_agent_id,
+                "cause_type": "message",
+                "cause_id": item.id,
+                "status": "committed",
+                "created_at": item.created_at.isoformat(),
+                "result_message_id": None,
+                "completed_at": None,
+            })
     edges.extend({
         "source_agent_id": item.caller_agent_id,
         "target_agent_id": item.target_agent_id,
+        "target_node_id": item.target_agent_id,
         "cause_type": "agent_invocation",
         "cause_id": item.id,
         "status": item.status,
         "created_at": item.created_at.isoformat(),
+        "result_message_id": item.result_message_id,
+        "completed_at": item.completed_at.isoformat() if item.completed_at else None,
     } for item in invocations if item.caller_agent_id in member_ids and item.target_agent_id in member_ids)
     edges.sort(key=lambda item: (item["created_at"], item["cause_id"]))
     return {"nodes": [group_run_member_view(item) for item in members], "edges": edges}
@@ -352,6 +389,8 @@ async def list_group_run_messages(
                        "recipient_agent_id": row.recipient_agent_id,
                        "visibility": row.visibility,
                        "role": row.role, "content": row.content,
+                       "group_run_id": row.group_run_id,
+                       "sequence_no": row.sequence_no,
                        "work_item_id": row.work_item_id, "clarification_id": row.clarification_id,
                        "created_at": row.created_at.isoformat()} for row in rows],
             "next_cursor": next_cursor}

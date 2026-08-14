@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from typing import Iterable
 
 from sqlalchemy import func, select
 
+from app.config import settings
 from app.models.agent_v1 import AgentAssemblyVersion, AgentCard
 from app.models.common import utcnow, uuid7
 from app.models.foundation import ExecutionEvent, UserSession
@@ -14,6 +17,7 @@ from app.models.group_v1 import (
     GroupMembership,
     GroupRun,
     GroupRunMember,
+    GroupRunReference,
     GroupSession,
     GroupSummaryRequest,
     SharedTask,
@@ -25,7 +29,7 @@ from app.persistence.reliable_writes import (
     OutboxWriter,
 )
 from app.persistence.runtime_graph import persist_new_work_runner
-from app.services.agent_directory_service import resolve_callable_agent
+from app.services.agent_directory_service import discover_agent_cards, resolve_callable_agent
 from app.services.run_reliability_service import default_run_budget, deadline_from_budget
 
 
@@ -43,13 +47,113 @@ class ResolvedGroupMember:
     card: AgentCard
 
 
+def _group_card_is_eligible(card: AgentCard) -> bool:
+    collaboration = dict(card.collaboration_summary or {})
+    governance = collaboration.get("governance") or {}
+    return not (
+        collaboration.get("callable") is False
+        or (
+            isinstance(governance, dict)
+            and (
+                governance.get("callable") is False
+                or governance.get("group_allowed") is False
+            )
+        )
+    )
+
+
+async def build_group_emergence_candidate_snapshot(
+    db, *, account_id: str | None, current_agent_id: str | None = None,
+) -> dict:
+    """Freeze the complete model-facing semantic candidate catalog for Chat.
+
+    Only Agent identity data needed for semantic selection enters the prompt.
+    A catalog that exceeds the configured bound is rejected as a whole rather
+    than truncated, because a partial catalog would bias the model's choice.
+    """
+
+    cards = await discover_agent_cards(
+        db,
+        account_id=account_id,
+        group_enabled=True,
+        limit=500,
+        exhaustive=True,
+    )
+    eligible = [card for card in cards if _group_card_is_eligible(card)]
+    # Directory discovery has a hard defensive ceiling of 500. Reaching it
+    # means completeness cannot be proven, so do not let the model choose from
+    # what may be a biased prefix.
+    catalog_completeness_unknown = len(cards) >= 500
+    if (
+        catalog_completeness_unknown
+        or len(eligible) > settings.emergent_group_max_candidates
+    ):
+        return {
+            "status": "unavailable",
+            "reason": (
+                "group_candidate_catalog_completeness_unknown"
+                if catalog_completeness_unknown
+                else "group_candidate_catalog_limit_exceeded"
+            ),
+            "candidate_count": len(eligible),
+            "max_candidates": settings.emergent_group_max_candidates,
+            "current_chat_agent_id": current_agent_id,
+            "candidates": [],
+        }
+    candidates = [{
+        "agent_id": card.agent_id,
+        "name": card.name,
+        "description": card.description,
+    } for card in eligible]
+    candidate_versions = {
+        card.agent_id: {
+            "agent_version_id": card.agent_version_id,
+            "card_content_hash": card.content_hash,
+        }
+        for card in eligible
+    }
+    encoded = json.dumps(
+        candidates, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    )
+    catalog_hash = hashlib.sha256(encoded.encode()).hexdigest()
+    if len(candidates) < 2:
+        return {
+            "status": "unavailable",
+            "reason": "insufficient_group_candidates",
+            "candidate_count": len(candidates),
+            "max_candidates": settings.emergent_group_max_candidates,
+            "current_chat_agent_id": current_agent_id,
+            "catalog_hash": catalog_hash,
+            "candidates": candidates,
+            "candidate_versions": candidate_versions,
+        }
+    return {
+        "status": "ready",
+        "candidate_count": len(candidates),
+        "max_candidates": settings.emergent_group_max_candidates,
+        "current_chat_agent_id": current_agent_id,
+        "catalog_hash": catalog_hash,
+        "candidates": candidates,
+        "candidate_versions": candidate_versions,
+    }
+
+
 async def _resolve_group_members(
     db, *, account_id: str, agent_ids: Iterable[str], actor_agent_id: str,
 ) -> list[ResolvedGroupMember]:
     normalized = [str(item).strip() for item in agent_ids if str(item).strip()]
-    if len(normalized) != 3 or len(set(normalized)) != len(normalized):
+    if len(normalized) < 2 or len(set(normalized)) != len(normalized):
         raise GroupPolicyError(
-            "invalid_group_members", "Phase-one Group requires exactly 3 unique Agent IDs"
+            "invalid_group_members", "Group requires at least 2 unique Agent IDs"
+        )
+    if len(normalized) > settings.emergent_group_max_members:
+        raise GroupPolicyError(
+            "group_member_limit_exceeded",
+            "Enabled Group Agent count exceeds the configured safe bound",
+            details={
+                "member_count": len(normalized),
+                "max_members": settings.emergent_group_max_members,
+            },
         )
     resolved: list[ResolvedGroupMember] = []
     for agent_id in normalized:
@@ -94,6 +198,7 @@ def group_session_view(group: GroupSession) -> dict:
         "status": group.status,
         "initiator_agent_id": group.initiator_agent_id,
         "membership_policy": group.membership_policy,
+        "formation_mode": group.formation_mode,
         "version": group.version,
     }
 
@@ -207,9 +312,6 @@ def _member_runner(
             "group_session_id": group.id,
             "group_run_id": group_run.id,
             "group_membership_id": membership.id,
-            # V1 field name is retained in the RuntimeContext but now carries
-            # a Membership id, not a role/formation node.
-            "group_membership_id": membership.id,
             "delegation_chain": [],
         },
         assembly_snapshot={"agent_version_id": snapshot.agent_version_id},
@@ -217,7 +319,6 @@ def _member_runner(
         input_snapshot={
             "group_session_id": group.id,
             "group_run_id": group_run.id,
-            "group_membership_id": membership.id,
             "group_membership_id": membership.id,
             "goal": content,
             "purpose": purpose,
@@ -231,7 +332,10 @@ async def _create_native_group_run_graph(
     memberships: list[GroupMembership], content: str,
     recipient_agent_id: str | None, reporter_agent_id: str | None,
     resolved_members: list[ResolvedGroupMember], shared_context_refs: list[str],
-    event_key: str,
+    event_key: str, shared_context: dict | None = None,
+    created_event_type: str | None = None,
+    created_actor_type: str = "user", created_actor_id: str | None = None,
+    created_summary: str = "Agent-native GroupRun created",
 ) -> GroupRun:
     by_agent = {item.agent_id: item for item in resolved_members}
     membership_by_agent = {item.agent_id: item for item in memberships}
@@ -253,10 +357,14 @@ async def _create_native_group_run_graph(
         id=uuid7(), run_id=run.id, group_session_id=group.id,
         reporter_agent_id=reporter_id, goal=content,
         summary_epoch=0, delivered_summary_epoch=0,
-        shared_context={"refs": list(shared_context_refs)},
+        shared_context={
+            **dict(shared_context or {}),
+            "refs": list(shared_context_refs),
+        },
         budget_snapshot=default_budget,
         policy_snapshot={
             "membership_policy": "fixed_for_run",
+            "formation_mode": group.formation_mode,
             "permission_mode": "direct",
             "message_visibility": ["direct", "group", "user"],
         },
@@ -287,6 +395,7 @@ async def _create_native_group_run_graph(
                 "permission_mode": "direct",
                 "agent_card_content_hash": resolved.card.content_hash,
                 "agent_name": resolved.card.name,
+                "agent_description": resolved.card.description,
                 "accepted_request_summary": resolved.card.accepted_request_summary,
                 "tool_keys": list(
                     (resolved.card.capabilities_summary or {}).get("tool_keys") or []
@@ -339,17 +448,24 @@ async def _create_native_group_run_graph(
     created = await events.append(
         session_id=session.id, run_id=run.id,
         group_session_id=group.id, group_run_id=group_run.id,
-        event_type="group.created" if event_key.startswith("create_group:") else "group.run_created",
+        event_type=(
+            created_event_type
+            or ("group.created" if event_key.startswith("create_group:") else "group.run_created")
+        ),
         event_dedupe_key=f"{event_key}:run",
-        actor_type="user", actor_id=session.user_id,
+        actor_type=created_actor_type,
+        actor_id=created_actor_id or session.user_id,
         entity_type="group_run", entity_id=group_run.id,
         entity_version=group_run.version, visibility="group",
-        summary="Agent-native GroupRun created",
+        summary=created_summary,
         payload={
+            "group_session_id": group.id,
+            "group_run_id": group_run.id,
             "member_agent_ids": [item.agent_id for item in memberships],
             "reporter_agent_id": reporter_id,
             "recipient_agent_id": recipient_id,
             "membership_policy": "fixed_for_run",
+            "formation_mode": group.formation_mode,
         },
         correlation_id=run.id,
     )
@@ -362,6 +478,7 @@ async def _create_native_group_run_graph(
         entity_type="message", entity_id=message.id,
         visibility="direct", recipients=(
             EventRecipient("agent", recipient_id),
+            EventRecipient("user_identity", session.user_id),
         ),
         summary="Directed Group user message created",
         payload={"message_id": message.id, "recipient_agent_id": recipient_id},
@@ -394,6 +511,10 @@ async def create_group_with_initial_run(
     goal: str, reporter_agent_id: str | None, shared_context_refs: list[str],
     event_key: str,
 ) -> tuple[GroupSession, GroupRun]:
+    if len(member_agent_ids) != 3 or len(set(member_agent_ids)) != 3:
+        raise GroupPolicyError(
+            "invalid_group_members", "Manual Group requires exactly 3 unique Agent IDs"
+        )
     await db.scalar(select(UserSession.id).where(
         UserSession.id == session.id,
     ).with_for_update())
@@ -408,7 +529,7 @@ async def create_group_with_initial_run(
         id=uuid7(), session_id=session.id, user_id=session.user_id,
         initiator_agent_id=initiator_id,
         status="open", goal=goal, bootstrap_context="",
-        membership_policy="fixed_for_run",
+        membership_policy="fixed_for_run", formation_mode="manual_selected",
     )
     db.add(group)
     await db.flush()
@@ -454,6 +575,356 @@ async def create_group_with_initial_run(
     return group, group_run
 
 
+async def emerge_group_after_chat(
+    db, *, source_run_id: str, source_runner_id: str,
+) -> tuple[GroupSession, GroupRun] | None:
+    """Apply the Chat model's semantic member selection after Chat completes.
+
+    Formation is a durable, idempotent follow-up. The Chat transaction remains
+    successful when the model selected no Group or a selected Agent became
+    ineligible. Membership may change between emergent Runs, while every
+    created GroupRun keeps its own immutable member/version snapshot.
+    """
+
+    source_run = await db.scalar(select(Run).where(
+        Run.id == source_run_id,
+    ).with_for_update())
+    source_runner = await db.get(DurableRunner, source_runner_id)
+    if (
+        source_run is None
+        or source_runner is None
+        or source_runner.run_id != source_run.id
+        or source_run.mode != "chat"
+        or source_run.status != "completed"
+    ):
+        return None
+    session = await db.scalar(select(UserSession).where(
+        UserSession.id == source_run.session_id,
+    ).with_for_update())
+    if session is None or session.status != "active":
+        return None
+    event_key = f"emerge_group_after_chat:{source_run.id}"
+    prior = await db.scalar(select(ExecutionEvent).where(
+        ExecutionEvent.session_id == session.id,
+        ExecutionEvent.event_dedupe_key == f"{event_key}:run",
+    ))
+    if prior is not None and prior.entity_type == "group_run":
+        prior_run = await db.get(GroupRun, prior.entity_id)
+        prior_group = (
+            await db.get(GroupSession, prior_run.group_session_id)
+            if prior_run is not None else None
+        )
+        if prior_group is not None:
+            return prior_group, prior_run
+
+    selection = await db.scalar(select(ExecutionEvent).where(
+        ExecutionEvent.session_id == session.id,
+        ExecutionEvent.run_id == source_run.id,
+        ExecutionEvent.event_type == "group.emergence_selected",
+        ExecutionEvent.event_dedupe_key == f"group-emergence-selection:{source_run.id}",
+    ))
+    selected_ids = [
+        str(item).strip()
+        for item in (
+            ((selection.payload or {}).get("selected_agent_ids") or [])
+            if selection else []
+        )
+        if str(item).strip()
+    ]
+    frozen_emergence = dict(
+        (source_runner.input_snapshot or {}).get("group_emergence") or {}
+    )
+    frozen_candidate_versions = dict(
+        frozen_emergence.get("candidate_versions") or {}
+    )
+    # The Chat Agent is the user's conversation anchor, not a specialist the
+    # model may accidentally omit. New selections already persist it; this
+    # normalization also makes queued selections from the previous contract
+    # safe after deployment.
+    if (
+        source_runner.agent_id in frozen_candidate_versions
+        and source_runner.agent_id not in selected_ids
+    ):
+        selected_ids = [source_runner.agent_id, *selected_ids]
+    skip_reason = None
+    if selection is None:
+        skip_reason = "model_selected_no_group"
+    elif len(selected_ids) < 2 or len(selected_ids) != len(set(selected_ids)):
+        skip_reason = "invalid_model_group_selection"
+    elif len(selected_ids) > settings.emergent_group_max_members:
+        skip_reason = "group_member_limit_exceeded"
+    if skip_reason is not None:
+        await ExecutionEventWriter(db).append(
+            session_id=session.id,
+            run_id=source_run.id,
+            event_type="group.emergence_skipped",
+            event_dedupe_key=f"{event_key}:skipped",
+            actor_type="service",
+            actor_id="group-emergence",
+            entity_type="run",
+            entity_id=source_run.id,
+            entity_version=source_run.version,
+            visibility="user",
+            summary="Automatic Group emergence was safely skipped",
+            payload={
+                "source_chat_run_id": source_run.id,
+                "reason": skip_reason,
+                "selected_member_count": len(selected_ids),
+                "max_members": settings.emergent_group_max_members,
+            },
+            correlation_id=source_run.id,
+        )
+        return None
+
+    try:
+        resolved = await _resolve_group_members(
+            db,
+            account_id=session.account_id,
+            agent_ids=selected_ids,
+            actor_agent_id="__group_emergence__",
+        )
+    except GroupPolicyError as error:
+        await ExecutionEventWriter(db).append(
+            session_id=session.id,
+            run_id=source_run.id,
+            event_type="group.emergence_skipped",
+            event_dedupe_key=f"{event_key}:skipped",
+            actor_type="service",
+            actor_id="group-emergence",
+            entity_type="run",
+            entity_id=source_run.id,
+            entity_version=source_run.version,
+            visibility="user",
+            summary="Automatic Group emergence was safely skipped",
+            payload={
+                "source_chat_run_id": source_run.id,
+                "reason": "selected_member_no_longer_eligible",
+                "policy_error_code": error.code,
+                "selected_member_count": len(selected_ids),
+            },
+            correlation_id=source_run.id,
+            caused_by_event_id=selection.id,
+        )
+        return None
+    selected_versions = dict(
+        (selection.payload or {}).get("selected_agent_versions") or {}
+    )
+    selected_versions = {
+        agent_id: dict(
+            selected_versions.get(agent_id)
+            or frozen_candidate_versions.get(agent_id)
+            or {}
+        )
+        for agent_id in selected_ids
+    }
+    changed_ids = [
+        item.agent_id
+        for item in resolved
+        if (
+            str((selected_versions.get(item.agent_id) or {}).get("agent_version_id") or "")
+            != item.version.id
+            or str((selected_versions.get(item.agent_id) or {}).get("card_content_hash") or "")
+            != item.card.content_hash
+        )
+    ]
+    if changed_ids:
+        await ExecutionEventWriter(db).append(
+            session_id=session.id,
+            run_id=source_run.id,
+            event_type="group.emergence_skipped",
+            event_dedupe_key=f"{event_key}:skipped",
+            actor_type="service",
+            actor_id="group-emergence",
+            entity_type="run",
+            entity_id=source_run.id,
+            entity_version=source_run.version,
+            visibility="user",
+            summary="Automatic Group emergence was safely skipped",
+            payload={
+                "source_chat_run_id": source_run.id,
+                "reason": "selected_member_snapshot_changed",
+                "changed_agent_ids": changed_ids,
+            },
+            correlation_id=source_run.id,
+            caused_by_event_id=selection.id,
+        )
+        return None
+    reporter_id = (
+        source_runner.agent_id
+        if source_runner.agent_id in {item.agent_id for item in resolved}
+        else resolved[0].agent_id
+    )
+    group = await db.scalar(select(GroupSession).where(
+        GroupSession.session_id == session.id,
+        GroupSession.status == "open",
+        GroupSession.formation_mode == "emergent_model_selected",
+    ).order_by(GroupSession.created_at.desc(), GroupSession.id.desc()).limit(1))
+    created_group = group is None
+
+    source_messages = list(await db.scalars(select(Message).where(
+        Message.run_id == source_run.id,
+        Message.scope_type == "chat",
+        Message.status == "committed",
+    ).order_by(Message.created_at, Message.id)))
+    user_messages = [item for item in source_messages if item.sender_type == "user"]
+    assistant_messages = [item for item in source_messages if item.sender_type == "agent"]
+    source_user = user_messages[-1] if user_messages else None
+    source_assistant = (
+        await db.get(Message, source_runner.result_message_id)
+        if source_runner.result_message_id else None
+    )
+    if source_assistant is None and assistant_messages:
+        source_assistant = assistant_messages[-1]
+    goal = source_user.content if source_user is not None else "Review the completed Chat response"
+
+    if group is None:
+        group = GroupSession(
+            id=uuid7(),
+            session_id=session.id,
+            user_id=session.user_id,
+            initiator_agent_id=reporter_id,
+            status="open",
+            goal=goal,
+            bootstrap_context=(source_assistant.content if source_assistant else ""),
+            membership_policy="dynamic_future",
+            formation_mode="emergent_model_selected",
+        )
+        db.add(group)
+        await db.flush()
+
+    all_memberships = list(await db.scalars(select(GroupMembership).where(
+        GroupMembership.group_session_id == group.id,
+    ).order_by(GroupMembership.agent_id, GroupMembership.membership_no)))
+    joined_by_agent = {
+        item.agent_id: item for item in all_memberships
+        if item.status == "joined" and item.ended_at is None
+    }
+    selected_set = {item.agent_id for item in resolved}
+    removed: list[GroupMembership] = []
+    for agent_id, membership in list(joined_by_agent.items()):
+        if agent_id in selected_set:
+            continue
+        membership.status = "removed"
+        membership.ended_at = utcnow()
+        membership.reason = "Agent was not selected for the next emergent GroupRun"
+        membership.version += 1
+        removed.append(membership)
+        del joined_by_agent[agent_id]
+
+    joined: list[GroupMembership] = []
+    membership_by_agent: dict[str, GroupMembership] = dict(joined_by_agent)
+    for member in resolved:
+        if member.agent_id in membership_by_agent:
+            continue
+        prior_numbers = [
+            item.membership_no for item in all_memberships
+            if item.agent_id == member.agent_id
+        ]
+        membership = GroupMembership(
+            id=uuid7(),
+            group_session_id=group.id,
+            agent_id=member.agent_id,
+            membership_no=max(prior_numbers, default=0) + 1,
+            status="joined",
+            invited_by_kind="system",
+            invited_by_account_id=session.account_id,
+            reason="Selected by the Chat model from the governed Group candidate catalog",
+            context_scope={
+                "visibility": ["direct", "group", "user"],
+                "shared_context_refs": [],
+                "workspace_scope": "group_shared",
+            },
+            authorization_source="model_selected_group_candidate",
+            joined_at=utcnow(),
+        )
+        db.add(membership)
+        joined.append(membership)
+        membership_by_agent[member.agent_id] = membership
+    if joined or removed:
+        group.version += 1
+    await db.flush()
+
+    active_memberships = [membership_by_agent[item.agent_id] for item in resolved]
+    group_run = await _create_native_group_run_graph(
+        db,
+        session=session,
+        group=group,
+        memberships=active_memberships,
+        content=goal,
+        recipient_agent_id=reporter_id,
+        reporter_agent_id=reporter_id,
+        resolved_members=resolved,
+        shared_context_refs=[],
+        shared_context={
+            "formation_mode": "emergent_model_selected",
+            "conversation_anchor_agent_id": source_runner.agent_id,
+            "selection_event_id": selection.id,
+            "selection_rationale": str((selection.payload or {}).get("rationale") or ""),
+            "candidate_catalog_hash": str(
+                (selection.payload or {}).get("candidate_catalog_hash") or ""
+            ),
+            "source_chat_run_id": source_run.id,
+            "source_chat_message_id": source_user.id if source_user else None,
+            "source_chat_response_message_id": (
+                source_assistant.id if source_assistant else None
+            ),
+            "source_chat_response": (
+                source_assistant.content if source_assistant else None
+            ),
+        },
+        event_key=event_key,
+        created_event_type=("group.emerged" if created_group else "group.run_emerged"),
+        created_actor_type="service",
+        created_actor_id="group-emergence",
+        created_summary=(
+            "The Chat model's selected Agents emerged after Chat completion"
+            if created_group
+            else "A new model-selected emergent GroupRun followed Chat completion"
+        ),
+    )
+    events = ExecutionEventWriter(db)
+    for membership in joined:
+        await events.append(
+            session_id=session.id,
+            run_id=group_run.run_id,
+            group_session_id=group.id,
+            group_run_id=group_run.id,
+            event_type="group.membership_joined",
+            event_dedupe_key=f"{event_key}:membership:joined:{membership.id}",
+            actor_type="service",
+            actor_id="group-emergence",
+            entity_type="group_membership",
+            entity_id=membership.id,
+            entity_version=membership.version,
+            visibility="group",
+            summary="Model-selected Agent joined the emergent Group",
+            payload={
+                "agent_id": membership.agent_id,
+                "authorization_source": membership.authorization_source,
+            },
+            correlation_id=group_run.run_id,
+        )
+    for membership in removed:
+        await events.append(
+            session_id=session.id,
+            run_id=group_run.run_id,
+            group_session_id=group.id,
+            group_run_id=group_run.id,
+            event_type="group.membership_removed",
+            event_dedupe_key=f"{event_key}:membership:removed:{membership.id}",
+            actor_type="service",
+            actor_id="group-emergence",
+            entity_type="group_membership",
+            entity_id=membership.id,
+            entity_version=membership.version,
+            visibility="group",
+            summary="Agent left active membership after Chat model reselection",
+            payload={"agent_id": membership.agent_id},
+            correlation_id=group_run.run_id,
+        )
+    return group, group_run
+
+
 async def create_followup_group_run(
     db, *, session: UserSession, group: GroupSession, account_id: str,
     content: str, recipient_agent_id: str | None,
@@ -467,9 +938,13 @@ async def create_followup_group_run(
         GroupMembership.status == "joined",
         GroupMembership.ended_at.is_(None),
     ).order_by(GroupMembership.joined_at, GroupMembership.id)))
-    if len(memberships) != 3:
+    required_count = 3 if group.formation_mode == "manual_selected" else 2
+    if len(memberships) < required_count or (
+        group.formation_mode == "manual_selected" and len(memberships) != 3
+    ):
         raise GroupPolicyError(
-            "invalid_group_members", "Phase-one Group requires exactly three members"
+            "invalid_group_members",
+            "Group no longer has enough active members for a new GroupRun",
         )
     resolved = await _resolve_group_members(
         db, account_id=account_id,
@@ -483,13 +958,20 @@ async def create_followup_group_run(
         )) or 0)
         if count != len(set(reference_run_ids)):
             raise GroupPolicyError("invalid_group_run_reference", "Invalid GroupRun reference")
-    return await _create_native_group_run_graph(
+    group_run = await _create_native_group_run_graph(
         db, session=session, group=group, memberships=memberships,
         content=content, recipient_agent_id=recipient_agent_id,
         reporter_agent_id=reporter_agent_id,
         resolved_members=resolved, shared_context_refs=list(dict.fromkeys(reference_run_ids)),
         event_key=event_key,
     )
+    for referenced_id in dict.fromkeys(reference_run_ids):
+        db.add(GroupRunReference(
+            group_run_id=group_run.id,
+            referenced_group_run_id=referenced_id,
+        ))
+    await db.flush()
+    return group_run
 
 
 async def create_user_group_message(
@@ -557,7 +1039,10 @@ async def create_user_group_message(
         event_type="group.message_created", event_dedupe_key=f"{event_key}:message",
         actor_type="user", actor_id=session.user_id,
         entity_type="message", entity_id=message.id,
-        visibility="direct", recipients=(EventRecipient("agent", target_id),),
+        visibility="direct", recipients=(
+            EventRecipient("agent", target_id),
+            EventRecipient("user_identity", session.user_id),
+        ),
         summary="User directly addressed a Group member",
         payload={"message_id": message.id, "recipient_agent_id": target_id},
         correlation_id=run.id,
@@ -593,6 +1078,11 @@ async def send_agent_group_message(
         raise GroupPolicyError("domain_validation", "direct message requires recipient_agent_id")
     if visibility == "group" and recipient_agent_id:
         raise GroupPolicyError("domain_validation", "group message cannot set a recipient")
+    if visibility == "group" and len(content) > 800:
+        raise GroupPolicyError(
+            "domain_validation",
+            "group history notes must be concise (at most 800 characters)",
+        )
     run = await db.get(Run, run_id)
     work = await db.get(WorkItem, work_item_id)
     if run is None or work is None or run.mode != "group" or not work.group_run_id:
@@ -649,7 +1139,11 @@ async def send_agent_group_message(
     db.add(message)
     await db.flush()
     recipients = (
-        (EventRecipient("agent", recipient_agent_id),) if recipient_agent_id else ()
+        (
+            EventRecipient("agent", recipient_agent_id),
+            EventRecipient("user_identity", run.user_id),
+        )
+        if recipient_agent_id else ()
     )
     created = await ExecutionEventWriter(db).append(
         session_id=run.session_id, run_id=run.id,

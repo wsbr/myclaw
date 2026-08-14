@@ -23,7 +23,7 @@ interface Props {
 const modeCopy: Record<Mode, { label: string; hint: string }> = {
   chat: { label: 'Chat', hint: '直接讨论并执行' },
   plan: { label: 'Plan', hint: '先调查和对齐，再批准实施' },
-  group: { label: 'Group', hint: '向协作组派发工作' },
+  group: { label: 'Group', hint: 'Chat 后由模型按诉求选择 Group Agent 涌现协作' },
 }
 
 export default function SessionComposer({
@@ -35,7 +35,7 @@ export default function SessionComposer({
       ? '继续讨论或修改方向，例如：先验证迁移回滚，再实现 UI'
       : planEntered ? '当前 Plan 正在实施或已完成；退出 Plan 后可以继续对话' : '描述需要只读调查与规划的长任务目标')
     : mode === 'group'
-      ? (groupReady ? '发送给 Reporter 或所选成员' : '请先从 Agent Network 选择成员建立 Group')
+      ? (groupReady ? '发送给 Reporter 或当前 GroupRun 成员' : '先完成一次正常 Chat，Group 将自动涌现')
       : '输入消息；Enter 发送，Shift+Enter 换行'
   const buttonLabel = mode === 'plan'
     ? (planEntered && hasPlan && planCanRevise ? '修改方向' : planEntered ? '请先退出 Plan' : '进入只读 Plan')

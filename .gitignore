@@ -21,6 +21,7 @@ venv/
 .coverage
 .coverage.*
 .mypy_cache/
+.ruff_cache/
 
 # Node
 node_modules/
@@ -49,3 +50,7 @@ redis_data/
 test/results/
 test/test-results/
 test/playwright-results/
+
+# Generated local state
+.env.tmp.*
+celerybeat-schedule*

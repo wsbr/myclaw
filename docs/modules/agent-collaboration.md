@@ -57,6 +57,8 @@ Group 协作不要求所有消息经过入口 Agent。
 | 上下文 | 本次请求的最小引用 | 额外允许读取 Group 授权共享事实 |
 | 生命周期 | Invocation 终结后关系结束 | Membership 可以跨多个 Run 和 Invocation 持续 |
 
+执行协议按模式区分：Chat/Plan 的 Invocation 是 awaited delegation，调用方进入持久等待并通过 Provider Tool continuation 获得结果；Group 的 Invocation 是 async handoff，当前 Tool Call 只得到派发确认，请求与结果分别成为 human 可见的定向 `@` 消息，结果到达时为接收者创建新的 Turn。两者共享同一持久 AgentInvocation 内核，不共享同步返回协议。
+
 Plan 或 WorkingPlan 不直接执行 Agent 调用。模型根据计划和观察调用统一的 `invoke_agent`，Runtime 才创建 AgentInvocation；Group 只是给同一调用增加 Membership、visibility 和 return route，不产生第二套 `group_call_agent`。
 
 ## AgentInvocation
@@ -78,7 +80,7 @@ group_session_id / membership_id?
 return_route
 ```
 
-普通 Chat/Plan 委派在创建 Invocation 时解析目标 Agent 当前有效发布版本；Group 内调用使用当前 GroupRunSnapshot 中固定的目标版本。`return_route` 由可信调用位置生成，至少区分返回 Caller WorkItem、写入 Group direct 记录和写入 Group shared 记录，模型文本不能改写路由。
+普通 Chat/Plan 委派在创建 Invocation 时解析目标 Agent 当前有效发布版本；Group 内调用使用当前 GroupRunSnapshot 中固定的目标版本。`return_route` 由可信调用位置生成：Chat/Plan 返回 Caller Tool continuation，Group 返回 human 可见的 direct 消息并触发新的接收 Turn；模型文本不能改写路由。
 
 模型主要通过自然语言说明目标。平台补充 Run 创建时固定的 `tenant_id + account_id`、Session、Run、权限、版本、调用链和幂等键；模型不能覆盖可信字段。
 
@@ -122,9 +124,10 @@ original principal
 
 AgentInvocation 是持久业务对象：
 
-- 调用方需要结果时进入 `waiting_agent`；
+- Chat/Plan 调用方需要结果时，Run 与 WorkItem 进入 `waiting_agent`；
+- Group 调用方结束当前 Turn，其 WorkItem 在后台保持 `waiting_agent`，Group Run 仍为 `active`；
 - 目标 Agent在自己的 WorkItem/Runner 中执行；
-- 成功、失败、拒绝、取消和超时都恢复调用方；
+- Chat/Plan 的终态结果恢复 Tool continuation；Group 的终态结果写定向消息并创建新的调用方 Turn；
 - 技术重试不创建第二个业务 Invocation；
 - 迟到结果写事件，但不复活终态父 Run；
 - 循环、深度、fan-out、Token 和费用受累计预算限制。

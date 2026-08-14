@@ -33,6 +33,9 @@ class HistorySummary(Base, TimestampMixin, VersionMixin):
     session_id: Mapped[str] = mapped_column(String(36), ForeignKey("user_session.id"), nullable=False)
     scope_type: Mapped[str] = mapped_column(String(20), nullable=False)
     group_session_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("group_session.id"))
+    group_run_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("group_run.id")
+    )
     group_membership_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("group_membership.id")
     )

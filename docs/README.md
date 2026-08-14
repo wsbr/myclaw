@@ -53,6 +53,11 @@
 - [第一阶段 UAT 运行手册](operations/phase-one-runbook.md)
 - [企业生产就绪要求](operations/production-readiness.md)
 - [企业生产运行手册](operations/production-runbook.md)
+- [开源首发封板清单](operations/open-source-release-checklist.md)
+
+## 演示
+
+- [涌现式 Group 演示](demo/emergent-group.md)
 
 ## 验收报告
 

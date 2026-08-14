@@ -18,6 +18,20 @@ async def enqueue_run_terminal_followups(db, *, run, runner, completion_event) -
     )
     if runner is None:
         return
+    if run.mode == "chat" and run.status == "completed":
+        await OutboxWriter(db).enqueue(
+            topic="runtime.control",
+            action="emerge_group_after_chat",
+            aggregate_type="run",
+            aggregate_id=run.id,
+            partition_key=run.session_id,
+            dedupe_key=f"transition:run:{run.id}:emerge-group",
+            payload_ref={
+                "source_run_id": run.id,
+                "source_runner_id": runner.id,
+                "completion_event_id": completion_event.id,
+            },
+        )
     version = await db.get(AgentAssemblyVersion, runner.agent_version_id)
     policy = await db.get(
         PolicyDefinition, version.memory_write_policy_id,

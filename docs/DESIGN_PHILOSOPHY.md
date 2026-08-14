@@ -62,11 +62,11 @@ Working Plan 必须允许模型根据 Tool 结果、失败、用户反馈和协�
 
 ## 6. Group 是工作网中的逻辑关系
 
-Group 成员来自 Enterprise Agent Network。用户或 Agent 根据目标发现、选择和邀请真实 Agent；Group 不需要角色模板，也不在内部复制 Agent。
+Group 成员来自 Enterprise Agent Network。正常 Chat 会把治理过滤后的 Group Agent `id/name/description` 候选目录作为数据交给模型，模型按用户诉求选择最小必要成员；Chat 完成后只让该选择涌现为 GroupRun。Group 不需要角色模板，也不在内部复制 Agent。
 
 Group 保存的是 Membership、Message、Invocation、共享事实和权限边界，不要求成员进程始终在线。成员收到需要处理的消息或调用时，平台才为相应 WorkItem 调度 Runner；等待或空闲时可以没有任何 Runner。
 
-第一阶段可以为了 UAT 复现而由用户从工作网中指定产品、开发、测试三个 Agent，并固定本次 Run 的成员快照。固定的是一次实验的参与事实，不是 Group 的终局本体。
+GroupSession 的未来成员可以在后续 Chat 重新发现；每个 GroupRun 固定当时的成员和 AgentVersion 快照。固定的是一次运行的参与事实，不是 Group 的永久本体。
 
 长期允许成员加入、退出、替换和重组。平台记录成员事件、共享范围、权限和成本；是否需要用户确认由当前 Collaboration Policy 决定，而不是由固定模板决定。
 

@@ -158,9 +158,9 @@ Group 只有一个共享 GroupSession，不为每个成员复制一份用户会�
 
 Context、History 和 Memory Policy 只能在上述可见范围内裁剪、召回和组装，不能借助策略读取其他 Agent 的对话或工作。
 
-其他 Agent 之间标记为 `group` 的消息、SharedTask、调用、验证结果、分歧、结果和 Artifact 属于 Group 共享记录。它们不会自动进入当前 Agent Prompt，必须通过显式装配且可重复调用的 `search_group_history` Platform Tool 获取。查询结果作为普通 ToolInvocation 结果进入当前 Runner，并保留来源、sequence、visibility 与 checksum。
+其他 Agent 之间的 human 可见定向 `@` 委托/交付、标记为 `group` 的精炼留痕、SharedTask、调用、验证结果、分歧、结果和 Artifact 属于可主动查询的 Group 共享记录。未参与成员不会收到通知，这些记录也不会自动进入其 Prompt；当前 Group Runtime 会为所有有效成员注入只读、可重复调用的 `search_group_history` 协调能力。查询结果进入当前 Runner，并保留来源、sequence、visibility 与 checksum。`direct` 只扩大群聊记录的主动检索范围，不会暴露其他 Agent 的私有 Runtime 事件、Prompt、Tool 数据或 Memory。
 
-GroupTranscriptDocument 是共享 Message 与 ExecutionEvent 的派生只读文档或索引，不是上下文策略的隐式数据源。Group 不自动添加查询 Tool；启用 Group 时管理面可以提示能力缺失，但不能替 Agent 装配。
+GroupTranscriptDocument 是共享 Message 与 ExecutionEvent 的派生只读文档或索引，不是上下文策略的隐式数据源。`search_group_history` 是 Group 模式的核心只读 Runtime Coordination Tool，不依赖 AgentVersion 的可选 Tool 装配；Runtime 仍须按当前 Membership 和 GroupSession 逐次授权。
 
 `history.summary_recent` 的 Group 摘要也必须按 `group_id + agent_id` 分别维护，不能生成一份全群摘要后自动注入所有 Agent。通过 `search_group_history` 得到的结果只进入当前 Runner 的可见上下文，不自动写入长期记忆。
 

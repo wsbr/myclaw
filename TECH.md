@@ -10,7 +10,7 @@ MyClaw 的核心是一套模型驱动、可以持久运行和安全行动的 Age
 Experience
 ├── Chat view
 ├── Plan permission mode + WorkingPlan view
-└── Group view + Agent network picker
+└── Group view + Agent network directory
 
 Agent Runtime
 ├── Unified Agent Loop
@@ -74,7 +74,7 @@ Runtime 让模型决定如何理解、计划、行动和协作；Kernel 只负�
 | `ToolInvocation` / `ToolAttempt` | 一次语义行动与其物理执行尝试 |
 | `AgentInvocation` | Agent 间定向工作请求、等待和结果 |
 | `Clarification` / `Approval` | 可恢复的人类输入和高影响确认 |
-| `GroupSession` / `GroupMembership` | 从工作网选出的 Agent 协作空间和成员事件 |
+| `GroupSession` / `GroupMembership` | Chat 模型从治理后候选目录按诉求选择、Chat 后形成的 Agent 协作空间和成员事件 |
 | `GroupRun` | Group 中一次目标的协作聚合；与 Run 一对一且不复制状态 |
 | `Workspace` / `Artifact` | 强制分区的运行文件空间和不可变正式交付快照 |
 | `ExecutionEvent` / `RunnerCheckpoint` | 可靠时间线和恢复快照 |
@@ -149,12 +149,9 @@ AgentInvocation / Message
 
 平台内没有“每个 Agent 一个 IP/容器”的要求，也不允许 Agent 绕过 CollaborationService 直接互调进程。`agent_id` 是逻辑地址，Runner 所在 Worker 只是临时执行位置。
 
-AgentVersion 发布后生成 AgentCard 并进入可见范围内的工作网。Group 的成员来源只有两种：
+AgentVersion 发布后生成 AgentCard 并进入可见范围内的工作网。正常 Chat 的 root Runner 冻结当前 `group_enabled`、可见、可用、可调用且治理允许的 Agent `id/name/description` 目录，模型按用户诉求调用 `select_group_members` 固定最小必要集合。Chat Run 完成时，同一结算事务写入幂等 Outbox；Runtime Control Worker 复核所选 Agent 的实时治理状态后创建涌现式 GroupRun。旧手选入口仅作兼容。
 
-- 用户从工作网直接选择；
-- 当前 Agent 搜索候选并发起邀请或加入建议。
-
-Group 不使用角色模板。第一阶段用户选择三个确定 Agent，创建：
+Group 不使用角色模板。自动涌现创建或复用：
 
 ```text
 GroupSession
@@ -165,7 +162,7 @@ GroupSession
 └── GroupRun[]
 ```
 
-`GroupRunSnapshot` 固定本次使用的成员 AgentVersion、共享范围、权限和预算，保证 UAT 可复现。GroupRun 与 Run 一对一，Run 是 lifecycle、等待和终态的唯一事实源。终局动态加入使用同一 Membership 事件模型；是否允许本 Run 立即生效由 Collaboration Policy 决定，不需要 Charter 模板或 Formation JSON。
+GroupSession 以 `dynamic_future` 接受后续 Chat 的成员重算；`GroupRunSnapshot` 仍固定本次使用的成员 AgentVersion、共享范围、权限和预算，保证 UAT 可复现。GroupRun 与 Run 一对一，Run 是 lifecycle、等待和终态的唯一事实源，不需要 Charter 模板或 Formation JSON。
 
 Group 成员可以直接发消息、调用其他成员、更新共享任务和发布 Artifact。`initiator_agent_id` 只是未指定接收者时的默认对话锚点，没有 Supervisor 权限。每轮 `reporter_agent_id` 只承担结构空闲后的最终汇总责任；Coordinator 用持久 summary epoch 幂等唤醒它，汇总提交且二次确认没有 pending work 后才完成唯一 Run。
 
@@ -215,7 +212,7 @@ Snapshot 记录 assembled、effective 和 denied capabilities 及 reason code。
 Provider 最终消息且没有 Tool Call 时，当前 Turn 自然停止。Runtime 根据调用位置路由消息：
 
 - 根 Run：交付用户；
-- AgentInvocation：完成本次协作并恢复调用方；
+- AgentInvocation：Chat/Plan 通过 Tool continuation 恢复调用方；Group 写定向交付消息并触发新的调用方 Turn；
 - Group 成员：写入定向或共享消息；
 - Plan 只读阶段：生成或更新方案并等待用户批准。
 

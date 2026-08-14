@@ -172,10 +172,6 @@ class OpenAILLM(BaseLLM):
         next_item_index = 0
         text_item_index = None
         async for chunk in await self.client.chat.completions.create(**kwargs):
-            # Any SDK chunk is response payload. This marker reaches
-            # ModelAdapter before buffered Tool JSON is complete, preventing a
-            # transport retry after a Provider has begun an action response.
-            yield LLMChunk(type="transport_payload")
             response_model = getattr(chunk, "model", None) or response_model
             provider_request_id = getattr(chunk, "id", None) or provider_request_id
             if chunk.usage:
@@ -194,6 +190,12 @@ class OpenAILLM(BaseLLM):
                     item_index=text_item_index,
                 )
             if delta and delta.tool_calls:
+                # Tool arguments may span several wire chunks and are exposed
+                # only after valid JSON has been assembled. Fence retries as
+                # soon as that actionable payload begins. Role-only, reasoning,
+                # usage and other metadata chunks deliberately do not fence a
+                # safe transport retry.
+                yield LLMChunk(type="transport_payload")
                 for tc_delta in delta.tool_calls:
                     if tc_delta.index not in tool_call_acc:
                         tool_call_acc[tc_delta.index] = {

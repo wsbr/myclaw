@@ -10,11 +10,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.agent_v1 import AgentBlueprint, AgentVersionBinding
 from app.models.common import utcnow, uuid7
+from app.models.foundation import ExecutionEvent
 from app.models.group_v1 import GroupMembership, GroupRun, GroupRunMember
-from app.models.runtime_v1 import AgentInvocation, DurableRunner, Run, ToolInvocation, WorkItem
-from app.persistence.reliable_writes import ExecutionEventWriter, OutboxWriter
+from app.models.runtime_v1 import (
+    AgentInvocation,
+    DurableRunner,
+    Message,
+    Run,
+    ToolInvocation,
+    WorkItem,
+)
+from app.persistence.reliable_writes import EventRecipient, ExecutionEventWriter, OutboxWriter
 from app.persistence.runtime_graph import persist_new_work_runner
 from app.services.agent_directory_service import resolve_callable_agent
+from app.services.group_collaboration_service import _next_group_message_sequence
 
 
 class AgentInvocationRejected(ValueError):
@@ -123,6 +132,16 @@ async def dispatch_agent_invocation(
         raise AgentInvocationRejected("an Agent cannot invoke itself")
     if run.mode in {"chat", "plan"} and chain:
         raise AgentInvocationRejected("sub Agents cannot invoke another Agent in Chat or Plan")
+    if run.mode == "chat":
+        selected_group = await db.scalar(select(ExecutionEvent.id).where(
+            ExecutionEvent.session_id == run.session_id,
+            ExecutionEvent.event_dedupe_key == f"group-emergence-selection:{run.id}",
+        ).limit(1))
+        if selected_group is not None:
+            raise AgentInvocationRejected(
+                "This Chat already selected a post-Chat Group; dispatch work from the emerged Group instead",
+                "agent_invocation_after_group_selection",
+            )
     if run.mode == "group" and (len(chain) >= 8 or target_agent_id in chain):
         raise AgentInvocationRejected("Group AgentInvocation cycle or maximum depth detected")
     target = await db.get(AgentBlueprint, target_agent_id)
@@ -218,6 +237,7 @@ async def dispatch_agent_invocation(
         return existing
 
     invocation_id, target_work_id, target_runner_id = uuid7(), uuid7(), uuid7()
+    request_message_id = uuid7() if run.mode == "group" else None
     target_work = WorkItem(
         id=target_work_id, run_id=run.id, session_id=run.session_id, user_id=run.user_id,
         mode=run.mode, owner_agent_id=target_agent_id, agent_version_id=target_version_id,
@@ -237,7 +257,14 @@ async def dispatch_agent_invocation(
                         "context": arguments.get("input") or {},
                         "group_session_id": group_run.group_session_id if run.mode == "group" else None,
                         "group_run_id": group_run.id if run.mode == "group" else None,
-                        "group_membership_id": target_group_scope_id if run.mode == "group" else None},
+                        "group_membership_id": target_group_scope_id if run.mode == "group" else None,
+                        "source_message_id": request_message_id},
+    )
+    handoff_kind = (
+        "ownership_transfer"
+        if run.mode == "group" and caller_work.id == run.root_work_item_id
+        and caller_work.parent_work_item_id is None
+        else "subtask"
     )
     agent_invocation = AgentInvocation(
         id=invocation_id, run_id=run.id,
@@ -245,14 +272,18 @@ async def dispatch_agent_invocation(
         caller_agent_id=caller_runner.agent_id,
         target_work_item_id=target_work.id, target_agent_id=target_agent_id,
         target_agent_version_id=target_version_id, mode=run.mode,
-        return_route="caller", request_text=request_text,
+        return_route="group" if run.mode == "group" else "caller",
+        request_text=request_text,
         context_snapshot={"tool_invocation_id": tool_invocation.id if tool_invocation else None,
                           "provider_call_id": provider_call_id,
                           "input": arguments.get("input") or {},
+                          "dispatch_mode": "async_handoff" if run.mode == "group" else "awaited",
+                          "handoff_kind": handoff_kind,
                           "group_session_id": group_run.group_session_id if run.mode == "group" else None,
                           "group_run_id": group_run.id if run.mode == "group" else None,
                           "source_group_membership_id": caller_group_scope_id if run.mode == "group" else None,
-                          "target_group_membership_id": target_group_scope_id if run.mode == "group" else None},
+                          "target_group_membership_id": target_group_scope_id if run.mode == "group" else None,
+                          "request_message_id": request_message_id},
         status="queued", batch_key=caller_runner.id,
         idempotency_key=resolved_operation_key, operation_key=resolved_operation_key,
         request_hash=_request_hash(
@@ -277,6 +308,36 @@ async def dispatch_agent_invocation(
         tool_invocation.version += 1
     await persist_new_work_runner(db, target_work, target_runner)
     db.add(agent_invocation)
+    request_message = None
+    if run.mode == "group":
+        # AgentInvocation remains the scheduling authority. This Message is
+        # its human-visible directed @ projection; it must not create another
+        # Runner or a second delivery path.
+        request_message = Message(
+            id=request_message_id,
+            session_id=run.session_id,
+            user_id=run.user_id,
+            scope_type="group",
+            group_session_id=group_run.group_session_id,
+            group_run_id=group_run.id,
+            sender_type="agent",
+            sender_agent_id=caller_runner.agent_id,
+            recipient_type="agent",
+            recipient_agent_id=target_agent_id,
+            recipient_membership_id=target_group_scope_id,
+            visibility="direct",
+            role="assistant",
+            content=request_text,
+            content_format="markdown",
+            status="committed",
+            run_id=run.id,
+            work_item_id=caller_work.id,
+            operation_key=f"agent_invocation:{invocation_id}:request",
+            sequence_no=await _next_group_message_sequence(
+                db, group_run.group_session_id,
+            ),
+        )
+        db.add(request_message)
     await db.flush()
     events = ExecutionEventWriter(db)
     created = await events.append(
@@ -285,9 +346,44 @@ async def dispatch_agent_invocation(
         actor_type="agent", actor_id=caller_runner.agent_id, entity_type="agent_invocation",
         entity_id=agent_invocation.id, entity_version=agent_invocation.version, visibility="user",
         summary="Agent collaboration request created",
-        payload={"target_agent_id": target_agent_id},
+        payload={
+            "target_agent_id": target_agent_id,
+            "dispatch_mode": (
+                "async_handoff" if run.mode == "group" else "awaited"
+            ),
+            "handoff_kind": handoff_kind,
+        },
         correlation_id=run.id,
     )
+    request_event = None
+    if request_message is not None:
+        request_event = await events.append(
+            session_id=run.session_id,
+            run_id=run.id,
+            group_session_id=group_run.group_session_id,
+            group_run_id=group_run.id,
+            event_type="group.message_created",
+            event_dedupe_key=f"agent_invocation:{agent_invocation.id}:request-message",
+            actor_type="agent",
+            actor_id=caller_runner.agent_id,
+            entity_type="message",
+            entity_id=request_message.id,
+            visibility="direct",
+            recipients=(
+                EventRecipient("agent", target_agent_id),
+                EventRecipient("user_identity", run.user_id),
+            ),
+            summary="Agent delegated work with a directed @ message",
+            payload={
+                "message_id": request_message.id,
+                "agent_invocation_id": agent_invocation.id,
+                "sender_agent_id": caller_runner.agent_id,
+                "recipient_agent_id": target_agent_id,
+            },
+            correlation_id=run.id,
+            caused_by_event_id=created.id,
+        )
+        request_message.caused_by_event_id = request_event.id
     queued = await events.append(
         session_id=run.session_id, run_id=run.id, event_type="runner.queued",
         event_dedupe_key=f"transition:runner:{target_runner.id}:0:1:agent_invocation",
@@ -295,7 +391,7 @@ async def dispatch_agent_invocation(
         entity_id=target_runner.id, entity_version=target_runner.version, visibility="private",
         private_owner=("runner", target_runner.id), summary="Invoked Agent Runner queued",
         payload={"agent_invocation_id": agent_invocation.id}, correlation_id=run.id,
-        caused_by_event_id=created.id,
+        caused_by_event_id=request_event.id if request_event else created.id,
     )
     await OutboxWriter(db).enqueue(
         topic="runtime.runner", action="execute", aggregate_type="runner", aggregate_id=target_runner.id,

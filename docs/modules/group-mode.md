@@ -8,7 +8,7 @@ Group 是工作网中多个完整 Agent 围绕当前目标形成的逻辑协作�
 
 ```text
 Enterprise Agent Network
-        ↓ 选择 / 搜索 / 邀请
+        ↓ Chat 模型按用户诉求语义选员
 GroupSession
 ├── Members
 ├── Messages
@@ -26,10 +26,9 @@ GroupSession、Membership 和共享记录可以长期存在而没有任何 Runne
 
 所有成员必须是工作网中可发现或可直接寻址的真实 Agent。第一阶段工作网直接查询 MyClaw 数据库中的 AgentCard 投影；Group 不在内部创建 Agent 副本，也不根据“产品经理”“开发”“测试”等角色名称临时生成 Prompt Agent。
 
-成员进入 Group 有两条路径：
+当前产品路径只有一个默认入口：用户先进行正常 Chat；root Runner 按当前身份边界发现所有 `group_enabled`、已发布、可见、可用、可调用且 `group_allowed` 的 Agent 作为完整候选目录，由模型按用户诉求选择必要协作成员并保留 Chat 会话锚点。Chat 的用户消息和首轮回答提交成功后，可靠 Outbox 才自动形成或复用 GroupSession、创建新的 GroupRun。该过程不回滚已经成功的 Chat。
 
-1. 用户从工作网直接选择 Agent；
-2. 当前 Agent 搜索 AgentCard，并提出或执行邀请。
+旧版 `manual_selected` Group 及创建 API 仅为历史记录和兼容性保留，不再是 Web 主入口。后续每次 Chat 由模型按当次诉求重新选择未来成员；成员变化写入 joined/removed 事件，本次 GroupRun 仍冻结当时的成员与 AgentVersion 快照。
 
 是否允许自动邀请由 Collaboration Policy 决定。`group_enabled` 只表示可以成为候选；发现不等于授权，加入仍需检查原始用户身份、visibility、发布版本、Agent 可用性、共享范围、权限、预算和企业策略。
 
@@ -53,21 +52,15 @@ Group 成立只需要：
 
 ## 建立 Group
 
-### 用户直接建组
+### Chat 后自动涌现
 
-用户选择两个或多个工作网 Agent，输入目标并确认共享范围。平台创建 GroupSession、初始 Membership 和第一条用户消息，随后由成员自主响应。
+正常 Chat 的 root Runner 先冻结治理后的 Group 候选目录，仅把每个 Agent 的 `agent_id/name/description` 作为数据放入提示词。当前 Chat Agent 在自身满足候选治理时固定保留为用户的会话锚点；模型根据本次用户诉求调用 `select_group_members`，从完整目录中选择围绕该锚点的最小必要协作成员，而不是默认选择全部。Chat Run 完成后，平台异步创建 `emerge_group_after_chat` 控制命令；命令以源 Chat Run 幂等，复核所选 Agent 的实时可见性、可调用性、Group 治理和 published version，再固定本次 GroupRun 的成员快照。
 
-### Agent 提议建组
+`select_group_members` 与当前 Chat 内的 `invoke_agent` 互斥：一旦选定后续 Group，Chat Agent 不得提前调用同一批成员并重复执行。Group 建立后，入口 Agent 只作为用户的会话锚点，从冻结成员的 `name/description` 语义选择一个最适合的首个主责任人，异步 handoff 主任务并立即向用户确认“项目组已成立、任务已交给谁”；它不等待主责任人在同一 Turn 返回，也不默认把任务 fan-out 给所有成员。
 
-当前 Agent 判断直接委派不足时，可以说明：
+模型没有选出至少两个合适成员、完整候选目录超过部署安全上限，或成员在 Chat 完成前失去资格时，系统写 `group.emergence_skipped`，不从截断目录猜测，也不静默替补其他 Agent。
 
-- 为什么需要多 Agent 直接协作；
-- 建议邀请哪些 Agent；
-- 每个候选的 AgentCard 摘要；
-- 准备共享哪些上下文；
-- 预计成本、权限和风险。
-
-第一阶段由用户确认后创建 Group。未来命中预授权 Collaboration Policy 时可以自动建立，但仍写入相同成员和授权事件。
+模型的结构化决定先写 `group.emergence_selected`；第一次形成写 `group.emerged`，同一 Session 的后续 Chat 写 `group.run_emerged`。Web 收到形成事件后切到对应 GroupRun，但刷新或离开页面不影响后台执行。
 
 建立 Group 不要求模型输出完整 Formation JSON，不要求预置初始 WorkItem，也不要求用户编辑协作边。
 
@@ -116,7 +109,9 @@ GroupRun 只保存协作聚合事实：`group_session_id`、唯一 `run_id`、�
 private | direct | group | user
 ```
 
-只有接收者因定向消息被唤醒。Group 消息对成员可查询，但不会把全文自动注入每个 Agent 的 Prompt。
+`direct` 是群聊内 human 可见的定向 `@` 消息，只有明确接收者会因新定向消息被唤醒；未参与该对话的成员不会被通知，也不会自动获得正文。`AgentInvocation` 在群聊里会自动投影为“调用方 `@` 目标方”的委托消息和“目标方 `@` 调用方”的交付消息，不需要目标方再重复广播一份。Group 内所有 `invoke_agent` 都是异步 handoff：调用只返回已派发确认，调用方结束当前 Turn；目标结果作为新的定向消息唤醒调用方的新 Turn，而不是伪装成原 Tool Call 的同步 Tool Result。
+
+`group` 不是向所有成员推送的广播，只是群聊的精炼工作留痕。成员只用它记录总结性的进度、重要分歧、风险和结果；它不唤醒任何成员，也不自动注入其他成员的 Prompt。其他成员要了解未参与的定向交付过程或群留痕，必须主动调用 `search_group_history`。用户作为 Group 的 human owner 可以在 Group 消息时间线中查看这些持久化记录。
 
 ### SharedTask（可选）
 
@@ -141,7 +136,7 @@ SharedTask 是 Agent 社会的协作白板，不是平台工作流：
 
 ### AgentInvocation
 
-成员可以向其他成员发送有边界的工作请求。目标 Agent 可以接受、追问、反提议、拒绝、失败或返回结果。调用与普通消息分开，因为它具有等待、预算、版本、权限和恢复语义。
+成员可以向其他成员发送有边界的工作请求。目标 Agent 可以接受、追问、反提议、拒绝、失败或返回结果。调用与普通消息分开，因为它具有 handoff、预算、版本、权限和恢复语义。
 
 它和 Chat/Plan 委派使用同一 AgentInvocation、调度器和 Agent Loop。Group 只增加 `group_session_id`、Membership 校验、共享上下文范围、消息 visibility 和结果路由。
 
@@ -171,7 +166,9 @@ SharedTask 是 Agent 社会的协作白板，不是平台工作流：
 - WorkItem、预算消耗和按需调度的短生命周期 Runner；
 - 专业判断与最终消息。
 
-成员通过消息、AgentInvocation、SharedTask、Artifact 和共享事实协作。平台不预先规定谁先调用谁、必须返工几次或谁有最终专业权威。WorkItem 在有工作或等待时持久存在；Runner 只在成员实际推进工作时短暂存在。
+成员通过定向 `@` 消息、AgentInvocation、精炼群留痕、SharedTask、Artifact 和共享事实协作。平台不预先规定谁先调用谁、必须返工几次或谁有最终专业权威。WorkItem 在有工作或等待时持久存在；Runner 只在成员实际推进工作时短暂存在。
+
+每个 Group Turn 都获得冻结成员的 `agent_id/name/description` 数据目录，由当前模型按任务语义决定下一次 handoff，而不是把所有成员拉成一张预制执行图。入口锚点到首个主责任人记为 ownership transfer；主责任人完成自己的部分后，可以把需要核验的子任务异步 handoff 给另一成员。只要当前 WorkItem 还有未整合的下游结果，它就保持 `waiting_agent`，不能向上游误交付为完成；下游定向结果到达后，Runtime 创建新 Runner Turn，当前成员整合后再向自己的调用方交付。
 
 ## 用户与 Group 交互
 
@@ -212,7 +209,7 @@ Collaboration Policy 可以逐步开放：
 3. `network_policy`：在组织、数据、成本和风险规则内自主发现和组队；
 4. `federated`：跨组织 Agent 在联邦身份和授权下协作。
 
-第一阶段使用 `fixed_for_run`：用户从工作网选择产品、开发、测试三个 Agent 后，本轮不加入第四个成员。模型仍可以搜索和提出候选，平台形成可审计拒绝或等待，不需要创建新的 Charter 或 GroupSession 才能表达未来能力。
+GroupSession 使用 `dynamic_future`：每次 Chat 后可以按最新治理结果加入或移除未来成员。每个 GroupRun 始终使用 `fixed_for_run` 快照，本轮不热插拔；模型邀请图外 Agent 时仍形成可审计拒绝或等待。
 
 ## 计划和协调
 
@@ -258,14 +255,14 @@ GroupRunSnapshot 固定每个参与成员本轮实际使用的 AgentVersion。�
 
 终态 GroupRun 不复活。后续消息创建新 Run 并引用历史。关闭 Group 不回滚已经发生的副作用。
 
-## 第一期固定开发组 UAT
+## 涌现式 Group UAT
 
 第一阶段路径是：
 
 1. 产品、开发、测试 Agent 各自发布到工作网；
-2. 用户从工作网明确选择这三个 Agent；
-3. 平台创建 GroupSession 和 `fixed_for_run` Membership 快照；
-4. 用户发送容量风险计算器目标；
+2. 用户先向入口 Agent 发送容量风险计算器目标并得到正常 Chat 回答；
+3. Chat 模型根据 Agent 名称与描述选出产品、开发、测试等必要成员；平台复核后创建 `dynamic_future` GroupSession 和 `fixed_for_run` GroupRun 快照；
+4. UI 根据 `group.emerged` 自动进入本次 GroupRun；
 5. 成员自主讨论、创建或认领工作、调用 Tool 和互相复核；
 6. 用户可以直接回答任一成员或要求反向复核；
 7. 实际消息和 AgentInvocation 形成 Interaction Graph；

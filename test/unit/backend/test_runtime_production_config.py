@@ -62,6 +62,8 @@ def test_maintenance_heartbeat_must_be_shorter_than_command_lease():
         ("database_pool_size", 0),
         ("database_max_overflow", -1),
         ("runtime_worker_poll_seconds", 0),
+        ("runtime_worker_concurrency", 0),
+        ("runtime_provider_pool_max_entries", 0),
         ("runtime_outbox_claim_lease_seconds", 0),
         ("runtime_runner_lease_seconds", 0),
         ("runtime_runner_heartbeat_seconds", 0),

@@ -282,6 +282,72 @@ def real_llm_world(phase_api: MyClawAPI):
 
 
 @pytest.fixture(scope="session")
+def emergent_group_world(phase_api: MyClawAPI, real_llm_world: dict):
+    """Three Group-enabled Agents using only the real primary model."""
+
+    api = phase_api
+    suffix = uuid.uuid4().hex[:10]
+    common = {
+        "model_id": real_llm_world["model"]["id"],
+        "sandbox_profile_id": real_llm_world["sandbox"]["id"],
+        "context_policy_id": real_llm_world["policies"]["context.standard"],
+        "history_policy_id": real_llm_world["policies"]["history.summary_recent"],
+        "memory_write_policy_id": real_llm_world["policies"]["memory_write.user_facts"],
+        "memory_recall_policy_id": real_llm_world["policies"]["memory_recall.user_combined"],
+    }
+    tool_ids = [
+        item["id"] for item in real_llm_world["tools"]
+        if item["enabled"] and item["tool_key"] != "web_search"
+    ]
+
+    def create_agent(name: str, description: str, instructions: str) -> dict:
+        created = api.request("POST", "/api/v1/agents", json={
+            "visibility": "enterprise",
+            "draft": {
+                **common,
+                "name": f"{name} {suffix}",
+                "description": description,
+                "instructions": instructions,
+                "group_enabled": True,
+                "tool_ids": tool_ids,
+                "skill_ids": [],
+                "bound_agent_ids": [],
+                "discovery_config": {"domain_tags": [name.casefold()]},
+                "collaboration_config": {"accepts_delegation": True},
+            },
+        }).json()
+        published = api.request(
+            "POST", f"/api/v1/agents/{created['agent']['id']}/publish", idem=True,
+            json={"expected_draft_revision": created["draft"]["draft_revision"]},
+        ).json()["published_version"]
+        return {"id": created["agent"]["id"], "published": published}
+
+    recovery = create_agent(
+        "Recovery",
+        "Owns user-facing recovery communication and routes evidence-led recovery reviews to the primary evidence reviewer for integrated analysis.",
+        "Act as the user's recovery conversation anchor. Form the smallest useful group from the governed Agent descriptions. For an evidence-led recovery-plan review, hand the complete primary review to the Agent whose description owns evidence review and integration; keep specialist security verification downstream of that owner. Integrate the final evidence-backed conclusion.",
+    )
+    evidence = create_agent(
+        "Evidence",
+        "Primary owner and integrator for evidence-led recovery-plan reviews: checks incident records and recovery claims, builds the evidence matrix, and identifies unsupported conclusions before requesting bounded specialist verification.",
+        "Own the complete evidence-led review after handoff. When the request materially needs security verification, delegate only that bounded check to the best matching current Group specialist, then integrate the directed result and deliver once to the caller.",
+    )
+    security = create_agent(
+        "Security",
+        "Downstream specialist for bounded verification of identity, authorization, secret handling, isolation, auditability, and security consequences; does not own the overall evidence review.",
+        "Perform only the bounded security verification requested by the current primary reviewer, return concrete risks and evidence once, and stop naturally.",
+    )
+    return {
+        "suffix": suffix,
+        "group_agents": [recovery, evidence, security],
+        "recovery": recovery,
+        "evidence": evidence,
+        "security": security,
+        "reporter": recovery,
+    }
+
+
+@pytest.fixture(scope="session")
 def assembled_world(phase_api: MyClawAPI):
     api = phase_api
     env = _required_environment()
@@ -472,21 +538,6 @@ def assembled_world(phase_api: MyClawAPI):
         group=False,
     )
     search_agents["bailian" if search_provider == "bailian" else "bocha"] = general
-    analyst = create_agent(
-        "Product Analyst", "Analyzes user value, scope and acceptance risks.",
-        "Contribute a concise product analysis to the group, use real evidence when needed, and stop after your contribution is complete.",
-        group=True,
-    )
-    engineer = create_agent(
-        "Implementation Engineer", "Assesses implementation, migration and recovery.",
-        "Contribute a concise technical implementation and recovery assessment to the group, then stop naturally.",
-        group=True,
-    )
-    reviewer = create_agent(
-        "Acceptance Reviewer", "Reviews evidence, security and failure recovery.",
-        "As reporter, integrate the group's real contributions into a concise acceptance conclusion and stop when evidence is sufficient.",
-        group=True,
-    )
     return {
         "suffix": suffix, "model": model, "model_version": version,
         "conformance": conformance,
@@ -495,5 +546,4 @@ def assembled_world(phase_api: MyClawAPI):
         "search_agents": search_agents,
         "mcp": mcp, "mcp_sync": synced, "browser": browser,
         "tools": by_key, "general": general,
-        "group_agents": [analyst, engineer, reviewer], "reporter": reviewer,
     }

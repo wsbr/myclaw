@@ -199,6 +199,11 @@ class SnapshotResolver:
         for definition in RUNTIME_COORDINATION_DEFINITIONS:
             if definition.get("group_only") and not is_group_runtime:
                 continue
+            if (
+                definition.get("chat_only")
+                and execution_principal.get("mode") != "chat"
+            ):
+                continue
             name = definition["name"]
             assembled_keys.append(name)
             effective_keys.append(name)

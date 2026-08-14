@@ -107,6 +107,25 @@ def _runner_harnesses(api: MyClawAPI, run_id: str) -> list[dict]:
     ]
 
 
+def _wait_for_emergent_group(
+    api: MyClawAPI, session_id: str, *, timeout: float = 180,
+) -> dict:
+    deadline = time.monotonic() + timeout
+    observed: list[dict] = []
+    while time.monotonic() < deadline:
+        observed = api.request(
+            "GET", f"/api/v1/sessions/{session_id}/groups",
+        ).json()["items"]
+        matches = [
+            item for item in observed
+            if item.get("formation_mode") == "emergent_model_selected"
+        ]
+        if matches:
+            return matches[0]
+        time.sleep(0.25)
+    raise AssertionError(f"No emergent Group appeared: {observed}")
+
+
 @pytest.mark.timeout(1800)
 def test_real_connections_search_fetch_mcp_browser_and_secret_boundaries(
     phase_api: MyClawAPI, assembled_world: dict, record_testsuite_property,
@@ -535,32 +554,44 @@ def test_plan_zero_side_effect_before_approval_restart_and_real_implementation(
 
 
 @pytest.mark.timeout(1800)
-def test_group_real_model_collaboration_natural_stop_and_restart(
-    phase_api: MyClawAPI, assembled_world: dict, record_testsuite_property,
+def test_group_real_model_emergence_async_handoff_and_restart(
+    phase_api: MyClawAPI, emergent_group_world: dict, record_testsuite_property,
 ):
     api = phase_api
-    members = [item["id"] for item in assembled_world["group_agents"]]
-    analyst_id, engineer_id = members[:2]
-    session = api.create_session(assembled_world["reporter"]["id"])
-    group = api.request(
-        "POST", f"/api/v1/sessions/{session['id']}/groups", idem=True,
-        json={
-            "member_agent_ids": members,
-            "reporter_agent_id": assembled_world["reporter"]["id"],
-            "goal": (
-                "共同评审以下固定发布材料：新增 Bailian 原生 Search adapter，只采信结构化 "
-                "search_info，凭据 write-only，Runtime Worker 支持重启恢复。"
-                "验收负责人必须先通过 invoke_agent 工具分别委派："
-                f"Product Analyst（agent_id={analyst_id}）分析范围与用户价值，"
-                f"Implementation Engineer（agent_id={engineer_id}）评估实现与恢复。"
-                "仅在消息正文中写 @、名字或请求不算委派，也不要用群消息代替 invoke_agent。"
-                "等待两份真实 Agent 结果后，再汇总安全、证据和发布结论并自然停止。"
-            ),
-            "shared_context_refs": [],
-        },
-    ).json()
+    recovery_id = emergent_group_world["recovery"]["id"]
+    evidence_id = emergent_group_world["evidence"]["id"]
+    security_id = emergent_group_world["security"]["id"]
+    session = api.create_session(recovery_id)
+    command = api.chat(
+        session["id"],
+        (
+            "以下是本次审查的全部现有材料，请基于这些材料先完成审查，不要搜索工作区或记忆，"
+            "也不要等待我补充信息；缺失内容直接列为未解决风险。事故事实：02:00 发现应用凭证"
+            "泄露，02:10 禁用了旧凭证；工单能证明这两个时间点，但缺少 01:30—02:10 的访问"
+            "日志。现有恢复方案：直接从 S-17 快照恢复数据库，运维仅口头确认快照干净，没有"
+            "校验和或恶意变更排查记录；新凭证暂存在共享环境文件，恢复期间服务账号继续保留"
+            "管理员权限；冒烟测试通过后立即恢复 100% 流量，没有灰度、回滚门槛或独立审批。"
+            "请以关键事实能否被证据支持为主线审查该恢复方案，把安全风险作为需要专业复核的"
+            "子问题，最后给我一份整合后的可执行结论，明确未解决风险与分歧。"
+        ),
+    )
+    chat_run = api.wait_run(command["run"]["id"], timeout=600)
+    assert chat_run["status"] == "completed", chat_run
+    chat_events = api.request(
+        "GET", f"/api/v1/runs/{chat_run['id']}/events",
+    ).json()["items"]
+    assert any(
+        item["event_type"] == "group.emergence_selected"
+        for item in chat_events
+    ), chat_events
+
+    group = _wait_for_emergent_group(api, session["id"])
     group_run = api.request("GET", f"/api/v1/groups/{group['id']}/runs").json()["items"][0]
     assert group_run["run"]["mode"] == "group", group_run
+    assert group_run["shared_context"]["source_chat_run_id"] == chat_run["id"]
+    assert {
+        item["agent_id"] for item in group_run["members"]
+    } == {recovery_id, evidence_id, security_id}, group_run
     _compose("restart", "runtime-worker-test")
     run, approvals = _settle_with_tool_approvals(
         api, session["id"], group_run["run"]["id"], timeout=900,
@@ -569,16 +600,42 @@ def test_group_real_model_collaboration_natural_stop_and_restart(
     invocations = api.request(
         "GET", f"/api/v1/runs/{run['id']}/agent-invocations",
     ).json()["items"]
-    successful_targets = {
-        item["target_agent_id"] for item in invocations
-        if item["status"] == "succeeded"
+    successful = [item for item in invocations if item["status"] == "succeeded"]
+    invocation_edges = {
+        (item["caller_agent_id"], item["target_agent_id"])
+        for item in successful
     }
-    assert {analyst_id, engineer_id} <= successful_targets, invocations
+    assert invocation_edges == {
+        (recovery_id, evidence_id),
+        (evidence_id, security_id),
+    }, invocations
+    assert len(successful) == 2, invocations
+    assert all(item["return_route"] == "group" for item in successful)
     messages = api.request(
         "GET", f"/api/v1/group-runs/{group_run['id']}/messages", params={"limit": 100},
     ).json()["items"]
-    speaking_agents = {item["sender_agent_id"] for item in messages if item["sender_agent_id"]}
-    assert len(speaking_agents) >= 2, messages
+    directed_agent_edges = [
+        (item["sender_agent_id"], item["recipient_agent_id"])
+        for item in messages
+        if item["sender_agent_id"] and item["recipient_agent_id"]
+        and item["visibility"] == "direct"
+    ]
+    for edge in (
+        (recovery_id, evidence_id),
+        (evidence_id, security_id),
+        (security_id, evidence_id),
+        (evidence_id, recovery_id),
+    ):
+        assert directed_agent_edges.count(edge) == 1, messages
+    assert (recovery_id, security_id) not in directed_agent_edges, messages
+    graph = api.request(
+        "GET", f"/api/v1/group-runs/{group_run['id']}/interaction-graph",
+    ).json()
+    graph_invocations = {
+        (item["source_agent_id"], item["target_agent_id"])
+        for item in graph["edges"] if item["cause_type"] == "agent_invocation"
+    }
+    assert graph_invocations == invocation_edges, graph
     timeline = []
     after_sequence = 0
     while True:
@@ -593,5 +650,8 @@ def test_group_real_model_collaboration_natural_stop_and_restart(
     assert any(item["event_type"] == "run.completed" for item in timeline), timeline
     record_testsuite_property(
         "group_gate",
-        f"real-model-collaboration,natural-stop,restart-recovery,tool-approvals={len(approvals)}",
+        (
+            "post-chat-emergence,semantic-owner-selection,async-directed-handoffs,"
+            f"no-duplicate-delivery,restart-recovery,tool-approvals={len(approvals)}"
+        ),
     )

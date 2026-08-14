@@ -74,37 +74,52 @@ class VisibleRecordRepository:
             mode=run.mode,
             group_membership_id=(runner.input_snapshot.get("group_membership_id")
                            or runner.principal_snapshot.get("group_membership_id")),
+            group_run_id=(runner.input_snapshot.get("group_run_id")
+                          or runner.principal_snapshot.get("group_run_id")),
             delegated=bool(runner.input_snapshot.get("agent_invocation_id")),
         )
 
     async def messages_for_summary(self, summary: HistorySummary) -> list[Message]:
         if summary.scope_type == "group_agent":
             run_mode, group_membership_id = "group", summary.group_membership_id
+            group_run_id = summary.group_run_id
+            if group_run_id is None:
+                through_message = await self.db.get(Message, summary.through_message_id)
+                group_run_id = through_message.group_run_id if through_message else None
         else:
             run_mode, group_membership_id = "chat", None
+            group_run_id = None
         return await VisibleEventProjection(self.db).list_direct_messages(
             user_id=(await self.db.get(UserSession, summary.session_id)).user_id,
             session_id=summary.session_id,
             mode=run_mode,
             group_membership_id=group_membership_id,
+            group_run_id=group_run_id,
         )
 
 
-def _scope_values(run: Run, runner: DurableRunner) -> tuple[str, str | None, str | None]:
+def _scope_values(
+    run: Run, runner: DurableRunner,
+) -> tuple[str, str | None, str | None, str | None]:
     if run.mode != "group":
-        return "chat", None, None
+        return "chat", None, None, None
     return (
         "group_agent",
         runner.input_snapshot.get("group_session_id") or runner.principal_snapshot.get("group_session_id"),
         runner.input_snapshot.get("group_membership_id") or runner.principal_snapshot.get("group_membership_id"),
+        runner.input_snapshot.get("group_run_id") or runner.principal_snapshot.get("group_run_id"),
     )
 
 
-def _scope_predicates(scope_type: str, group_session_id: str | None, group_membership_id: str | None):
+def _scope_predicates(
+    scope_type: str, group_session_id: str | None,
+    group_membership_id: str | None, group_run_id: str | None,
+):
     return (
         HistorySummary.scope_type == scope_type,
         HistorySummary.group_session_id.is_(None) if group_session_id is None else HistorySummary.group_session_id == group_session_id,
         HistorySummary.group_membership_id.is_(None) if group_membership_id is None else HistorySummary.group_membership_id == group_membership_id,
+        HistorySummary.group_run_id.is_(None) if group_run_id is None else HistorySummary.group_run_id == group_run_id,
     )
 
 
@@ -123,14 +138,18 @@ async def select_history(
     excluded = set(exclude_message_ids or ())
     if excluded:
         visible = [message for message in visible if message.id not in excluded]
-    scope_type, group_session_id, group_membership_id = _scope_values(run, runner)
+    scope_type, group_session_id, group_membership_id, group_run_id = _scope_values(
+        run, runner,
+    )
     ready: HistorySummary | None = None
     prefix_count = 0
 
     if policy_key == "history.summary_recent" and visible:
         summaries = list(await db.scalars(select(HistorySummary).where(
             HistorySummary.session_id == run.session_id,
-            *_scope_predicates(scope_type, group_session_id, group_membership_id),
+            *_scope_predicates(
+                scope_type, group_session_id, group_membership_id, group_run_id,
+            ),
             HistorySummary.status == "ready",
         ).order_by(HistorySummary.through_event_sequence.desc()).limit(5)))
         positions = {message.id: index for index, message in enumerate(visible)}
@@ -173,13 +192,17 @@ async def select_history(
                     event_sequence = max(0, session.next_event_sequence - 1)
                 existing = await db.scalar(select(HistorySummary).where(
                     HistorySummary.session_id == run.session_id,
-                    *_scope_predicates(scope_type, group_session_id, group_membership_id),
+                    *_scope_predicates(
+                        scope_type, group_session_id, group_membership_id,
+                        group_run_id,
+                    ),
                     HistorySummary.through_event_sequence == event_sequence,
                 ))
                 if existing is None:
                     pending = HistorySummary(
                         id=uuid7(), session_id=run.session_id, scope_type=scope_type,
                         group_session_id=group_session_id, group_membership_id=group_membership_id,
+                        group_run_id=group_run_id,
                         through_message_id=through.id, through_event_sequence=event_sequence,
                         source_hash=source_hash(prefix), status="pending", model_id=model_id,
                         parameter_version=(
@@ -217,6 +240,7 @@ async def select_history(
                 "scope_type": scope_type,
                 "group_session_id": group_session_id,
                 "group_membership_id": group_membership_id,
+                "group_run_id": group_run_id,
             },
             "selected_message_ids": [item.id for item in selected],
             "excluded_message_ids": sorted(excluded),

@@ -23,8 +23,10 @@ class LLMResponse(BaseModel):
 
 
 class LLMChunk(BaseModel):
-    # transport_payload marks that the Provider emitted a wire event even when
-    # its Tool arguments are still incomplete and cannot yet be normalized.
+    # transport_payload marks that the Provider has begun an actionable payload
+    # (for example buffered Tool JSON) that cannot yet be normalized. Metadata,
+    # role-only, reasoning-only, and usage-only wire events must not use it: a
+    # transport failure after those events is still safe to retry.
     type: str  # "transport_payload" | "text_delta" | "tool_call_delta" | "done"
     content: str | None = None
     tool_call: ToolCall | None = None

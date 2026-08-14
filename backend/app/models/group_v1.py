@@ -13,6 +13,10 @@ class GroupSession(Base, TimestampMixin, VersionMixin):
     __tablename__ = "group_session"
     __table_args__ = (
         CheckConstraint("status IN ('open','closed','archived')", name="ck_group_session_status"),
+        CheckConstraint(
+            "formation_mode IN ('manual_selected','emergent_model_selected')",
+            name="ck_group_session_formation_mode",
+        ),
         Index("ix_group_session_session_status", "session_id", "status", "created_at"),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
@@ -27,6 +31,9 @@ class GroupSession(Base, TimestampMixin, VersionMixin):
     )
     membership_policy: Mapped[str] = mapped_column(
         String(32), default="fixed_for_run", nullable=False
+    )
+    formation_mode: Mapped[str] = mapped_column(
+        String(32), default="manual_selected", nullable=False
     )
 
 class GroupRun(Base, TimestampMixin, VersionMixin):

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
-import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Alert, Button, Modal, Select, Space, Tag, Tooltip, message as toast } from 'antd'
 import { HistoryOutlined } from '@ant-design/icons'
 import { Activity, ArrowLeft, GitBranch, MessageSquare, PanelRightOpen, Plus, UsersRound } from 'lucide-react'
@@ -35,6 +35,8 @@ export default function SessionPage() {
   const [showScrollButton, setShowScrollButton] = useState(false)
   const [clarificationAnswers, setClarificationAnswers] = useState<Record<string, string>>({})
   const [groupRecipient, setGroupRecipient] = useState<string | undefined>()
+  const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null)
+  const [selectedGroupRunId, setSelectedGroupRunId] = useState<string | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const messageViewportRef = useRef<HTMLElement>(null)
   const followOutputRef = useRef(true)
@@ -65,7 +67,7 @@ export default function SessionPage() {
     queryKey: ['groups', sessionId], queryFn: () => sessionsApi.listGroups(sessionId!), enabled: !!sessionId,
   })
   const requestedGroupId = searchParams.get('group')
-  const activeGroup = groups.find(item => item.id === requestedGroupId) || groups[0]
+  const activeGroup = groups.find(item => item.id === (selectedGroupId || requestedGroupId)) || groups[0]
   const groupId = activeGroup?.id || null
   const { data: groupMembers = [] } = useQuery({
     queryKey: ['group-memberships', groupId], queryFn: () => sessionsApi.getGroupMemberships(groupId!), enabled: !!groupId,
@@ -74,28 +76,18 @@ export default function SessionPage() {
     queryKey: ['group-runs', groupId], queryFn: () => sessionsApi.getGroupRuns(groupId!), enabled: !!groupId,
     refetchInterval: query => query.state.data?.some(item => !isTerminalRun(item.run.status)) ? 2500 : false,
   })
-  const activeGroupRun = groupRuns.find(item => !isTerminalRun(item.run.status)) || groupRuns[0]
+  const latestGroupRun = groupRuns.find(item => !isTerminalRun(item.run.status)) || groupRuns[0]
+  const activeGroupRun = groupRuns.find(item => item.id === selectedGroupRunId) || latestGroupRun
   const groupIsOpen = activeGroup?.status === 'open'
   const { data: groupMessages = [] } = useQuery({
-    queryKey: ['group-messages', groupId],
-    queryFn: () => sessionsApi.getGroupMessages(groupId!), enabled: !!groupId,
+    queryKey: ['group-run-messages', activeGroupRun?.id],
+    queryFn: () => sessionsApi.getGroupRunMessages(activeGroupRun!.id), enabled: !!activeGroupRun,
   })
-  const groupGraphQueries = useQueries({
-    queries: groupRuns.map(groupRun => ({
-      queryKey: ['group-interaction-graph', groupRun.id],
-      queryFn: () => sessionsApi.getInteractionGraph(groupRun.id),
-      enabled: !!groupId,
-    })),
+  const { data: interactionGraph } = useQuery({
+    queryKey: ['group-interaction-graph', activeGroupRun?.id],
+    queryFn: () => sessionsApi.getInteractionGraph(activeGroupRun!.id),
+    enabled: !!activeGroupRun,
   })
-  const interactionGraph = useMemo(() => {
-    const nodes = new Map<string, NonNullable<(typeof groupGraphQueries)[number]['data']>['nodes'][number]>()
-    const edges = new Map<string, NonNullable<(typeof groupGraphQueries)[number]['data']>['edges'][number]>()
-    groupGraphQueries.forEach(query => {
-      query.data?.nodes.forEach(node => nodes.set(node.agent_id, node))
-      query.data?.edges.forEach(edge => edges.set(`${edge.cause_type}:${edge.cause_id}`, edge))
-    })
-    return { nodes: [...nodes.values()], edges: [...edges.values()] }
-  }, [groupGraphQueries])
   const { data: sharedTasks = [] } = useQuery({
     queryKey: ['group-shared-tasks', groupId],
     queryFn: () => sessionsApi.getSharedTasks(groupId!), enabled: !!groupId,
@@ -104,6 +96,9 @@ export default function SessionPage() {
     queryKey: ['group-working-plans', activeGroupRun?.run.id],
     queryFn: () => sessionsApi.getWorkingPlans(activeGroupRun!.run.id), enabled: !!activeGroupRun,
   })
+  const activeSharedTasks = sharedTasks.filter(
+    task => !task.group_run_id || task.group_run_id === activeGroupRun?.id,
+  )
   const { data: networkCards } = useQuery({
     queryKey: ['agent-network', 'group-ui'],
     queryFn: () => agentsApi.searchNetwork({ group_enabled: true, limit: 100 }),
@@ -161,6 +156,8 @@ export default function SessionPage() {
     closedStreamIdsRef.current.clear()
     suppressLiveUntilNextRunRef.current = Boolean(routeSessionId)
     setClarificationAnswers({})
+    setSelectedGroupId(null)
+    setSelectedGroupRunId(null)
     followOutputRef.current = true
     setShowScrollButton(false)
     setMode(searchParams.get('mode') === 'group' ? 'group' : 'chat')
@@ -170,7 +167,10 @@ export default function SessionPage() {
     if (sessionRecord?.interaction_mode === 'plan') setMode('plan')
   }, [sessionRecord?.interaction_mode])
 
-  useEffect(() => { setGroupRecipient(undefined) }, [groupId])
+  useEffect(() => {
+    setGroupRecipient(undefined)
+    setSelectedGroupRunId(null)
+  }, [groupId])
 
   useEffect(() => {
     if (!sessionId) return
@@ -237,10 +237,19 @@ export default function SessionPage() {
         queryClient.invalidateQueries({ queryKey: ['required-actions'] })
       }
       if (event.event_type.startsWith('group')) {
+        if (event.event_type === 'group.emerged' || event.event_type === 'group.run_emerged') {
+          const emergedGroupId = event.payload.group_session_id
+          const emergedGroupRunId = event.payload.group_run_id
+          if (typeof emergedGroupId === 'string') setSelectedGroupId(emergedGroupId)
+          if (typeof emergedGroupRunId === 'string') setSelectedGroupRunId(emergedGroupRunId)
+          if (event.run_id) setActiveRunId(event.run_id)
+          setMode('group')
+          toast.info('Chat 已完成，模型选择的 Group Agent 已开始涌现协作')
+        }
         queryClient.invalidateQueries({ queryKey: ['groups', sessionId] })
         queryClient.invalidateQueries({ queryKey: ['group-memberships'] })
         queryClient.invalidateQueries({ queryKey: ['group-runs'] })
-        queryClient.invalidateQueries({ queryKey: ['group-messages'] })
+        queryClient.invalidateQueries({ queryKey: ['group-run-messages'] })
         queryClient.invalidateQueries({ queryKey: ['group-interaction-graph'] })
         queryClient.invalidateQueries({ queryKey: ['group-shared-tasks'] })
         queryClient.invalidateQueries({ queryKey: ['required-actions'] })
@@ -360,19 +369,22 @@ export default function SessionPage() {
   const sendGroup = useMutation({
     mutationFn: async (content: string) => {
       await ensureSession()
-      if (!activeGroup) throw new Error('请先从 Agent Network 选择三名成员直接建组')
+      if (!activeGroup) throw new Error('请先在 Chat 中完成一次对话，系统会自动形成 Group')
       if (!groupIsOpen) throw new Error('Group 已关闭，只能读取历史记录')
-      if (activeGroupRun && !['completed', 'cancelled', 'failed'].includes(activeGroupRun.run.status)) {
-        return { kind: 'message' as const, value: await sessionsApi.sendGroupRunMessage(activeGroupRun.id, content, groupRecipient) }
+      if (latestGroupRun && !['completed', 'cancelled', 'failed'].includes(latestGroupRun.run.status)) {
+        return { kind: 'message' as const, value: await sessionsApi.sendGroupRunMessage(latestGroupRun.id, content, groupRecipient) }
       }
       return { kind: 'run' as const, value: await sessionsApi.createGroupRun(activeGroup.id, content, groupRecipient) }
     },
     onSuccess: result => {
-      if (result.kind === 'run') setActiveRunId(result.value.run.id)
+      if (result.kind === 'run') {
+        setActiveRunId(result.value.run.id)
+        setSelectedGroupRunId(result.value.id)
+      }
       setLiveDraft(null)
       setLiveTools({})
       queryClient.invalidateQueries({ queryKey: ['group-runs'] })
-      queryClient.invalidateQueries({ queryKey: ['group-messages'] })
+      queryClient.invalidateQueries({ queryKey: ['group-run-messages'] })
     },
     onError: (error: any) => toast.error(error?.response?.data?.error?.code || error.message || 'Group 请求失败'),
   })
@@ -446,7 +458,8 @@ export default function SessionPage() {
   const cancel = useMutation({
     mutationFn: async () => {
       if (mode === 'group' && activeGroupRun) {
-        return { run: (await sessionsApi.cancelGroupRun(activeGroupRun, '用户在 Web 工作区取消')).run }
+        const target = latestGroupRun || activeGroupRun
+        return { run: (await sessionsApi.cancelGroupRun(target, '用户在 Web 工作区取消')).run }
       }
       return { run: await sessionsApi.cancelRun(activeRun!, '用户在 Web 工作区取消') }
     },
@@ -586,7 +599,7 @@ export default function SessionPage() {
             <Button.Group className="flex">
               <Button size="small" icon={<MessageSquare className="size-3.5" />} disabled={Boolean(planAlreadyEntered)} type={mode === 'chat' ? 'primary' : 'default'} onClick={() => selectMode('chat')}>Chat</Button>
               <Button size="small" icon={<GitBranch className="size-3.5" />} type={mode === 'plan' ? 'primary' : 'default'} onClick={() => selectMode('plan')}>Plan</Button>
-              {agent?.group_enabled && <Button size="small" icon={<UsersRound className="size-3.5" />} disabled={Boolean(planAlreadyEntered)} type={mode === 'group' ? 'primary' : 'default'} onClick={() => selectMode('group')}>Group</Button>}
+              {(agent?.group_enabled || groups.length > 0) && <Button size="small" icon={<UsersRound className="size-3.5" />} disabled={Boolean(planAlreadyEntered)} type={mode === 'group' ? 'primary' : 'default'} onClick={() => selectMode('group')}>Group</Button>}
             </Button.Group>
           </div>
           <Space size={6} className="shrink-0">
@@ -611,6 +624,11 @@ export default function SessionPage() {
           message={`运行失败：${activeRun.terminal_reason || 'unknown'}`}
           description="右侧运行监控保留失败、权限拒绝、超时与迟到结果的可靠事件。" />}
         {activeRun?.status === 'cancelled' && <Alert banner type="warning" showIcon message={`运行已停止：${activeRun.terminal_reason || 'cancelled'}`} />}
+        {activeRun?.status === 'completed' && activeRun.terminal_reason === 'completed_with_errors' && <Alert
+          banner type="warning" showIcon
+          message="Group 已完成，但本次 Run 记录了成员或调用失败"
+          description="最终摘要必须保留这些失败；可在当前 Run 的图和运行监控中核对。"
+        />}
 
         <section
           ref={messageViewportRef}
@@ -625,10 +643,14 @@ export default function SessionPage() {
           <div className={cn('mx-auto w-full', mode === 'group' ? 'max-w-5xl' : 'max-w-3xl')}>
             {mode === 'group' ? <div className="space-y-6">
               <GroupPanel group={activeGroup} members={groupMembers} runs={groupRuns}
+                activeRun={activeGroupRun}
                 messages={groupMessages} graph={interactionGraph} cards={networkCards?.items || []}
                 plans={groupPlans} artifacts={artifacts} requiredActions={sessionActions}
-                sharedTasks={sharedTasks} busy={groupBusy}
-                onOpenNetwork={() => navigate('/network')}
+                sharedTasks={activeSharedTasks} busy={groupBusy}
+                onSelectRun={value => {
+                  setSelectedGroupRunId(value)
+                  setActiveRunId(groupRuns.find(item => item.id === value)?.run.id || null)
+                }}
                 onReplaceReporter={async value => { await replaceReporter.mutateAsync(value) }}
                 onDownload={sessionsApi.downloadArtifact} />
             </div> : <div className="space-y-6">

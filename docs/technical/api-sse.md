@@ -186,7 +186,7 @@ WorkingPlan 由 Agent 通过 Runtime Tool 更新，用户 API 不编辑冻结 DA
 
 ## 8. Group
 
-- `POST /sessions/{id}/groups` body `{member_agent_ids[],goal,reporter_agent_id?,shared_context_refs[]}`；
+- 正常 Chat 完成后由 `emerge_group_after_chat` Outbox 自动创建/复用 Group；`POST /sessions/{id}/groups` 只保留旧手选 Group 兼容；
 - `GET /groups/{id}`、`GET /groups/{id}/memberships`、`GET /groups/{id}/messages`；
 - `POST /groups/{id}/runs` body `{content,recipient_agent_id?,reporter_agent_id?,reference_run_ids[]}`；
 - `GET /group-runs/{id}`、`GET /group-runs/{id}/members`、`GET /group-runs/{id}/interaction-graph`；
@@ -195,7 +195,7 @@ WorkingPlan 由 Agent 通过 Runtime Tool 更新，用户 API 不编辑冻结 DA
 - `POST /group-runs/{id}/cancel`；
 - `POST /groups/{id}/close`。
 
-创建 Group/GroupRun 重新校验 membership、主体访问、环境兼容、Agent 启停和 published version，并在同一事务固定全部 member snapshot。Reporter 必须是 available member；省略时取入口/发起 Agent。
+正常 Chat 提示词携带完整的合格 `group_enabled` Agent `id/name/description` 候选目录，模型通过 `select_group_members` 按用户诉求固定选择。自动创建 Group/GroupRun 时重新校验所选成员的主体访问、可调用性、Group 治理和 published version，并在同一事务固定 selected member snapshot；不得按 UI 页大小静默截断或自动补员。Reporter 优先取被选中的源 Chat Agent，否则取模型选择中的首个可用成员。
 
 GroupRun 响应：
 

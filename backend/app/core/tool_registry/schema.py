@@ -244,9 +244,27 @@ RUNTIME_RESULT_DATA_SCHEMAS: dict[str, dict[str, Any]] = {
         "clarification_id": _S, "status": _S,
     }),
     "discover_agents": _object("candidates", properties={"candidates": _A}),
+    "select_group_members": _object(
+        "selected_agent_ids", "rationale", "candidate_catalog_hash",
+        properties={
+            "selected_agent_ids": _A,
+            "rationale": _S,
+            "candidate_catalog_hash": {
+                "type": "string", "pattern": "^[0-9a-f]{64}$",
+            },
+        },
+    ),
     "invoke_agent": _object("agent_invocation_id", properties={
         "agent_invocation_id": {"type": ["string", "null"]}, "status": _S,
+        "delivery_mode": _S,
     }),
+    "search_group_history": _object(
+        "hits", "scanned_through_sequence", "max_sequence", "next_cursor",
+        properties={
+            "hits": _A, "scanned_through_sequence": _I, "max_sequence": _I,
+            "next_cursor": _N_S,
+        },
+    ),
     "send_group_message": _object("message_id", "visibility", "recipient_woken", properties={
         "message_id": _S, "visibility": _S,
         "recipient_agent_id": {"type": ["string", "null"]}, "recipient_woken": _B,

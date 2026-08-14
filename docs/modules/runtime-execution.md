@@ -49,6 +49,8 @@ Run 终态后不重新激活。后续输入创建新 Run 并引用历史。
 
 实际承载代码、模型调用和 Tool 协调的长期服务进程。Worker 可以先后运行不同 Agent 的 Runner；它不是 Agent，不保存 Agent 的权威身份或长期工作状态。
 
+每个 Runtime Worker 使用 `RUNTIME_WORKER_CONCURRENCY` 限制活跃 Runner 协程数。只有空闲槽时才领取 Outbox Command，超出容量的工作继续保留在数据库中，不进入无界内存队列。每个活跃 Runner 使用独立 `AsyncSession`、lease 和 heartbeat；槽是异步并发额度，不是线程。
+
 ### Runner
 
 某个 Runtime Worker 对一个 WorkItem 的短生命周期连续执行片段。Runner 获得 lease 和 fencing token，加载 AgentVersion、Context 与 CapabilitySnapshot，运行若干完整 AgentTurn，直到：
@@ -65,6 +67,8 @@ Run 终态后不重新激活。后续输入创建新 Run 并引用历史。
 ### AgentTurn / ProviderAttempt
 
 AgentTurn 是一次逻辑模型决定；ProviderAttempt 是传输层尝试。只有零 payload、未产生 Tool Call 和未提交副作用的可重试错误，才允许透明重试同一 Turn。
+
+模型 Token 统计和生成之前必须提交已有 Turn/Tool 事实并释放数据库连接。ProviderAttempt 的 started、首个 payload 和终态分别使用短事务落库，任何数据库事务都不能跨越 Provider 网络等待。
 
 ## ExecutionPrincipal 与 CapabilitySnapshot
 
@@ -167,6 +171,8 @@ provider_state_ref?
 
 第一阶段内容 part 至少支持 text、file/artifact reference 和 structured data；不支持的模态必须明确报错。Adapter 把不同供应商 wire format 映射到有序 Turn Item，不要求所有 Provider 生成整段结构化最终 JSON。供应商维持连续推理所需的不透明状态可以保存为受控引用，但不能被解释成 MyClaw 业务状态或共享 Chain-of-Thought。
 
+Runtime Worker 按 Provider 类型、endpoint 和 credential 指纹复用进程内 SDK Client，从而复用其 HTTP keep-alive 连接池。共享 Client 通过引用计数租约保护，活跃请求不会被 LRU 淘汰；缓存上限由 `RUNTIME_PROVIDER_POOL_MAX_ENTRIES` 控制，Worker 退出时统一关闭。
+
 ### 普通最终消息
 
 无 Tool Call 的 assistant message 可以自然结束当前 Turn。Runtime 不要求额外 `finalize_response`。
@@ -192,9 +198,10 @@ Runtime 可以向模型提供少量真实协调能力：
 | `update_plan` | 更新当前 Agent 的 WorkingPlan 投影 |
 | `ask_user` | 创建持久 Clarification |
 | `discover_agents` | 查询授权范围内 AgentCard |
-| `invoke_agent` | 创建定向 AgentInvocation |
+| `invoke_agent` | 创建定向 AgentInvocation；Chat/Plan awaited，Group async handoff 并自动投影 human 可见的请求 `@` 与交付 `@` |
+| `search_group_history` | Group 内主动查询其他成员的 human 可见协作记录，不扩大私有数据权限 |
 | `invite_agent` | 创建 Group Membership 邀请或 Approval |
-| `send_group_message` | 写入定向或 Group Message |
+| `send_group_message` | 写入定向 `@`，或不唤醒、不自动注入上下文的精炼群留痕 |
 | `update_shared_task` | 更新可选 Group 协作白板 |
 
 这些不是业务系统 Tool，但也是有权限、有结果、可审计的真实 Action。它们不能：
@@ -326,7 +333,7 @@ final message / artifact refs / error
 parent invocation and depth
 ```
 
-调用方在需要结果时进入 `waiting_agent`。目标 Agent 正常最终消息完成 Invocation；失败、拒绝、取消和超时也作为明确结果恢复调用方。
+Chat/Plan 调用方在需要结果时进入 Run/WorkItem `waiting_agent`，目标终态通过 Tool continuation 恢复调用方。Group 调用采用 async handoff：调用方当前 Turn 在派发后即可提交精炼状态，WorkItem 在后台等待，但 Group Run 保持 `active`；目标正常结果或失败写成新的定向 `@` 消息，再创建调用方的新 Turn。若调用方本身是上游 Invocation 的目标，它必须在下游结果到达并整合后，才能完成自己的上游交付。
 
 Chat/Plan 委派结果回调用方；Group 成员还可以直接写入 Group 消息。Agent 调用保持 Run 创建时固定的 `tenant_id + account_id`，不能通过目标 Agent 改写身份或提权。Agent API 来源另保留 `api_key_id + asserted_user_id` 审计证据；后者是调用方裸断言而非终端用户证明，不再作为领域授权键。
 

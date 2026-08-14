@@ -148,11 +148,11 @@ created
 2. 校验失败也持久化 rejected 与安全 reason，不创建目标 WorkItem；
 3. 成功时固定目标 AgentVersion，原子创建目标 WorkItem、Runner 和 Outbox，Invocation 进入 queued；
 4. 目标首 Runner claim 后进入 running；
-5. 目标普通 final 路由到 caller/direct/group，目标 WorkItem 终态并原子结算 Invocation；
-6. 调用方等待的一批 Invocation 全部终态后创建新的调用方 Runner；
+5. 目标普通 final 路由到 caller/direct/group，目标 WorkItem 终态并原子结算 Invocation；Group direct 结果使用普通 human 可见 Message，而不是 Provider Tool Result；
+6. Chat/Plan 调用方等待的一批 Invocation 全部终态后，以原 Tool Call/Tool Result continuation 创建新的调用方 Runner；Group handoff 调用方结束派发 Turn，WorkItem 保持 `waiting_agent` 而 Run 保持 `active`，下游批次终态后以定向消息创建新的调用方 Turn；
 7. 调用方已终态时迟到结果只记录，不唤醒或复活 Run。
 
-Chat、Plan、Group 和未来远程 Gateway 共享这一状态机；传输方式不能分叉领域语义。
+Chat、Plan、Group 和未来远程 Gateway 共享 AgentInvocation 的身份、授权、幂等和终态状态机；awaited delegation 与 async handoff 可以有不同的可信 return route，但不能靠模型文本改写。
 
 ## 9. Clarification 与 Approval
 
@@ -164,7 +164,7 @@ Approval：`pending → approved|rejected|cancelled`。请求 AuthContext 的 `t
 
 GroupSession：`open → closed → archived`。`busy/idle` 从关联 Run 和 Invocation 派生。关闭会给全部非终态 Run 写取消命令；历史消息、Membership 和 Artifact 保留。
 
-GroupMembership：`invited → joined|declined|cancelled`；`joined → left|removed`。第一阶段 `fixed_for_run` 下，成员变更只影响未来 GroupRun；当前 member snapshot 不热切换。
+GroupMembership：`invited → joined|declined|cancelled`；`joined → left|removed`。涌现式 GroupSession 使用 `dynamic_future`，每次正常 Chat 由模型按本次诉求重新选择未来成员并由平台复核；当前 GroupRun 的 `fixed_for_run` member snapshot 不热切换。
 
 固定本轮策略下的图外邀请在授权检查阶段即拒绝，不创建 Membership；写 `group.membership_invitation_rejected` 安全 Event，并把稳定 reason 返回发起 Agent。它不是 `invited→declined`，因为目标从未进入候选 Membership。
 

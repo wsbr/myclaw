@@ -4,11 +4,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sqlalchemy import and_, exists, or_, select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.foundation import ExecutionEvent, ExecutionEventRecipient, UserSession
-from app.models.group_v1 import GroupMembership, GroupSession
+from app.models.group_v1 import (
+    GroupRun,
+    GroupRunMember,
+    GroupRunReference,
+    GroupSession,
+)
 from app.models.runtime_v1 import Message
 
 
@@ -79,7 +84,9 @@ class VisibleEventProjection:
 
     async def list_direct_messages(
         self, *, user_id: str, session_id: str, mode: str,
-        group_membership_id: str | None = None, delegated: bool = False,
+        group_membership_id: str | None = None,
+        group_run_id: str | None = None,
+        delegated: bool = False,
         hard_limit: int = 1000,
     ) -> list[Message]:
         """Return only the Message history directly visible to a Runner scope."""
@@ -88,28 +95,35 @@ class VisibleEventProjection:
             raise LookupError("session not found")
         hard_limit = max(1, min(hard_limit, 2000))
         if mode == "group":
-            if not group_membership_id:
-                raise LookupError("group membership is required")
-            membership = await self.db.scalar(select(GroupMembership).join(
-                GroupSession, GroupSession.id == GroupMembership.group_session_id,
+            if not group_membership_id or not group_run_id:
+                raise LookupError("group membership and GroupRun are required")
+            snapshot = await self.db.scalar(select(GroupRunMember).join(
+                GroupRun, GroupRun.id == GroupRunMember.group_run_id,
+            ).join(
+                GroupSession, GroupSession.id == GroupRun.group_session_id,
             ).where(
-                GroupMembership.id == group_membership_id,
-                GroupMembership.status == "joined",
+                GroupRunMember.group_run_id == group_run_id,
+                GroupRunMember.membership_id == group_membership_id,
                 GroupSession.session_id == session_id,
                 GroupSession.user_id == user_id,
             ))
-            if membership is None:
-                raise LookupError("group membership not found")
-            group_session_id = membership.group_session_id
-            agent_id = membership.agent_id
+            if snapshot is None:
+                raise LookupError("GroupRun membership snapshot not found")
+            group_run = await self.db.get(GroupRun, group_run_id)
+            referenced_run_ids = set(await self.db.scalars(select(
+                GroupRunReference.referenced_group_run_id,
+            ).where(GroupRunReference.group_run_id == group_run_id)))
+            visible_run_ids = {group_run_id, *referenced_run_ids}
+            group_session_id = group_run.group_session_id
+            agent_id = snapshot.agent_id
             return list(await self.db.scalars(
                 select(Message).where(
                     Message.session_id == session_id,
                     Message.scope_type == "group",
                     Message.group_session_id == group_session_id,
+                    Message.group_run_id.in_(visible_run_ids),
                     Message.status == "committed",
                     or_(
-                        Message.visibility == "group",
                         Message.sender_agent_id == agent_id,
                         Message.recipient_agent_id == agent_id,
                         Message.recipient_membership_id == group_membership_id,

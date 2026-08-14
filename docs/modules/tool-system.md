@@ -6,9 +6,9 @@
 
 Platform Tool 是由 MyClaw 后端代码实现、注册并通过 Runtime 调度的环境或业务动作能力。平台只有一个 Platform Tool Registry，不区分 Built-in Tool 和数据库自定义 Tool 两套体系。
 
-`read_file`、`write_file`、`execute`、`search_group_history`、`publish_artifact` 是 Platform Tool。它们可能由核心代码提供，但不会因此被隐式加入 Agent。
+`read_file`、`write_file`、`execute`、`publish_artifact` 是 Platform Tool。它们可能由核心代码提供，但不会因此被隐式加入 Agent。
 
-模型还可以通过相同的原生 tool-call 协议调用 `update_plan`、`ask_user`、`discover_agents`、`invoke_agent`、`invite_agent` 和 Group Message 等 **Runtime Coordination Tool**。这类能力由 Runtime 按当前模式、身份和协作关系注入，用于改变真实计划、等待或协作状态；它们不进入 Platform Tool Registry，也不能由 Agent 装配者选择、替换或借此扩大业务权限。两类能力共用调用协议，但治理来源和副作用语义不同。
+模型还可以通过相同的原生 tool-call 协议调用 `update_plan`、`ask_user`、`discover_agents`、`invoke_agent`、`invite_agent`、`search_group_history` 和 Group Message 等 **Runtime Coordination Tool**。这类能力由 Runtime 按当前模式、身份和协作关系注入，用于改变真实计划、等待或协作状态；其中 `search_group_history` 只读，其余能力按各自契约产生状态变化。它们不进入 Platform Tool Registry，也不能由 Agent 装配者选择、替换或借此扩大业务权限。两类能力共用调用协议，但治理来源和副作用语义不同。
 
 ## 注册与治理
 
@@ -76,7 +76,7 @@ Runtime Coordination Tool 的执行器必须再次校验身份、模式、Member
 
 `invoke_agent` 还必须执行 Agent 可发现范围和 Group 参与者集合校验，详见 [Agent 协作](agent-collaboration.md)。
 
-`search_group_history` 只能查询当前 GroupSession 中对成员公开的 Message、ExecutionEvent 和 Artifact 索引。它必须校验当前 Agent 是 Group 成员，并排除其他 Agent 的 Instructions、私有记忆、Prompt、模型内部推理、未公开 Tool 数据和未发布 Workspace 文件。启用 Group 不会自动装配该 Tool。
+`search_group_history` 只能查询当前 GroupSession 中对成员公开的 Message、ExecutionEvent 和 Artifact 索引。它必须校验当前 Agent 是 Group 成员，并排除其他 Agent 的 Instructions、私有记忆、Prompt、模型内部推理、未公开 Tool 数据和未发布 Workspace 文件。Group Runtime 自动注入这一核心只读协调能力；它不进入可选 Agent Tool 装配，也不扩大查询边界。
 
 ## ToolInvocation 与执行类型
 

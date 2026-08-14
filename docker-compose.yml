@@ -12,12 +12,22 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     command: >
-      sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+      sh -c '
+        for attempt in $$(seq 1 30); do
+          if alembic upgrade head; then
+            exec uvicorn app.main:app --host 0.0.0.0 --port 8000;
+          fi;
+          echo "Migration attempt $$attempt failed; retrying in 2 seconds" >&2;
+          sleep 2;
+        done;
+        echo "Database migrations failed after 30 attempts" >&2;
+        exit 1
+      '
     ports:
-      - "8000:8000"
-    env_file: .env
+      - "${MYCLAW_API_PORT:-8000}:8000"
+    env_file: ${MYCLAW_ENV_FILE:-.env}
     environment:
-      - MYCLAW_ENVIRONMENT=production
+      - MYCLAW_ENVIRONMENT=${MYCLAW_ENVIRONMENT:-development}
       - DATABASE_URL=${DATABASE_URL}
       - DATABASE_POOL_SIZE=${DATABASE_POOL_SIZE:-10}
       - DATABASE_MAX_OVERFLOW=${DATABASE_MAX_OVERFLOW:-20}
@@ -59,7 +69,7 @@ services:
       args:
         - VITE_API_BASE_URL=${VITE_API_BASE_URL:-http://localhost:8000}
     ports:
-      - "80:80"
+      - "${MYCLAW_UI_PORT:-8080}:80"
     restart: unless-stopped
 
   runtime-worker:
@@ -68,9 +78,9 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     command: python -m app.workers.runtime_worker
-    env_file: .env
+    env_file: ${MYCLAW_ENV_FILE:-.env}
     environment:
-      - MYCLAW_ENVIRONMENT=production
+      - MYCLAW_ENVIRONMENT=${MYCLAW_ENVIRONMENT:-development}
       - DATABASE_URL=${DATABASE_URL}
       - DATABASE_POOL_SIZE=${DATABASE_POOL_SIZE:-10}
       - DATABASE_MAX_OVERFLOW=${DATABASE_MAX_OVERFLOW:-20}
@@ -78,6 +88,8 @@ services:
       - SECRET_KEY=${SECRET_KEY}
       - ENCRYPTION_KEY=${ENCRYPTION_KEY}
       - RUNTIME_WORKER_POLL_SECONDS=${RUNTIME_WORKER_POLL_SECONDS:-0.5}
+      - RUNTIME_WORKER_CONCURRENCY=${RUNTIME_WORKER_CONCURRENCY:-8}
+      - RUNTIME_PROVIDER_POOL_MAX_ENTRIES=${RUNTIME_PROVIDER_POOL_MAX_ENTRIES:-32}
       - RUNTIME_OUTBOX_CLAIM_LEASE_SECONDS=${RUNTIME_OUTBOX_CLAIM_LEASE_SECONDS:-30}
       - RUNTIME_RUNNER_LEASE_SECONDS=${RUNTIME_RUNNER_LEASE_SECONDS:-30}
       - RUNTIME_RUNNER_HEARTBEAT_SECONDS=${RUNTIME_RUNNER_HEARTBEAT_SECONDS:-10}
@@ -99,9 +111,9 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     command: python -m app.workers.channel_delivery_worker
-    env_file: .env
+    env_file: ${MYCLAW_ENV_FILE:-.env}
     environment:
-      - MYCLAW_ENVIRONMENT=production
+      - MYCLAW_ENVIRONMENT=${MYCLAW_ENVIRONMENT:-development}
       - DATABASE_URL=${DATABASE_URL}
       - DATABASE_POOL_SIZE=${DATABASE_POOL_SIZE:-10}
       - DATABASE_MAX_OVERFLOW=${DATABASE_MAX_OVERFLOW:-20}
@@ -123,9 +135,9 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     command: python -m app.workers.sandbox_worker
-    env_file: .env
+    env_file: ${MYCLAW_ENV_FILE:-.env}
     environment:
-      - MYCLAW_ENVIRONMENT=production
+      - MYCLAW_ENVIRONMENT=${MYCLAW_ENVIRONMENT:-development}
       - DATABASE_URL=${DATABASE_URL}
       - DATABASE_POOL_SIZE=${DATABASE_POOL_SIZE:-10}
       - DATABASE_MAX_OVERFLOW=${DATABASE_MAX_OVERFLOW:-20}
@@ -154,9 +166,9 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     command: python -m app.workers.connector_worker
-    env_file: .env
+    env_file: ${MYCLAW_ENV_FILE:-.env}
     environment:
-      - MYCLAW_ENVIRONMENT=production
+      - MYCLAW_ENVIRONMENT=${MYCLAW_ENVIRONMENT:-development}
       - DATABASE_URL=${DATABASE_URL}
       - DATABASE_POOL_SIZE=${DATABASE_POOL_SIZE:-6}
       - DATABASE_MAX_OVERFLOW=${DATABASE_MAX_OVERFLOW:-6}
@@ -183,9 +195,9 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     command: python -m app.workers.browser_worker
-    env_file: .env
+    env_file: ${MYCLAW_ENV_FILE:-.env}
     environment:
-      - MYCLAW_ENVIRONMENT=production
+      - MYCLAW_ENVIRONMENT=${MYCLAW_ENVIRONMENT:-development}
       - DATABASE_URL=${DATABASE_URL}
       - DATABASE_POOL_SIZE=${DATABASE_POOL_SIZE:-6}
       - DATABASE_MAX_OVERFLOW=${DATABASE_MAX_OVERFLOW:-6}
@@ -212,9 +224,9 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     command: python -m app.workers.skill_sync_worker
-    env_file: .env
+    env_file: ${MYCLAW_ENV_FILE:-.env}
     environment:
-      - MYCLAW_ENVIRONMENT=production
+      - MYCLAW_ENVIRONMENT=${MYCLAW_ENVIRONMENT:-development}
       - DATABASE_URL=${DATABASE_URL}
       - DATABASE_POOL_SIZE=${DATABASE_POOL_SIZE:-4}
       - DATABASE_MAX_OVERFLOW=${DATABASE_MAX_OVERFLOW:-4}
@@ -241,9 +253,9 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     command: python -m app.workers.maintenance_worker
-    env_file: .env
+    env_file: ${MYCLAW_ENV_FILE:-.env}
     environment:
-      - MYCLAW_ENVIRONMENT=production
+      - MYCLAW_ENVIRONMENT=${MYCLAW_ENVIRONMENT:-development}
       - DATABASE_URL=${DATABASE_URL}
       - DATABASE_POOL_SIZE=${DATABASE_POOL_SIZE:-4}
       - DATABASE_MAX_OVERFLOW=${DATABASE_MAX_OVERFLOW:-4}
@@ -276,7 +288,7 @@ services:
     volumes:
       - mysql_data:/var/lib/mysql
     ports:
-      - "3306:3306"
+      - "${MYCLAW_MYSQL_PORT:-3306}:3306"
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "${MYSQL_USER}", "-p${MYSQL_PASSWORD}"]
       interval: 5s
@@ -293,7 +305,7 @@ services:
     volumes:
       - redis_data:/data
     ports:
-      - "6379:6379"
+      - "${MYCLAW_REDIS_PORT:-6379}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
       interval: 5s

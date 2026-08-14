@@ -8,11 +8,18 @@ from app.database import Base
 from app.models.agent_v1 import AgentBlueprint
 from app.models.common import utcnow, uuid7
 from app.models.foundation import OutboxCommand, PlatformAccount, UserIdentity, UserSession
-from app.models.group_v1 import GroupMembership, GroupSession
+from app.models.group_v1 import (
+    GroupMembership,
+    GroupRun,
+    GroupRunMember,
+    GroupRunReference,
+    GroupSession,
+)
 from app.models.history_v1 import HistorySummary
 from app.models.registry import PolicyDefinition, PolicyVersion, RegisteredModel
 from app.models.runtime_v1 import DurableRunner, Message, Run, WorkItem
 from app.services.history_service import select_history
+from app.services.visible_events import VisibleEventProjection
 
 pytestmark = pytest.mark.unit
 
@@ -25,7 +32,8 @@ async def test_group_history_is_membership_scoped_and_summary_is_namespaced():
     factory = async_sessionmaker(engine, expire_on_commit=False)
     account_id, agent_1, agent_2 = uuid7(), uuid7(), uuid7()
     session_id, group_id, node_1, node_2 = uuid7(), uuid7(), uuid7(), uuid7()
-    run_id, work_id, runner_id, model_id = uuid7(), uuid7(), uuid7(), uuid7()
+    run_id, group_run_id = uuid7(), uuid7()
+    work_id, runner_id, model_id = uuid7(), uuid7(), uuid7()
 
     async with factory.begin() as db:
         db.add(UserIdentity(user_id="u1", status="active"))
@@ -50,31 +58,53 @@ async def test_group_history_is_membership_scoped_and_summary_is_namespaced():
         run = Run(id=run_id, session_id=session_id, user_id="u1", mode="group",
                   status="active")
         work = WorkItem(id=work_id, run_id=run_id, session_id=session_id, user_id="u1", mode="group",
-                        owner_agent_id=agent_1, agent_version_id=uuid7(), group_run_id=uuid7(),
+                        owner_agent_id=agent_1, agent_version_id=uuid7(), group_run_id=group_run_id,
                         group_membership_id=node_1, goal="g", status="running", execution_epoch=1, attempt_no=1)
         runner = DurableRunner(id=runner_id, work_item_id=work_id, run_id=run_id, session_id=session_id,
                                agent_id=agent_1, agent_version_id=work.agent_version_id,
-                               execution_epoch=1, status="running", principal_snapshot={"group_membership_id": node_1},
+                               execution_epoch=1, status="running", principal_snapshot={"group_membership_id": node_1, "group_run_id": group_run_id},
                                assembly_snapshot={}, prompt_manifest={},
-                               input_snapshot={"group_session_id": group_id, "group_membership_id": node_1})
-        db.add_all([run, work, runner])
+                               input_snapshot={"group_session_id": group_id, "group_run_id": group_run_id, "group_membership_id": node_1})
+        group_run = GroupRun(
+            id=group_run_id, run_id=run_id, group_session_id=group_id,
+            goal="g", reporter_agent_id=agent_1,
+        )
+        snapshot = GroupRunMember(
+            group_run_id=group_run_id, agent_id=agent_1,
+            membership_id=node_1, agent_version_id=work.agent_version_id,
+            participation_status="available",
+        )
+        db.add_all([run, group_run, snapshot, work, runner])
         visible_user = Message(id=uuid7(), session_id=session_id, user_id="u1", scope_type="group",
-            group_session_id=group_id, sender_type="user", sender_user_id="u1", recipient_type="agent",
+            group_session_id=group_id, group_run_id=group_run_id,
+            sender_type="user", sender_user_id="u1", recipient_type="agent",
             recipient_membership_id=node_1, role="user", content="to one", status="committed")
         own_result = Message(id=uuid7(), session_id=session_id, user_id="u1", scope_type="group",
-            group_session_id=group_id, sender_type="agent", sender_agent_id=agent_1,
+            group_session_id=group_id, group_run_id=group_run_id,
+            sender_type="agent", sender_agent_id=agent_1,
             recipient_type="session", role="assistant", content="from one", status="committed")
         hidden_user = Message(id=uuid7(), session_id=session_id, user_id="u1", scope_type="group",
-            group_session_id=group_id, sender_type="user", sender_user_id="u1", recipient_type="agent",
+            group_session_id=group_id, group_run_id=group_run_id,
+            sender_type="user", sender_user_id="u1", recipient_type="agent",
             recipient_membership_id=node_2, role="user", content="secret to two", status="committed")
         hidden_result = Message(id=uuid7(), session_id=session_id, user_id="u1", scope_type="group",
-            group_session_id=group_id, sender_type="agent", sender_agent_id=agent_2,
+            group_session_id=group_id, group_run_id=group_run_id,
+            sender_type="agent", sender_agent_id=agent_2,
             recipient_type="session", role="assistant", content="secret from two", status="committed")
         direct_to_one = Message(id=uuid7(), session_id=session_id, user_id="u1", scope_type="group",
-            group_session_id=group_id, sender_type="agent", sender_agent_id=agent_2,
+            group_session_id=group_id, group_run_id=group_run_id,
+            sender_type="agent", sender_agent_id=agent_2,
             recipient_type="agent", recipient_membership_id=node_1,
             role="assistant", content="direct to one", status="committed")
-        db.add_all([visible_user, own_result, hidden_user, hidden_result, direct_to_one])
+        group_note_from_two = Message(id=uuid7(), session_id=session_id, user_id="u1", scope_type="group",
+            group_session_id=group_id, group_run_id=group_run_id,
+            sender_type="agent", sender_agent_id=agent_2,
+            recipient_type="group", visibility="group",
+            role="assistant", content="shared progress from two", status="committed")
+        db.add_all([
+            visible_user, own_result, hidden_user, hidden_result,
+            direct_to_one, group_note_from_two,
+        ])
         policy = PolicyDefinition(id=uuid7(), policy_key="history.summary_recent", policy_type="history",
             name="Summary", description="Summary", implementation_ref="x", implementation_version="1",
             default_parameters={}, parameter_version=3, enabled=True)
@@ -100,6 +130,7 @@ async def test_group_history_is_membership_scoped_and_summary_is_namespaced():
         ]
         assert hidden_user.id not in selection.manifest["selected_message_ids"]
         assert hidden_result.id not in selection.manifest["selected_message_ids"]
+        assert group_note_from_two.id not in selection.manifest["selected_message_ids"]
 
     async with factory() as db:
         summary = await db.scalar(select(HistorySummary))
@@ -108,6 +139,7 @@ async def test_group_history_is_membership_scoped_and_summary_is_namespaced():
         assert summary.scope_type == "group_agent"
         assert summary.group_session_id == group_id
         assert summary.group_membership_id == node_1
+        assert summary.group_run_id == group_run_id
         assert summary.through_message_id == own_result.id
         assert command.payload_ref == {
             "history_summary_id": summary.id,
@@ -115,6 +147,112 @@ async def test_group_history_is_membership_scoped_and_summary_is_namespaced():
             "policy_version_id": policy_version.id,
             "model_id": model_id,
             "model_version_id": "summary-model-version",
+        }
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_group_history_is_current_run_scoped_unless_explicitly_referenced():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    account_id, agent_id = uuid7(), uuid7()
+    session_id, group_id, membership_id = uuid7(), uuid7(), uuid7()
+    old_run_id, current_run_id = uuid7(), uuid7()
+    old_group_run_id, current_group_run_id = uuid7(), uuid7()
+    old_message_id, current_message_id = uuid7(), uuid7()
+
+    async with factory.begin() as db:
+        db.add_all([
+            UserIdentity(user_id="run-scope-user", status="active"),
+            PlatformAccount(
+                id=account_id, user_id="run-scope-user",
+                display_name="Run scope", status="active",
+            ),
+            AgentBlueprint(
+                id=agent_id, owner_account_id=account_id,
+                visibility="enterprise", status="published", next_version_no=1,
+            ),
+            UserSession(
+                id=session_id, user_id="run-scope-user",
+                account_id=account_id, entry_agent_id=agent_id, status="active",
+            ),
+            GroupSession(
+                id=group_id, session_id=session_id, user_id="run-scope-user",
+                initiator_agent_id=agent_id, status="open", goal="g",
+                bootstrap_context="b",
+            ),
+            GroupMembership(
+                id=membership_id, group_session_id=group_id,
+                agent_id=agent_id, status="joined", invited_by_kind="system",
+                reason="emergent", authorization_source="group_enabled_network_policy",
+                joined_at=utcnow(),
+            ),
+            Run(
+                id=old_run_id, session_id=session_id, user_id="run-scope-user",
+                mode="group", status="completed", completed_at=utcnow(),
+                terminal_reason="completed",
+            ),
+            Run(
+                id=current_run_id, session_id=session_id,
+                user_id="run-scope-user", mode="group", status="active",
+            ),
+            GroupRun(
+                id=old_group_run_id, run_id=old_run_id,
+                group_session_id=group_id, goal="old", reporter_agent_id=agent_id,
+            ),
+            GroupRun(
+                id=current_group_run_id, run_id=current_run_id,
+                group_session_id=group_id, goal="current",
+                reporter_agent_id=agent_id,
+            ),
+            GroupRunMember(
+                group_run_id=old_group_run_id, agent_id=agent_id,
+                membership_id=membership_id, participation_status="available",
+            ),
+            GroupRunMember(
+                group_run_id=current_group_run_id, agent_id=agent_id,
+                membership_id=membership_id, participation_status="available",
+            ),
+            Message(
+                id=old_message_id, session_id=session_id,
+                user_id="run-scope-user", scope_type="group",
+                group_session_id=group_id, group_run_id=old_group_run_id,
+                sender_type="agent", sender_agent_id=agent_id,
+                recipient_type="group", visibility="group", role="assistant",
+                content="old run fact", status="committed",
+            ),
+            Message(
+                id=current_message_id, session_id=session_id,
+                user_id="run-scope-user", scope_type="group",
+                group_session_id=group_id, group_run_id=current_group_run_id,
+                sender_type="agent", sender_agent_id=agent_id,
+                recipient_type="group", visibility="group", role="assistant",
+                content="current run fact", status="committed",
+            ),
+        ])
+
+    async with factory.begin() as db:
+        projection = VisibleEventProjection(db)
+        visible = await projection.list_direct_messages(
+            user_id="run-scope-user", session_id=session_id, mode="group",
+            group_membership_id=membership_id,
+            group_run_id=current_group_run_id,
+        )
+        assert [item.id for item in visible] == [current_message_id]
+        db.add(GroupRunReference(
+            group_run_id=current_group_run_id,
+            referenced_group_run_id=old_group_run_id,
+        ))
+        await db.flush()
+        visible_with_reference = await projection.list_direct_messages(
+            user_id="run-scope-user", session_id=session_id, mode="group",
+            group_membership_id=membership_id,
+            group_run_id=current_group_run_id,
+        )
+        assert {item.id for item in visible_with_reference} == {
+            old_message_id, current_message_id,
         }
     await engine.dispose()
 

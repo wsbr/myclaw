@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from app.models.agent_v1 import AgentAssemblyVersion, AgentBlueprint, AgentCard
 
@@ -33,6 +33,7 @@ async def discover_agent_cards(
     query: str | None = None, domain_tags: list[str] | None = None,
     group_enabled: bool | None = None, capability_keys: list[str] | None = None,
     governance_labels: list[str] | None = None, limit: int = 20,
+    exhaustive: bool = False,
 ) -> list[AgentCard]:
     """Return current published cards visible to the original account.
 
@@ -40,7 +41,7 @@ async def discover_agent_cards(
     visibility, publication, mode, and collaboration checks before creating a
     target WorkItem.
     """
-    limit = max(1, min(int(limit), 100))
+    limit = max(1, min(int(limit), 500))
     statement = (
         select(AgentCard)
         .join(AgentBlueprint, AgentBlueprint.id == AgentCard.agent_id)
@@ -53,27 +54,22 @@ async def discover_agent_cards(
             AgentCard.availability == "available",
         )
         .order_by(AgentCard.name, AgentCard.agent_id)
-        .limit(500)
     )
+    if account_id is None:
+        statement = statement.where(AgentCard.visibility == "enterprise")
+    else:
+        statement = statement.where(or_(
+            AgentCard.visibility == "enterprise",
+            AgentBlueprint.owner_account_id == account_id,
+        ))
+    if not exhaustive:
+        statement = statement.limit(500)
     if actor_agent_id:
         statement = statement.where(AgentCard.agent_id != actor_agent_id)
     if group_enabled is not None:
         statement = statement.where(AgentCard.group_enabled.is_(group_enabled))
     rows = list(await db.scalars(statement))
-    agents = {} if not rows else {
-        item.id: item for item in await db.scalars(select(AgentBlueprint).where(
-            AgentBlueprint.id.in_([card.agent_id for card in rows])
-        ))
-    }
-    visible = [
-        card for card in rows
-        if card.visibility == "enterprise"
-        or (
-            account_id is not None
-            and agents.get(card.agent_id) is not None
-            and agents[card.agent_id].owner_account_id == account_id
-        )
-    ]
+    visible = rows
     normalized_query = str(query or "").strip().casefold()
     requested_tags = {str(item).strip().casefold() for item in domain_tags or [] if str(item).strip()}
     requested_capabilities = {

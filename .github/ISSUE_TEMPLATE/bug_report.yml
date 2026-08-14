@@ -1,0 +1,55 @@
+name: Bug report
+description: Report a reproducible MyClaw defect without secrets or private data.
+title: "[Bug] "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include credentials, private prompts, user data, or undisclosed vulnerabilities. Use private security reporting for security issues.
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: v0.1.0 or commit SHA
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Chat
+        - Plan
+        - Group
+        - Runtime / Runner
+        - Tool / Sandbox
+        - Model Provider
+        - API / SSE
+        - Frontend
+        - Deployment / Documentation
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Provide minimal, sanitized steps and relevant IDs only when safe.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Sanitized evidence
+      description: Error codes, state transitions, and redacted logs. Never paste keys or full private transcripts.

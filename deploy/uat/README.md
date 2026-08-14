@@ -49,4 +49,6 @@ Tool v3 是一次性破坏性重构，只允许使用 `deploy/uat/destructive-re
 
 重置完成后，对同一套 `myclaw-uat` 服务执行 `deploy/uat/run-acceptance.sh`。脚本拒绝脏工作树或不匹配的固定 Commit，并要求真实主模型、显式选择的 Bailian 或 Bocha/Brave Search 模式、公共 OpenAI Docs MCP 与隔离 Chromium 全部可用；发布证据写入被 Git 忽略的 `deploy/uat/evidence/<commit>/`。
 
+仅复验本次涌现式 Group 契约时，可执行 `deploy/uat/run-group-acceptance.sh`。它仍要求与干净 Commit 绑定的标准门禁和真实主模型，但不要求与 Group 场景无关的 Search Provider；验收会校验 Recovery → Evidence → Security 的语义选组、全异步定向 handoff、无重复交付与 Worker 重启恢复。
+
 默认只绑定本机回环地址。如需让同一局域网的另一台设备访问，必须同时调整 `UAT_BIND_HOST`、`UAT_API_PUBLIC_URL` 与 `CORS_ORIGINS`，然后重建 Frontend，不能只开放端口。

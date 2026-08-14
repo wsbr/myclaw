@@ -1,0 +1,40 @@
+name: Feature request
+description: Propose a focused capability or product behavior.
+title: "[Feature] "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user or operator problem should MyClaw solve?
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe observable behavior, not a required internal implementation.
+    validations:
+      required: true
+  - type: dropdown
+    id: invariant
+    attributes:
+      label: Architectural area
+      options:
+        - Agent assembly
+        - Unified Runtime
+        - Chat
+        - Plan
+        - Group / Agent network
+        - Tool / Skill / Sandbox
+        - Context / Memory
+        - Observability / Operations
+        - Deployment / Documentation
+    validations:
+      required: true
+  - type: textarea
+    id: tradeoffs
+    attributes:
+      label: Constraints and trade-offs
+      description: Include permission, cost, recovery, or compatibility concerns.

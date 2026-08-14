@@ -22,7 +22,7 @@ MyClaw 是 Agent-native 的云端 Agent 平台。个人、岗位、业务域和�
 - **WorkingPlan**：Agent 在复杂任务中按需维护的可见工作计划；
 - **ToolInvocation / AgentInvocation**：真实 Tool 行动和 Agent 协作；
 - **Clarification / Approval**：可以跨时间恢复的人类输入与高影响确认；
-- **GroupSession / Membership / GroupRun**：从工作网选取 Agent 后形成的协作关系；GroupRun 的状态由一对一 Run 统一承载；
+- **GroupSession / Membership / GroupRun**：正常 Chat 中由模型从治理后的 Agent 语义目录按诉求选员、Chat 后涌现的协作关系；GroupRun 的状态由一对一 Run 统一承载；
 - **Workspace / Artifact**：分区的运行工作区与不可变正式交付快照；
 - **ExecutionEvent / Trace**：可靠业务时间线和诊断数据。
 
@@ -92,11 +92,11 @@ Plan 是实施前检查点，而不是独立工作流引擎。进入 Plan 后，
 
 Group 是工作网中多个完整 Agent 围绕当前目标形成的临时逻辑协作关系。成员不需要保持常驻进程；消息或调用到达时，平台按需运行相应 Agent。
 
-用户可以直接从工作网选成员；当前 Agent 也可以搜索候选并提议邀请。Group 不依赖产品/开发/测试之类的角色模板，也不预生成固定协作边。成员加入后保留自己的身份、Instructions、Memory、Tool 和专业判断，可以直接通信、认领工作、质疑、返工或向用户询问。
+用户先进行正常 Chat。root Runner 把原身份与治理边界内全部已开启 Group 且当前可用 Agent 的 `agent_id/name/description` 作为候选数据交给模型；当前 Chat Agent 保留为会话锚点，模型按用户诉求选择最小必要协作成员，首轮回答成功提交后形成涌现式 Group。Group 不依赖产品/开发/测试之类的角色模板，也不预生成固定协作边。成员加入后保留自己的身份、Instructions、Memory、Tool 和专业判断，可以直接通信、认领工作、质疑、返工或向用户询问。
 
-第一阶段为了可控 UAT，由用户明确选择产品、开发、测试三个 Agent，并固定本次 GroupRun 的成员快照；内部协作仍由 Agent 自主产生。长期可以按 Collaboration Policy 动态加入、退出和替换成员。
+GroupSession 的未来成员随每次 Chat 按最新 AgentCard 与 Collaboration Policy 重算；每个 GroupRun 仍固定当时的成员与 AgentVersion 快照。旧版手选三人 Group 只作为历史兼容路径保留。
 
-每个 GroupRun 固定一名 Reporter，默认是本轮入口 Agent。它只在所有持久工作自然空闲后负责汇总，不获得额外权限或 Supervisor 地位；平台通过持久事件幂等唤醒，避免“大家都结束了但没人向用户交付”。
+每个 GroupRun 固定一名 Reporter；源 Chat Agent 被模型选中时优先由它担任，否则使用模型选择中的首位 Agent。Reporter 只在所有持久工作自然空闲后负责汇总，不获得额外权限或 Supervisor 地位；平台通过持久事件幂等唤醒，避免“大家都结束了但没人向用户交付”。
 
 ## Plan 是通用工作状态
 
@@ -115,9 +115,9 @@ WorkingPlan 可以在三个模式中出现：
 ```text
 AgentVersion → AgentCard → Enterprise Agent Network
                               ↓
-                    搜索 / 推荐 / 直接选择
+                 Chat 模型按诉求语义选员
                               ↓
-                    邀请并形成 Membership
+                    Chat 完成后形成 Membership
                               ↓
                          GroupSession
 ```
@@ -175,7 +175,7 @@ Tool 在授权期间持续可见，不因成功一次被消费。是否重复执
 
 - 个人工作助手验证 Chat；
 - 项目经理验证显式 Plan 的“只读规划 → 用户批准 → 动态实施”；
-- 产品、开发、测试验证从工作网选取固定成员后的对等 Group 协作。
+- 产品、开发、测试验证正常 Chat 中语义选员、Chat 后涌现、单 Run 冻结快照的对等 Group 协作。
 
 验收重点是同一 Agent Loop、自然语言、稳定 Tool Calling、动态计划、持久等待、恢复、真实九例和 Artifact，而不是 Proposal JSON、冻结 DAG、Group 模板或 LLM 完成合同。
 

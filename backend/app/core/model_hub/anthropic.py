@@ -133,15 +133,19 @@ class AnthropicLLM(BaseLLM):
         if params.get("temperature") is not None:
             kwargs["temperature"] = params["temperature"]
 
-        # SDK assembles the final tool_use blocks, while raw events let the
-        # ModelAdapter fence retries as soon as any Provider payload arrives.
+        # SDK assembles the final tool_use blocks. Raw Tool events fence retries
+        # while their JSON is incomplete; lifecycle, thinking and usage events
+        # are metadata and remain safe to retry after a transport failure.
         async with self.client.messages.stream(**kwargs) as stream:
             async for event in stream:
-                yield LLMChunk(type="transport_payload")
-                if (
-                    getattr(event, "type", None) == "content_block_delta"
-                    and getattr(getattr(event, "delta", None), "type", None) == "text_delta"
-                ):
+                event_type = getattr(event, "type", None)
+                delta_type = getattr(getattr(event, "delta", None), "type", None)
+                block_type = getattr(getattr(event, "content_block", None), "type", None)
+                if event_type == "content_block_start" and block_type == "tool_use":
+                    yield LLMChunk(type="transport_payload")
+                elif event_type == "content_block_delta" and delta_type == "input_json_delta":
+                    yield LLMChunk(type="transport_payload")
+                if event_type == "content_block_delta" and delta_type == "text_delta":
                     yield LLMChunk(
                         type="text_delta", content=event.delta.text,
                         item_index=getattr(event, "index", 0),

@@ -315,7 +315,8 @@ export interface GroupSession {
   session_id: string
   status: 'open' | 'closed' | 'archived'
   initiator_agent_id: string
-  membership_policy: 'fixed_for_run'
+  membership_policy: 'fixed_for_run' | 'dynamic_future'
+  formation_mode: 'manual_selected' | 'emergent_model_selected'
   version: number
 }
 
@@ -349,11 +350,14 @@ export interface InteractionGraph {
   nodes: GroupRunMember[]
   edges: Array<{
     source_agent_id: string
-    target_agent_id: string
-    cause_type: 'message' | 'agent_invocation'
+    target_agent_id: string | null
+    target_node_id: string
+    cause_type: 'message' | 'group_message' | 'agent_invocation'
     cause_id: string
     status: string
     created_at: string
+    result_message_id: string | null
+    completed_at: string | null
   }>
 }
 

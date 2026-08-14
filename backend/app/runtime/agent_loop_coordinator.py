@@ -87,14 +87,17 @@ class _TurnRecorder:
             )
             self.attempts[event.attempt_no] = attempt
             self.db.add(attempt)
-            await self.db.flush()
+            # Provider I/O must never inherit this transaction. Persist the
+            # attempt start as a short fact transaction, then release the
+            # connection before the SDK begins waiting for response bytes.
+            await self.db.commit()
             return
         attempt = self.attempts[event.attempt_no]
         if event.phase == "payload":
             attempt.received_payload = True
             if attempt.first_payload_at is None:
                 attempt.first_payload_at = utcnow()
-            await self.db.flush()
+            await self.db.commit()
             return
         attempt.received_payload = event.received_payload
         attempt.ended_at = utcnow()
@@ -113,7 +116,7 @@ class _TurnRecorder:
             attempt.status = "outcome_unknown" if event.received_payload else "failed"
             attempt.error_code = getattr(error, "code", type(error).__name__)
             attempt.error_detail = str(error)
-        await self.db.flush()
+        await self.db.commit()
 
 
 class AgentLoopCoordinator:
@@ -182,6 +185,10 @@ class AgentLoopCoordinator:
                     )
             request_count = None
             history_before_count = history_count
+            if db is not None and db.in_transaction():
+                # Anthropic token counting can itself be a Provider request.
+                # Commit prior Tool/Turn facts before any remote count call.
+                await db.commit()
             if context.hard_input_limit is not None:
                 messages, turn_web_projection = project_web_messages(
                     messages, hard_input_limit=context.hard_input_limit,
@@ -277,7 +284,9 @@ class AgentLoopCoordinator:
                     turn_items=[], usage={}, started_at=utcnow(),
                 )
                 db.add(persisted_turn)
-                await db.flush()
+                # The AgentTurn must exist before ProviderAttempt callbacks,
+                # but no transaction/connection may span the model call.
+                await db.commit()
                 recorder = _TurnRecorder(db, persisted_turn, identity)
             try:
                 async def observe_stream(event: StreamEvent) -> None:
