@@ -30,7 +30,11 @@ from app.models.registry import (
 from app.models.runtime_v1 import (
     DurableRunner, Run, ToolAttempt, ToolInvocation, WorkItem, Workspace, WorkspaceLockRequest,
 )
-from app.persistence.reliable_writes import ExecutionEventWriter, OutboxWriter
+from app.persistence.reliable_writes import (
+    ExecutionEventWriter,
+    OutboxWriter,
+    tenant_command_error,
+)
 from app.services.runtime_resume_service import (
     has_pending_actions, queue_work_item_resume, tool_continuation,
 )
@@ -111,6 +115,8 @@ def _safe_request_arguments(value):
 
 @dataclass(frozen=True)
 class SandboxClaim:
+    tenant_id: str
+    account_id: str
     invocation_id: str
     attempt_id: str
     lease_token: str
@@ -208,6 +214,21 @@ class SandboxWorker:
             if work is None or run is None or source_runner is None:
                 command.status = "dead"
                 command.last_error = "Durable Tool runtime graph is unavailable"
+                return None
+            authority_error = tenant_command_error(
+                command, tenant_id=run.tenant_id, account_id=run.account_id,
+            )
+            if authority_error or any((
+                invocation.tenant_id != run.tenant_id,
+                invocation.account_id != run.account_id,
+                work.tenant_id != run.tenant_id,
+                source_runner.tenant_id != run.tenant_id,
+            )):
+                command.status = "dead"
+                command.last_error = authority_error or "runtime_graph_tenant_mismatch"
+                command.dispatch_lease_owner = None
+                command.dispatch_lease_token = None
+                command.dispatch_lease_expires_at = None
                 return None
             if delivery_budget_exhausted:
                 invocation.status = "failed"
@@ -368,6 +389,7 @@ class SandboxWorker:
                     db, claim_arguments["text"],
                 )
             return SandboxClaim(
+                tenant_id=run.tenant_id, account_id=run.account_id,
                 invocation_id=invocation.id, attempt_id=attempt.id, lease_token=lease_token,
                 tool_key=invocation.tool_key, arguments=claim_arguments,
                 session_id=run.session_id, run_id=run.id, work_item_id=work.id,
@@ -407,6 +429,7 @@ class SandboxWorker:
                 )
             else:
                 context = RuntimeContext(
+                    tenant_id=claim.tenant_id, account_id=claim.account_id,
                     session_id=claim.session_id, runner_id=claim.source_runner_id,
                     task_id=claim.work_item_id, user_id=claim.user_id, agent_id=claim.agent_id,
                     workspace_id=claim.workspace_id, workspace_lock_request_id=claim.lock_request_id,
@@ -680,6 +703,7 @@ class SandboxWorker:
                     aggregate_type="tool_invocation", aggregate_id=invocation.id,
                     partition_key=run.session_id,
                     dedupe_key=f"event:{settled.id}:retry_tool",
+                    tenant_id=run.tenant_id, account_id=run.account_id,
                     payload_ref={"tool_invocation_id": invocation.id},
                     available_at=utcnow() + timedelta(
                         seconds=(2 ** invocation.attempt_count) + random.uniform(0.05, 0.5)

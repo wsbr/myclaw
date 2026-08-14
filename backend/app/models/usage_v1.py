@@ -99,11 +99,15 @@ class UsageLedgerEntry(Base):
         ),
         Index("ix_usage_entry_run_created", "run_id", "created_at", "id"),
         Index("ix_usage_entry_account_created", "account_id", "created_at", "id"),
+        Index("ix_usage_entry_tenant_created", "tenant_id", "created_at", "id"),
         Index("ix_usage_entry_agent_created", "agent_version_id", "created_at", "id"),
         Index("ix_usage_entry_model_created", "model_version_id", "created_at", "id"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
+    tenant_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("tenant.id"), nullable=False
+    )
     account_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("platform_account.id"), nullable=False
     )

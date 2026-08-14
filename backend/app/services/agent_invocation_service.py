@@ -57,7 +57,10 @@ async def persist_rejected_agent_invocation(
     are durable audit facts and never create a target WorkItem.
     """
     target_agent_id = str(arguments.get("agent_id") or "").strip()
-    target = await db.get(AgentBlueprint, target_agent_id) if target_agent_id else None
+    target = await db.scalar(select(AgentBlueprint).where(
+        AgentBlueprint.id == target_agent_id,
+        AgentBlueprint.tenant_id == run.tenant_id,
+    )) if target_agent_id else None
     group_run = await db.scalar(select(GroupRun).where(
         GroupRun.run_id == run.id,
     ).with_for_update()) if run.mode == "group" else None
@@ -87,7 +90,8 @@ async def persist_rejected_agent_invocation(
             raise AgentInvocationRejected("AgentInvocation business idempotency collision")
         return existing
     invocation = AgentInvocation(
-        id=uuid7(), run_id=run.id, caller_work_item_id=caller_work.id,
+        id=uuid7(), tenant_id=run.tenant_id, account_id=run.account_id,
+        run_id=run.id, caller_work_item_id=caller_work.id,
         caller_runner_id=caller_runner.id, caller_agent_id=caller_runner.agent_id,
         target_agent_id=target.id,
         target_agent_version_id=target.current_published_version_id,
@@ -103,6 +107,7 @@ async def persist_rejected_agent_invocation(
             input_data=dict(arguments.get("input") or {}),
         ),
         authorization_snapshot={
+            "tenant_id": run.tenant_id,
             "account_id": caller_runner.principal_snapshot.get("account_id"),
             "permission_mode": run.permission_mode,
             "permission_revision": caller_runner.principal_snapshot.get("permission_revision"),
@@ -188,7 +193,10 @@ async def dispatch_agent_invocation(
                 "Group AgentInvocation would re-enter its causal Agent chain",
                 "group_invocation_cycle",
             )
-    target = await db.get(AgentBlueprint, target_agent_id)
+    target = await db.scalar(select(AgentBlueprint).where(
+        AgentBlueprint.id == target_agent_id,
+        AgentBlueprint.tenant_id == run.tenant_id,
+    ))
     if target is None:
         raise AgentInvocationRejected(
             "target Agent is unavailable", "agent_invocation_target_unavailable",
@@ -198,6 +206,7 @@ async def dispatch_agent_invocation(
         try:
             target, _card = await resolve_callable_agent(
                 db,
+                tenant_id=run.tenant_id,
                 account_id=caller_runner.principal_snapshot.get("account_id"),
                 actor_agent_id=caller_runner.agent_id,
                 target_agent_id=target_agent_id,
@@ -216,6 +225,7 @@ async def dispatch_agent_invocation(
             try:
                 target, _card = await resolve_callable_agent(
                     db,
+                    tenant_id=run.tenant_id,
                     account_id=caller_runner.principal_snapshot.get("account_id"),
                     actor_agent_id=caller_runner.agent_id,
                     target_agent_id=target_agent_id,
@@ -324,7 +334,8 @@ async def dispatch_agent_invocation(
     invocation_id, target_work_id, target_runner_id = uuid7(), uuid7(), uuid7()
     request_message_id = uuid7() if run.mode == "group" else None
     target_work = WorkItem(
-        id=target_work_id, run_id=run.id, session_id=run.session_id, user_id=run.user_id,
+        id=target_work_id, tenant_id=run.tenant_id,
+        run_id=run.id, session_id=run.session_id, user_id=run.user_id,
         mode=run.mode, owner_agent_id=target_agent_id, agent_version_id=target_version_id,
         parent_work_item_id=caller_work.id,
         group_run_id=group_run.id if run.mode == "group" else None,
@@ -332,7 +343,8 @@ async def dispatch_agent_invocation(
         goal=request_text, purpose="delegation", status="queued", execution_epoch=1, attempt_no=1,
     )
     target_runner = DurableRunner(
-        id=target_runner_id, work_item_id=target_work.id, run_id=run.id, session_id=run.session_id,
+        id=target_runner_id, tenant_id=run.tenant_id,
+        work_item_id=target_work.id, run_id=run.id, session_id=run.session_id,
         agent_id=target_agent_id, agent_version_id=target_version_id, execution_epoch=1, status="queued",
         principal_snapshot={**dict(caller_runner.principal_snapshot), "current_agent_id": target_agent_id,
                             "group_membership_id": target_group_scope_id if run.mode == "group" else caller_runner.principal_snapshot.get("group_membership_id"),
@@ -352,7 +364,8 @@ async def dispatch_agent_invocation(
         else "subtask"
     )
     agent_invocation = AgentInvocation(
-        id=invocation_id, run_id=run.id,
+        id=invocation_id, tenant_id=run.tenant_id, account_id=run.account_id,
+        run_id=run.id,
         caller_work_item_id=caller_work.id, caller_runner_id=caller_runner.id,
         caller_agent_id=caller_runner.agent_id,
         target_work_item_id=target_work.id, target_agent_id=target_agent_id,
@@ -373,6 +386,7 @@ async def dispatch_agent_invocation(
         idempotency_key=resolved_operation_key, operation_key=resolved_operation_key,
         request_hash=request_hash,
         authorization_snapshot={
+            "tenant_id": run.tenant_id,
             "account_id": caller_runner.principal_snapshot.get("account_id"),
             "permission_mode": run.permission_mode,
             "permission_revision": caller_runner.principal_snapshot.get("permission_revision"),
@@ -477,6 +491,7 @@ async def dispatch_agent_invocation(
     await OutboxWriter(db).enqueue(
         topic="runtime.runner", action="execute", aggregate_type="runner", aggregate_id=target_runner.id,
         partition_key=run.session_id, dedupe_key=f"event:{queued.id}:execute",
+        tenant_id=run.tenant_id, account_id=run.account_id,
         payload_ref={"runner_id": target_runner.id, "agent_invocation_id": agent_invocation.id},
     )
     return agent_invocation

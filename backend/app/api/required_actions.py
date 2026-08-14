@@ -459,6 +459,7 @@ async def decide_approval(
             aggregate_type="tool_invocation", aggregate_id=invocation.id,
             partition_key=session.id,
             dedupe_key=f"event:{queued.id}:execute_tool",
+            tenant_id=run.tenant_id, account_id=run.account_id,
             payload_ref={"tool_invocation_id": invocation.id},
         )
         another_approval = await db.scalar(select(Approval.id).where(
@@ -589,7 +590,8 @@ async def decide_tool_confirmation(
             detail={"code": "confirmation_source_runner_unavailable"},
         )
     runner = DurableRunner(
-        id=uuid7(), work_item_id=work.id, run_id=run.id, session_id=run.session_id,
+        id=uuid7(), tenant_id=run.tenant_id,
+        work_item_id=work.id, run_id=run.id, session_id=run.session_id,
         agent_id=source_runner.agent_id, agent_version_id=source_runner.agent_version_id,
         execution_epoch=work.execution_epoch, status="queued",
         principal_snapshot=dict(source_runner.principal_snapshot),
@@ -625,6 +627,7 @@ async def decide_tool_confirmation(
     await OutboxWriter(db).enqueue(
         topic="runtime.runner", action="execute", aggregate_type="runner", aggregate_id=runner.id,
         partition_key=run.session_id, dedupe_key=f"event:{queued.id}:execute",
+        tenant_id=run.tenant_id, account_id=run.account_id,
         payload_ref={"runner_id": runner.id, "confirmation_id": confirmation.id},
     )
     response = view(confirmation, invocation)

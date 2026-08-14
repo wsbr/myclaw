@@ -65,6 +65,7 @@ async def create_notification_delivery_if_channel(
         topic="runtime.delivery", action="deliver_notification",
         aggregate_type="notification_delivery", aggregate_id=delivery.id,
         partition_key=session.id, dedupe_key=f"event:{created.id}:deliver",
+        tenant_id=session.tenant_id, account_id=session.account_id,
         payload_ref={"delivery_id": delivery.id},
     )
     return delivery

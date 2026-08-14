@@ -15,4 +15,4 @@ def test_alembic_has_one_head_and_unique_revision_ids():
     revision_ids = [item.revision for item in revisions]
     assert len(revision_ids) == len(set(revision_ids))
     heads = [item.revision for item in revisions if item.is_head]
-    assert heads == ["0037"]
+    assert heads == ["0038"]

@@ -25,7 +25,8 @@ async def test_tool_approval_resume_preserves_group_runner_snapshots(monkeypatch
         status="pending", policy_version=3, version=1, created_at=utcnow(),
     )
     invocation = ToolInvocation(
-        id="invocation", runner_id="source-runner", work_item_id="work",
+        id="invocation", tenant_id="test-tenant", account_id="account",
+        runner_id="source-runner", work_item_id="work",
         run_id="run", session_id="session", platform_tool_id="tool",
         tool_key="write_file", execution_mode="inline", status="waiting_confirmation",
         arguments={"path": "audit.txt", "content": "evidence"},
@@ -33,10 +34,12 @@ async def test_tool_approval_resume_preserves_group_runner_snapshots(monkeypatch
         principal_hash="b" * 64, attempt_count=0, version=1,
     )
     source = DurableRunner(
-        id="source-runner", work_item_id="work", run_id="run", session_id="session",
+        id="source-runner", tenant_id="test-tenant",
+        work_item_id="work", run_id="run", session_id="session",
         agent_id="group-agent", agent_version_id="group-version", execution_epoch=4,
         status="succeeded",
         principal_snapshot={
+            "tenant_id": "test-tenant", "account_id": "account",
             "user_id": "user", "mode": "group", "current_agent_id": "group-agent",
             "group_membership_id": "group-node", "delegation_chain": ["entry-agent"],
         },
@@ -48,7 +51,8 @@ async def test_tool_approval_resume_preserves_group_runner_snapshots(monkeypatch
         },
     )
     run = SimpleNamespace(
-        id="run", session_id="session", user_id="user", entry_agent_id="entry-agent",
+        id="run", tenant_id="test-tenant", account_id="account",
+        session_id="session", user_id="user", entry_agent_id="entry-agent",
         mode="group", status="waiting_tool", wait_reason="waiting_tool", version=2,
     )
     work = SimpleNamespace(
@@ -78,7 +82,9 @@ async def test_tool_approval_resume_preserves_group_runner_snapshots(monkeypatch
         ToolConfirmationDecisionRequest(arguments_hash=digest, reason="approved"),
         if_match='W/"1"', idempotency_key="approval-1", db=db,
         current=CurrentAccount(
-            account=SimpleNamespace(id="account", user_id="user"),
+            account=SimpleNamespace(
+                id="account", tenant_id="test-tenant", user_id="user",
+            ),
             roles=frozenset({"user"}),
         ),
     )

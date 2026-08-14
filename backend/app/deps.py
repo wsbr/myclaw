@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.security import decode_token
 from app.database import get_db
 from app.models.foundation import AgentApiKey, PlatformAccount, PlatformAccountRole
+from app.models.tenant_v1 import Tenant, TenantMembership
 from app.services.agent_api_key_service import authenticate_api_key
 
 
@@ -23,6 +24,10 @@ class CurrentAccount:
     account: PlatformAccount
     roles: frozenset[str]
 
+    @property
+    def tenant_id(self) -> str:
+        return self.account.tenant_id
+
     def has_any_role(self, *roles: str) -> bool:
         return bool(self.roles.intersection(roles))
 
@@ -33,6 +38,14 @@ class SessionActor:
     roles: frozenset[str] = frozenset()
     api_key: AgentApiKey | None = None
     asserted_user_id: str | None = None
+
+    @property
+    def tenant_id(self) -> str | None:
+        if self.account is not None:
+            return self.account.tenant_id
+        if self.api_key is not None:
+            return self.api_key.tenant_id
+        return None
 
     @property
     def principal_type(self) -> str:
@@ -59,6 +72,16 @@ async def _resolve_account(token: str, db: AsyncSession) -> CurrentAccount:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token authorization is stale")
     if payload.get("user_id") != account.user_id:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token identity is stale")
+    if payload.get("tenant_id") != account.tenant_id:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token Tenant is stale")
+    tenant = await db.get(Tenant, account.tenant_id)
+    membership = await db.scalar(select(TenantMembership).where(
+        TenantMembership.tenant_id == account.tenant_id,
+        TenantMembership.account_id == account.id,
+        TenantMembership.status == "active",
+    ))
+    if tenant is None or tenant.status != "active" or membership is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Tenant authority unavailable")
     roles = frozenset(await db.scalars(select(PlatformAccountRole.role_key).where(
         PlatformAccountRole.account_id == account.id,
     )))
@@ -107,6 +130,7 @@ async def get_session_actor(
             raise HTTPException(status_code=400, detail={"code": "invalid_user_id"})
         account = await db.scalar(select(PlatformAccount).where(
             PlatformAccount.user_id == asserted,
+            PlatformAccount.tenant_id == key.tenant_id,
             PlatformAccount.status == "active",
         ))
         return SessionActor(

@@ -19,14 +19,14 @@ from app.core.model_hub.registry import ModelHub
 from app.database import AsyncSessionLocal
 from app.models.agent_v1 import AgentAssemblyVersion
 from app.models.common import utcnow, uuid7
-from app.models.foundation import OutboxCommand
+from app.models.foundation import OutboxCommand, UserSession
 from app.models.history_v1 import HistorySummary
 from app.models.memory_v1 import (
     MemoryCandidateSourceMessage, MemoryHead, MemoryWriteCandidate,
 )
 from app.models.registry import ModelVersion, PolicyDefinition, PolicyVersion
 from app.models.runtime_v1 import DurableRunner, Message, Run
-from app.persistence.reliable_writes import ExecutionEventWriter
+from app.persistence.reliable_writes import ExecutionEventWriter, tenant_command_error
 from app.runtime.model_adapter import ModelAdapter
 from app.runtime.protocol import ProviderError, ProviderRequest, StopReason, Usage
 from app.services.history_service import (
@@ -120,6 +120,7 @@ class MemoryCandidateResult:
 
 @dataclass(frozen=True)
 class MemoryResult:
+    tenant_id: str
     run_id: str
     runner_id: str
     session_id: str
@@ -348,6 +349,7 @@ async def build_memory_result(payload: dict[str, Any]) -> MemoryResult:
             else "user_agent"
         )
         heads = list(await db.scalars(select(MemoryHead).where(
+            MemoryHead.tenant_id == run.tenant_id,
             MemoryHead.user_id == run.user_id,
             MemoryHead.scope == scope,
             MemoryHead.agent_id.is_(None)
@@ -358,6 +360,7 @@ async def build_memory_result(payload: dict[str, Any]) -> MemoryResult:
             (policy_version.parameters or {}).get("extraction_max_tokens", 2048)
         ), 8192))
         identity = {
+            "tenant_id": run.tenant_id,
             "run_id": run.id, "runner_id": runner.id,
             "session_id": run.session_id, "user_id": run.user_id,
             "agent_id": runner.agent_id, "policy_definition_id": policy.id,
@@ -468,6 +471,29 @@ class MaintenanceCommandWorker:
             ).with_for_update(skip_locked=True).limit(1))
             if command is None:
                 return None
+            if command.action == "summarize_history":
+                summary = await db.get(
+                    HistorySummary,
+                    command.payload_ref.get("history_summary_id") or command.aggregate_id,
+                )
+                owner = await db.get(UserSession, summary.session_id) if summary else None
+            else:
+                owner = await db.get(
+                    Run, command.payload_ref.get("run_id") or command.aggregate_id,
+                )
+            if owner is None:
+                command.status = "dead"
+                command.last_error = "maintenance_authority_owner_missing"
+                command.completed_at = now
+                return None
+            authority_error = tenant_command_error(
+                command, tenant_id=owner.tenant_id, account_id=owner.account_id,
+            )
+            if authority_error:
+                command.status = "dead"
+                command.last_error = authority_error
+                command.completed_at = now
+                return None
             token = uuid7()
             command.status = "claimed"
             command.attempt_count += 1
@@ -555,7 +581,8 @@ class MaintenanceCommandWorker:
                     accepted = rejected = 0
                     for item in result.candidates:
                         candidate = MemoryWriteCandidate(
-                            id=uuid7(), user_id=result.user_id,
+                            id=uuid7(), tenant_id=result.tenant_id,
+                            user_id=result.user_id,
                             agent_id=(
                                 result.agent_id if result.scope == "user_agent" else None
                             ),

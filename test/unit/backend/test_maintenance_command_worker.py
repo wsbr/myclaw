@@ -12,6 +12,7 @@ from app.models.foundation import (
     ExecutionEvent, OutboxCommand, PlatformAccount, UserIdentity, UserSession,
 )
 from app.models.history_v1 import HistorySummary
+from app.models.tenant_v1 import DEFAULT_TENANT_ID
 from app.models.registry import (
     ModelVersion, PolicyDefinition, PolicyVersion, RegisteredModel,
 )
@@ -52,6 +53,7 @@ async def _fixture(factory):
                 action="summarize_history", aggregate_type="history_summary",
                 aggregate_id=summary_id, partition_key=session_id,
                 dedupe_key=f"summary:{summary_id}",
+                tenant_id=DEFAULT_TENANT_ID, account_id="maintenance-user",
                 payload_ref={
                     "history_summary_id": summary_id,
                     "model_version_id": "model-version-1",

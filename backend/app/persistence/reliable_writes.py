@@ -16,6 +16,8 @@ from app.models.foundation import (
     ExecutionEventRecipient,
     OutboxCommand,
     PlatformAuditEvent,
+    PlatformAccount,
+    AgentApiKey,
     UserSession,
 )
 
@@ -155,6 +157,7 @@ class PlatformAuditWriter:
         metadata: Mapping[str, Any] | None = None,
         request_id: str | None = None,
         correlation_id: str | None = None,
+        tenant_id: str | None = None,
     ) -> PlatformAuditEvent:
         existing = await self.session.scalar(
             select(PlatformAuditEvent).where(PlatformAuditEvent.dedupe_key == dedupe_key)
@@ -167,8 +170,18 @@ class PlatformAuditWriter:
             ):
                 raise EventDedupeCollision(dedupe_key)
             return existing
+        if tenant_id is None and actor_id is not None:
+            if actor_type == "account":
+                tenant_id = await self.session.scalar(select(PlatformAccount.tenant_id).where(
+                    PlatformAccount.id == actor_id,
+                ))
+            elif actor_type == "agent_api_key":
+                tenant_id = await self.session.scalar(select(AgentApiKey.tenant_id).where(
+                    AgentApiKey.id == actor_id,
+                ))
         event = PlatformAuditEvent(
             id=uuid7(),
+            tenant_id=tenant_id,
             occurred_at=utcnow(),
             category=category,
             action=action,
@@ -205,10 +218,16 @@ class OutboxWriter:
         aggregate_id: str,
         partition_key: str,
         dedupe_key: str,
+        tenant_id: str | None = None,
+        account_id: str | None = None,
         payload_ref: Mapping[str, Any] | None = None,
         priority: int = 100,
         available_at: datetime | None = None,
     ) -> OutboxCommand:
+        if (tenant_id is None) != (account_id is None):
+            raise ValueError(
+                "Tenant-owned Outbox commands require both tenant_id and account_id"
+            )
         existing = await self.session.scalar(
             select(OutboxCommand).where(
                 OutboxCommand.topic == topic,
@@ -220,11 +239,15 @@ class OutboxWriter:
                 existing.action != action
                 or existing.aggregate_type != aggregate_type
                 or existing.aggregate_id != aggregate_id
+                or existing.tenant_id != tenant_id
+                or existing.account_id != account_id
             ):
                 raise EventDedupeCollision(f"{topic}:{dedupe_key}")
             return existing
         command = OutboxCommand(
             id=uuid7(),
+            tenant_id=tenant_id,
+            account_id=account_id,
             topic=topic,
             action=action,
             aggregate_type=aggregate_type,
@@ -239,3 +262,15 @@ class OutboxWriter:
         self.session.add(command)
         await self.session.flush()
         return command
+
+
+def tenant_command_error(
+    command: OutboxCommand, *, tenant_id: str, account_id: str,
+) -> str | None:
+    """Return a fail-closed authority error for a tenant-owned command."""
+
+    if command.tenant_id is None or command.account_id is None:
+        return "tenant_authority_missing"
+    if command.tenant_id != tenant_id or command.account_id != account_id:
+        return "tenant_authority_mismatch"
+    return None

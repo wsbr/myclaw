@@ -60,7 +60,10 @@ def _artifact_path(artifact: Artifact) -> Path:
 
 
 async def _owned_artifact(db: AsyncSession, artifact_id: str, actor: SessionActor, *, lock=False) -> Artifact:
-    query = select(Artifact).where(Artifact.id == artifact_id)
+    query = select(Artifact).where(
+        Artifact.id == artifact_id,
+        Artifact.tenant_id == actor.tenant_id,
+    )
     if lock:
         query = query.with_for_update()
     artifact = await db.scalar(query)
@@ -92,7 +95,10 @@ async def list_session_artifacts(
     await _owned_session(db, session_id, actor)
     if status not in (None, "publishing", "published", "unavailable", "deleted"):
         raise HTTPException(status_code=422, detail={"code": "invalid_artifact_status"})
-    statement = select(Artifact).where(Artifact.session_id == session_id)
+    statement = select(Artifact).where(
+        Artifact.tenant_id == actor.tenant_id,
+        Artifact.session_id == session_id,
+    )
     if status:
         statement = statement.where(Artifact.status == status)
     return await _page(
@@ -110,6 +116,7 @@ async def list_group_artifacts(
     if status not in (None, "published", "unavailable", "deleted"):
         raise HTTPException(status_code=422, detail={"code": "invalid_artifact_status"})
     statement = select(Artifact).join(GroupArtifact, GroupArtifact.artifact_id == Artifact.id).where(
+        Artifact.tenant_id == actor.tenant_id,
         GroupArtifact.group_session_id == group_id,
     )
     if status:

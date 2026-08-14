@@ -120,13 +120,14 @@ class MemoryProposeTool(BaseTool):
         fact_key = canonical_fact_key(args["fact_key"])
         content, digest = normalized_content(args["content"])
         head = await db.scalar(select(MemoryHead).where(
+            MemoryHead.tenant_id == context.tenant_id,
             MemoryHead.user_id == context.user_id,
             MemoryHead.scope == args["scope"],
             MemoryHead.fact_key == fact_key,
             MemoryHead.agent_id.is_(None) if args["scope"] == "user" else MemoryHead.agent_id == context.agent_id,
         ))
         candidate = MemoryWriteCandidate(
-            id=uuid7(), user_id=context.user_id,
+            id=uuid7(), tenant_id=context.tenant_id, user_id=context.user_id,
             agent_id=context.agent_id if args["scope"] == "user_agent" else None,
             scope=args["scope"], fact_key=fact_key, content=content,
             normalized_hash=digest, source_session_id=context.session_id,

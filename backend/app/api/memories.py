@@ -56,7 +56,9 @@ def _expected(value: str | None) -> int:
 
 async def _owned_memory(db, memory_id, current, *, lock=False):
     query = select(MemoryRecord).where(
-        MemoryRecord.id == memory_id, MemoryRecord.user_id == current.account.user_id,
+        MemoryRecord.id == memory_id,
+        MemoryRecord.tenant_id == current.tenant_id,
+        MemoryRecord.user_id == current.account.user_id,
         MemoryRecord.scope.in_(("user", "user_agent")),
     )
     if lock: query = query.with_for_update()
@@ -76,6 +78,7 @@ async def list_memories(
     if status not in ("active", "superseded", "deleted"):
         raise HTTPException(status_code=422, detail={"code": "invalid_memory_filter"})
     statement = select(MemoryRecord).where(
+        MemoryRecord.tenant_id == current.tenant_id,
         MemoryRecord.user_id == current.account.user_id,
         MemoryRecord.scope.in_(("user", "user_agent")), MemoryRecord.status == status,
     )
@@ -101,7 +104,9 @@ async def list_memory_versions(memory_id: str, cursor: str | None = None, limit:
     db: AsyncSession = Depends(get_db), current: CurrentAccount = Depends(get_current_account)):
     anchor = await _owned_memory(db, memory_id, current)
     statement = select(MemoryRecord).where(
-        MemoryRecord.head_id == anchor.head_id, MemoryRecord.user_id == current.account.user_id,
+        MemoryRecord.head_id == anchor.head_id,
+        MemoryRecord.tenant_id == current.tenant_id,
+        MemoryRecord.user_id == current.account.user_id,
     )
     rows, next_cursor = await paginate_scalars(
         db, statement, sort=(SortKey(MemoryRecord.updated_at), SortKey(MemoryRecord.id)),
@@ -121,7 +126,10 @@ async def edit_memory(memory_id: str, body: MemoryPatch,
         {"memory_id": memory_id, "content": body.content, "if_match": if_match})
     if replay and record.response_snapshot: return record.response_snapshot
     anchor = await _owned_memory(db, memory_id, current)
-    head = await db.scalar(select(MemoryHead).where(MemoryHead.id == anchor.head_id).with_for_update())
+    head = await db.scalar(select(MemoryHead).where(
+        MemoryHead.id == anchor.head_id,
+        MemoryHead.tenant_id == current.tenant_id,
+    ).with_for_update())
     if head.version != _expected(if_match):
         raise HTTPException(status_code=409, detail={"code": "version_conflict", "current_version": head.version})
     active = await db.scalar(select(MemoryRecord).where(
@@ -131,7 +139,8 @@ async def edit_memory(memory_id: str, body: MemoryPatch,
     content, digest = normalized_content(body.content)
     active.status = "superseded"; active.version += 1
     head.version += 1; head.last_user_edited_at = utcnow(); await db.flush()
-    created = MemoryRecord(id=uuid7(), head_id=head.id, user_id=head.user_id, agent_id=head.agent_id,
+    created = MemoryRecord(id=uuid7(), tenant_id=current.tenant_id,
+        head_id=head.id, user_id=head.user_id, agent_id=head.agent_id,
         scope=head.scope, fact_key=head.fact_key, content=content, normalized_hash=digest,
         status="active", source_kind="user_edit", supersedes_memory_id=active.id)
     db.add(created); await db.flush()
@@ -154,7 +163,10 @@ async def delete_memory(memory_id: str,
         {"memory_id": memory_id, "if_match": if_match})
     if replay and record.response_snapshot: return Response(status_code=204)
     anchor = await _owned_memory(db, memory_id, current)
-    head = await db.scalar(select(MemoryHead).where(MemoryHead.id == anchor.head_id).with_for_update())
+    head = await db.scalar(select(MemoryHead).where(
+        MemoryHead.id == anchor.head_id,
+        MemoryHead.tenant_id == current.tenant_id,
+    ).with_for_update())
     if head.version != _expected(if_match):
         raise HTTPException(status_code=409, detail={"code": "version_conflict", "current_version": head.version})
     active = await db.scalar(select(MemoryRecord).where(

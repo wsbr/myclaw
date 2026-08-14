@@ -70,7 +70,10 @@ def _if_match_revision(value: str | None) -> int:
 
 
 async def _get_owned_agent(db: AsyncSession, agent_id: str, current: CurrentAccount) -> AgentBlueprint:
-    agent = await db.get(AgentBlueprint, agent_id)
+    agent = await db.scalar(select(AgentBlueprint).where(
+        AgentBlueprint.id == agent_id,
+        AgentBlueprint.tenant_id == current.tenant_id,
+    ))
     if agent is None:
         raise HTTPException(status_code=404, detail="Agent not found")
     if agent.owner_account_id != current.account.id and "admin" not in current.roles:
@@ -93,7 +96,8 @@ async def _detail(db: AsyncSession, agent: AgentBlueprint) -> AgentDetailV1:
         latest = await db.get(AgentAssemblyVersion, agent.current_published_version_id)
         latest_no = latest.version_no if latest else None
     summary = AgentSummaryV1(
-        id=agent.id, owner_account_id=agent.owner_account_id, visibility=agent.visibility,
+        id=agent.id, tenant_id=agent.tenant_id,
+        owner_account_id=agent.owner_account_id, visibility=agent.visibility,
         status=agent.status, version=agent.version, draft_version_id=draft.id,
         current_published_version_id=agent.current_published_version_id,
         name=draft.name, description=draft.description, group_enabled=draft.group_enabled,
@@ -182,7 +186,8 @@ async def _summary(
         latest = await db.get(AgentAssemblyVersion, agent.current_published_version_id)
         latest_no = latest.version_no if latest else None
     return AgentSummaryV1(
-        id=agent.id, owner_account_id=agent.owner_account_id, visibility=agent.visibility,
+        id=agent.id, tenant_id=agent.tenant_id,
+        owner_account_id=agent.owner_account_id, visibility=agent.visibility,
         status=agent.status, version=agent.version, draft_version_id=agent.draft_version_id,
         current_published_version_id=agent.current_published_version_id,
         name=presentation.name, description=presentation.description,
@@ -195,7 +200,10 @@ async def _summary(
 async def _get_accessible_agent(
     db: AsyncSession, agent_id: str, current: CurrentAccount,
 ) -> AgentBlueprint:
-    agent = await db.get(AgentBlueprint, agent_id)
+    agent = await db.scalar(select(AgentBlueprint).where(
+        AgentBlueprint.id == agent_id,
+        AgentBlueprint.tenant_id == current.tenant_id,
+    ))
     if agent is None:
         raise HTTPException(status_code=404, detail="Agent not found")
     if (
@@ -209,7 +217,8 @@ async def _get_accessible_agent(
 
 def _api_key_response(key: AgentApiKey, secret: str | None = None) -> AgentApiKeyResponse:
     return AgentApiKeyResponse(
-        id=key.id, agent_id=key.agent_id, name=key.name, caller_label=key.caller_label,
+        id=key.id, tenant_id=key.tenant_id, agent_id=key.agent_id,
+        name=key.name, caller_label=key.caller_label,
         prefix=key.prefix, status=key.status, expires_at=key.expires_at,
         last_used_at=key.last_used_at, rotated_from_id=key.rotated_from_id,
         version=key.version, created_at=key.created_at, secret=secret,
@@ -251,7 +260,9 @@ async def list_agents(
     db: AsyncSession = Depends(get_db),
     current: CurrentAccount = Depends(get_current_account),
 ):
-    statement = select(AgentBlueprint)
+    statement = select(AgentBlueprint).where(
+        AgentBlueprint.tenant_id == current.tenant_id,
+    )
     if "admin" not in current.roles and "builder" in current.roles:
         statement = statement.where(or_(
             AgentBlueprint.owner_account_id == current.account.id,
@@ -295,7 +306,8 @@ async def create_agent(
 ):
     draft_input = body.draft
     agent, draft = await create_agent_domain(
-        db, owner_account_id=current.account.id, created_by_account_id=current.account.id,
+        db, tenant_id=current.tenant_id,
+        owner_account_id=current.account.id, created_by_account_id=current.account.id,
         name=draft_input.name, description=draft_input.description, visibility=body.visibility,
         initial_values=draft_input.model_dump(exclude={"tool_ids", "skill_ids", "bound_agent_ids", "name", "description"}),
         selection=AssemblySelection(tuple(draft_input.tool_ids), tuple(draft_input.skill_ids), tuple(draft_input.bound_agent_ids)),
@@ -529,13 +541,16 @@ async def create_draft_test_run(
             session = await db.get(UserSession, body.session_id)
             if (
                 session is None
+                or session.tenant_id != current.tenant_id
+                or session.account_id != current.account.id
                 or session.user_id != current.account.user_id
                 or session.entry_agent_id != agent_id
             ):
                 raise LookupError("session not found")
         else:
             session = await create_user_session(
-                db, user_id=current.account.user_id, entry_agent_id=agent_id,
+                db, tenant_id=current.tenant_id, account_id=current.account.id,
+                user_id=current.account.user_id, entry_agent_id=agent_id,
                 origin_type="web", title=f"Draft test · {snapshot.name}",
                 allow_unpublished=True, agent_version_id=snapshot.id,
             )
@@ -649,7 +664,8 @@ async def create_agent_api_key(
     if replay and record.response_snapshot:
         return AgentApiKeyResponse.model_validate(record.response_snapshot)
     key, plaintext = await create_api_key(
-        db, agent_id=agent_id, name=body.name, caller_label=body.caller_label,
+        db, agent_id=agent_id, tenant_id=current.tenant_id,
+        name=body.name, caller_label=body.caller_label,
         created_by_account_id=current.account.id, expires_at=body.expires_at,
         idempotency_record_id=record.id,
     )
@@ -679,7 +695,8 @@ async def rotate_agent_api_key(
     if replay and record.response_snapshot:
         return AgentApiKeyResponse.model_validate(record.response_snapshot)
     new_key, plaintext = await create_api_key(
-        db, agent_id=agent_id, name=body.name, caller_label=body.caller_label,
+        db, agent_id=agent_id, tenant_id=current.tenant_id,
+        name=body.name, caller_label=body.caller_label,
         created_by_account_id=current.account.id, expires_at=body.expires_at,
         idempotency_record_id=record.id, rotated_from_id=old.id,
     )

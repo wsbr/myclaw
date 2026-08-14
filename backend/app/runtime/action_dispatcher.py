@@ -706,7 +706,9 @@ class ActionDispatcher:
                     "text": secret_reference(browser_secret),
                 }
             invocation = ToolInvocation(
-                id=uuid7(), runner_id=runtime_context.runner_id,
+                id=uuid7(), tenant_id=runtime_context.tenant_id,
+                account_id=runtime_context.account_id,
+                runner_id=runtime_context.runner_id,
                 work_item_id=work_item_id, run_id=run_id,
                 session_id=runtime_context.session_id,
                 platform_tool_id=definition["platform_tool_id"], tool_key=call.name,
@@ -723,6 +725,7 @@ class ActionDispatcher:
                 ),
                 authorization_snapshot={
                     "effective_tool_keys": list(effective),
+                    "tenant_id": runtime_context.tenant_id,
                     "account_id": runtime_context.account_id,
                     "permission_revision": runtime_context.permission_revision,
                     "authentication_source": runtime_context.authentication_source,
@@ -732,6 +735,7 @@ class ActionDispatcher:
                 arguments=stored_arguments, arguments_hash=arguments_hash,
                 business_idempotency_key=operation_key,
                 principal_hash=hashlib.sha256(json.dumps({
+                    "tenant_id": runtime_context.tenant_id,
                     "session_id": runtime_context.session_id,
                     "account_id": runtime_context.account_id,
                     "user_id": runtime_context.user_id,

@@ -336,7 +336,8 @@ async def dispatch_coordination_tool(
 
     if name == "discover_agents":
         cards = await discover_agent_cards(
-            db, account_id=context.account_id, actor_agent_id=context.agent_id,
+            db, tenant_id=context.tenant_id, account_id=context.account_id,
+            actor_agent_id=context.agent_id,
             query=arguments.get("query"),
             domain_tags=list(arguments.get("domain_tags") or []),
             group_enabled=arguments.get("group_enabled"),

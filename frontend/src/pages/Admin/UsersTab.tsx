@@ -62,6 +62,12 @@ export default function UsersTab() {
   }
 
   const columns = [
+    {
+      title: 'Tenant', dataIndex: 'tenant', key: 'tenant',
+      render: (_: unknown, account: PlatformAccount) => (
+        <Tag color="blue">{account.tenant?.name ?? account.tenant_id}</Tag>
+      ),
+    },
     { title: 'userId', dataIndex: 'user_id', key: 'user_id' },
     { title: '邮箱', dataIndex: 'email', key: 'email', render: (value: string | null) => value || '—' },
     { title: '显示名称', dataIndex: 'display_name', key: 'display_name' },

@@ -15,7 +15,11 @@ from app.database import AsyncSessionLocal
 from app.models.channel_v1 import ChannelAccount, NotificationDelivery, NotificationDeliveryAttempt
 from app.models.common import utcnow, uuid7
 from app.models.foundation import ExecutionEvent, OutboxCommand, UserSession
-from app.persistence.reliable_writes import ExecutionEventWriter, OutboxWriter
+from app.persistence.reliable_writes import (
+    ExecutionEventWriter,
+    OutboxWriter,
+    tenant_command_error,
+)
 
 
 TERMINAL = {"succeeded", "failed", "cancelled", "outcome_unknown"}
@@ -85,14 +89,35 @@ class ChannelDeliveryWorker:
                 ChannelAccount.id == delivery.channel_account_id,
                 ChannelAccount.status == "active",
             ))
+            session = await db.get(UserSession, delivery.session_id)
             triggering = await db.get(ExecutionEvent, delivery.triggering_event_id)
-            if account is None or triggering is None:
+            if account is None or session is None or triggering is None:
                 delivery.status = "failed"
                 delivery.last_error_code = "channel_binding_unavailable"
                 delivery.last_error_detail = "Channel account or triggering event is unavailable"
                 delivery.version += 1
                 await self._append_event(db, delivery, "notification.failed", "Channel notification failed")
                 self._complete_command(command, now)
+                return None
+            authority_error = tenant_command_error(
+                command,
+                tenant_id=session.tenant_id,
+                account_id=session.account_id,
+            )
+            if (
+                authority_error
+                or account.tenant_id != session.tenant_id
+                or account.owner_account_id != session.account_id
+            ):
+                delivery.status = "failed"
+                delivery.last_error_code = authority_error or "delivery_tenant_mismatch"
+                delivery.last_error_detail = "Channel delivery authority envelope is invalid"
+                delivery.version += 1
+                command.status = "dead"
+                command.last_error = delivery.last_error_code
+                command.dispatch_lease_owner = None
+                command.dispatch_lease_token = None
+                command.dispatch_lease_expires_at = None
                 return None
 
             claim_token = uuid7()
@@ -199,11 +224,18 @@ class ChannelDeliveryWorker:
                     visibility="private", private_owner=("notification_delivery", delivery.id),
                     suffix=f"attempt:{delivery.attempt_count}:retry",
                 )
+                account = await db.get(ChannelAccount, delivery.channel_account_id)
+                if account is None:
+                    delivery.status = "failed"
+                    delivery.last_error_code = "channel_account_missing"
+                    delivery.last_error_detail = "Channel account was removed before retry"
+                    return
                 await OutboxWriter(db).enqueue(
                     topic="runtime.delivery", action="deliver_notification",
                     aggregate_type="notification_delivery", aggregate_id=delivery.id,
                     partition_key=delivery.session_id,
                     dedupe_key=f"event:{scheduled.id}:deliver",
+                    tenant_id=account.tenant_id, account_id=account.owner_account_id,
                     payload_ref={"delivery_id": delivery.id}, available_at=delivery.next_attempt_at,
                 )
             else:

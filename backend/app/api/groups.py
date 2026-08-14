@@ -45,7 +45,10 @@ def expected(value: str | None) -> int:
 
 
 async def owned_group(db: AsyncSession, group_id: str, actor: SessionActor, *, lock: bool = False) -> GroupSession:
-    query = select(GroupSession).where(GroupSession.id == group_id)
+    query = select(GroupSession).where(
+        GroupSession.id == group_id,
+        GroupSession.tenant_id == actor.tenant_id,
+    )
     if lock: query = query.with_for_update()
     group = await db.scalar(query)
     if group is None: raise HTTPException(status_code=404, detail="Group not found")
@@ -123,6 +126,7 @@ async def list_session_groups(
 ):
     session = await _owned_session(db, session_id, actor)
     rows = list(await db.scalars(select(GroupSession).where(
+        GroupSession.tenant_id == actor.tenant_id,
         GroupSession.session_id == session.id,
         GroupSession.status.in_(("open", "closed", "archived")),
     ).order_by(GroupSession.created_at.desc(), GroupSession.id.desc())))
@@ -512,6 +516,7 @@ async def replace_group_reporter(
         aggregate_type="group_run", aggregate_id=group_run.id,
         partition_key=run.session_id,
         dedupe_key=f"reporter_replaced:{record.id}:quiescence",
+        tenant_id=run.tenant_id, account_id=run.account_id,
         payload_ref={"group_run_id": group_run.id},
     )
     response = await native_group_run_view(db, group_run)
@@ -743,7 +748,10 @@ async def close_group(
     if replay and record.response_snapshot: return record.response_snapshot
     visible = await owned_group(db, group_id, actor)
     await db.scalar(select(UserSession).where(UserSession.id == visible.session_id).with_for_update())
-    group = await db.scalar(select(GroupSession).where(GroupSession.id == group_id).with_for_update())
+    group = await db.scalar(select(GroupSession).where(
+        GroupSession.id == group_id,
+        GroupSession.tenant_id == actor.tenant_id,
+    ).with_for_update())
     if group.version != expected(if_match):
         raise HTTPException(status_code=409, detail={"code": "version_conflict", "current_version": group.version})
     if group.status != "open":

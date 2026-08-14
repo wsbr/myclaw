@@ -124,6 +124,7 @@ async def prepare_runtime_policy_inputs(
     )
     memories = tuple(await recall_memories(
         db,
+        tenant_id=run.tenant_id,
         runner_id=runner.id,
         user_id=run.user_id,
         agent_id=runner.agent_id,

@@ -51,7 +51,9 @@ async def preprovision_identity(
         db.add(record)
         await db.flush()
     try:
-        account, created = await ensure_raw_user_account(db, user_id)
+        account, created = await ensure_raw_user_account(
+            db, user_id, tenant_id=key.tenant_id,
+        )
     except ValueError:
         raise HTTPException(status_code=409, detail={"code": "identity_unavailable"})
     if created:
@@ -62,7 +64,10 @@ async def preprovision_identity(
             summary="Preprovisioned API user identity", changes={"user_id": user_id},
             dedupe_key=f"audit:identity_preprovision:{record.id}",
         )
-    body = {"account_id": account.id, "user_id": user_id, "created": created}
+    body = {
+        "tenant_id": account.tenant_id, "account_id": account.id,
+        "user_id": user_id, "created": created,
+    }
     status_code = 201 if created else 200
     record.resource_type, record.resource_id, record.http_status = (
         "platform_account", account.id, status_code,

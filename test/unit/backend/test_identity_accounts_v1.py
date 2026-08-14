@@ -21,6 +21,9 @@ from app.models.foundation import (
     IdempotencyRecord, PlatformAccount, PlatformAccountRole,
     PlatformAuditEvent, UserIdentity,
 )
+from app.models.tenant_v1 import (
+    DEFAULT_TENANT_ID, Tenant, TenantMembership,
+)
 from app.schemas.auth import LoginRequest
 
 
@@ -31,14 +34,20 @@ pytestmark = pytest.mark.unit
 async def test_platform_account_login_roles_status_and_idempotent_audit():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     tables = [
+        Tenant.__table__,
         UserIdentity.__table__, PlatformAccount.__table__, PlatformAccountRole.__table__,
-        IdempotencyRecord.__table__, PlatformAuditEvent.__table__,
+        TenantMembership.__table__, IdempotencyRecord.__table__,
+        PlatformAuditEvent.__table__,
     ]
     async with engine.begin() as connection:
         await connection.run_sync(lambda sync: Base.metadata.create_all(sync, tables=tables))
     factory = async_sessionmaker(engine, expire_on_commit=False)
     admin_id = uuid7()
     async with factory.begin() as db:
+        db.add(Tenant(
+            id=DEFAULT_TENANT_ID, slug="default", name="Default Tenant",
+            status="active", version=1,
+        ))
         db.add(UserIdentity(user_id="admin-user", status="active"))
         admin = PlatformAccount(
             id=admin_id, user_id="admin-user", email="admin@example.com",
@@ -50,6 +59,10 @@ async def test_platform_account_login_roles_status_and_idempotent_audit():
         db.add_all([
             PlatformAccountRole(account_id=admin_id, role_key="user", granted_at=utcnow()),
             PlatformAccountRole(account_id=admin_id, role_key="admin", granted_at=utcnow()),
+            TenantMembership(
+                id=uuid7(), tenant_id=DEFAULT_TENANT_ID, account_id=admin_id,
+                role_key="admin", status="active", version=1,
+            ),
         ])
     current = CurrentAccount(account=admin, roles=frozenset({"user", "admin"}))
 
@@ -121,6 +134,7 @@ async def test_platform_account_login_roles_status_and_idempotent_audit():
 async def test_self_service_profile_and_verified_user_id_change(monkeypatch):
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     tables = [
+        Tenant.__table__,
         UserIdentity.__table__, PlatformAccount.__table__, PlatformAccountRole.__table__,
         IdempotencyRecord.__table__, PlatformAuditEvent.__table__,
     ]
@@ -129,6 +143,10 @@ async def test_self_service_profile_and_verified_user_id_change(monkeypatch):
     factory = async_sessionmaker(engine, expire_on_commit=False)
     account_id = uuid7()
     async with factory.begin() as db:
+        db.add(Tenant(
+            id=DEFAULT_TENANT_ID, slug="default", name="Default Tenant",
+            status="active", version=1,
+        ))
         db.add(UserIdentity(user_id="temporary-user", status="active"))
         account = PlatformAccount(
             id=account_id, user_id="temporary-user", email="member@example.com",
@@ -172,8 +190,9 @@ async def test_self_service_profile_and_verified_user_id_change(monkeypatch):
 async def test_enterprise_callback_creates_only_basic_user(monkeypatch):
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     tables = [
+        Tenant.__table__,
         UserIdentity.__table__, PlatformAccount.__table__, PlatformAccountRole.__table__,
-        PlatformAuditEvent.__table__,
+        TenantMembership.__table__, PlatformAuditEvent.__table__,
     ]
     async with engine.begin() as connection:
         await connection.run_sync(lambda sync: Base.metadata.create_all(sync, tables=tables))
@@ -187,6 +206,11 @@ async def test_enterprise_callback_creates_only_basic_user(monkeypatch):
         },
         "test-enterprise-secret", algorithm="HS256",
     )
+    async with factory.begin() as db:
+        db.add(Tenant(
+            id=DEFAULT_TENANT_ID, slug="default", name="Default Tenant",
+            status="active", version=1,
+        ))
     async with factory() as db:
         result = await enterprise_callback(assertion=assertion, db=db)
     assert result.user.user_id == "sso-employee"

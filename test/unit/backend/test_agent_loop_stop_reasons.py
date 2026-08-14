@@ -71,6 +71,7 @@ def _context() -> ContextPackage:
 
 def _runtime_context() -> RuntimeContext:
     return RuntimeContext(
+        tenant_id="test-tenant",
         session_id="session", runner_id="runner", user_id="user", agent_id="agent",
     )
 

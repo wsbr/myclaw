@@ -123,6 +123,7 @@ class ResolvedTool:
 async def create_agent(
     db: AsyncSession,
     *,
+    tenant_id: str,
     owner_account_id: str,
     created_by_account_id: str,
     name: str = "",
@@ -133,6 +134,7 @@ async def create_agent(
 ) -> tuple[AgentBlueprint, AgentAssemblyVersion]:
     agent = AgentBlueprint(
         id=uuid7(),
+        tenant_id=tenant_id,
         owner_account_id=owner_account_id,
         visibility=visibility,
         status="draft",
@@ -213,6 +215,16 @@ async def _replace_selection(
         raise LookupError("agent version not found")
     if version.agent_id in selection.bound_agent_ids:
         raise ValueError("agent cannot bind itself")
+    owner = await db.get(AgentBlueprint, version.agent_id)
+    if owner is None:
+        raise LookupError("agent not found")
+    if selection.bound_agent_ids:
+        visible_bound_ids = set(await db.scalars(select(AgentBlueprint.id).where(
+            AgentBlueprint.id.in_(selection.bound_agent_ids),
+            AgentBlueprint.tenant_id == owner.tenant_id,
+        )))
+        if visible_bound_ids != set(selection.bound_agent_ids):
+            raise ValueError("bound Agent is outside the current Tenant boundary")
     await db.execute(delete(AgentVersionTool).where(AgentVersionTool.agent_version_id == version_id))
     await db.execute(delete(AgentVersionSkill).where(AgentVersionSkill.agent_version_id == version_id))
     await db.execute(delete(AgentVersionBinding).where(AgentVersionBinding.agent_version_id == version_id))

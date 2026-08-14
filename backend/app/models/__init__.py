@@ -1,3 +1,4 @@
+from app.models.tenant_v1 import Tenant, TenantMembership
 from app.models.foundation import (
     UserIdentity,
     PlatformAccount,
@@ -65,7 +66,7 @@ from app.models.agent_eval_v1 import (
 )
 
 __all__ = [
-    "UserIdentity", "PlatformAccount", "PlatformAccountRole", "IdempotencyRecord", "AgentApiKey",
+    "Tenant", "TenantMembership", "UserIdentity", "PlatformAccount", "PlatformAccountRole", "IdempotencyRecord", "AgentApiKey",
     "UserSession", "ExecutionEvent", "ExecutionEventRecipient", "PlatformAuditEvent",
     "OutboxCommand", "RegisteredModel", "ModelVersion", "ConformanceRun",
     "PlatformSecret", "ToolDefinition", "ToolVersion", "ToolConnection",

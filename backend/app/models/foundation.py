@@ -45,9 +45,14 @@ class PlatformAccount(Base, TimestampMixin, VersionMixin):
             name="ck_platform_account_status",
         ),
         Index("ix_platform_account_status_created", "status", "created_at"),
+        UniqueConstraint("id", "tenant_id", name="uq_platform_account_id_tenant"),
+        Index("ix_platform_account_tenant_status", "tenant_id", "status", "created_at"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
+    tenant_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("tenant.id"), nullable=False
+    )
     user_id: Mapped[str] = mapped_column(
         String(191), ForeignKey("user_identity.user_id"), unique=True, nullable=False
     )
@@ -107,10 +112,14 @@ class AgentApiKey(Base, TimestampMixin, VersionMixin):
             "status IN ('active','revoked','expired')", name="ck_agent_api_key_status"
         ),
         Index("ix_agent_api_key_agent_status", "agent_id", "status"),
+        Index("ix_agent_api_key_tenant_status", "tenant_id", "status"),
         Index("ix_agent_api_key_expiry", "expires_at", "status"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
+    tenant_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("tenant.id"), nullable=False
+    )
     agent_id: Mapped[str] = mapped_column(String(36), ForeignKey("agent.id"), nullable=False)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     caller_label: Mapped[str] = mapped_column(String(200), nullable=False)
@@ -139,17 +148,22 @@ class UserSession(Base, TimestampMixin, VersionMixin):
             name="ck_user_session_interaction_mode",
         ),
         UniqueConstraint("id", "user_id", name="uq_user_session_id_user"),
+        UniqueConstraint("id", "tenant_id", name="uq_user_session_id_tenant"),
         Index("ix_user_session_owner_status", "user_id", "status", "updated_at"),
+        Index("ix_user_session_tenant_account", "tenant_id", "account_id", "updated_at"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
+    tenant_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("tenant.id"), nullable=False
+    )
     user_id: Mapped[str] = mapped_column(
         String(191), ForeignKey("user_identity.user_id"), nullable=False
     )
     # account_id is the v2 authority. user_id remains during the UAT
     # expand/contract period so existing sessions stay readable.
-    account_id: Mapped[str | None] = mapped_column(
-        String(36), ForeignKey("platform_account.id")
+    account_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("platform_account.id"), nullable=False
     )
     entry_agent_id: Mapped[str] = mapped_column(String(36), nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="active", nullable=False)
@@ -248,9 +262,11 @@ class PlatformAuditEvent(Base, CreatedAtMixin):
         Index("ix_platform_audit_resource", "resource_type", "resource_id", "occurred_at"),
         Index("ix_platform_audit_actor", "actor_type", "actor_id", "occurred_at"),
         Index("ix_platform_audit_filter", "category", "action", "occurred_at"),
+        Index("ix_platform_audit_tenant_occurred", "tenant_id", "occurred_at", "id"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
+    tenant_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("tenant.id"))
     occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
     category: Mapped[str] = mapped_column(String(32), nullable=False)
     action: Mapped[str] = mapped_column(String(100), nullable=False)
@@ -293,9 +309,19 @@ class OutboxCommand(Base, TimestampMixin):
             "created_at",
         ),
         Index("ix_outbox_reclaim", "status", "dispatch_lease_expires_at"),
+        Index("ix_outbox_tenant_claim", "tenant_id", "topic", "status", "available_at"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
+    # Tenant-owned runtime commands carry an explicit authority envelope.  These
+    # remain nullable because the same Outbox also transports platform-global
+    # maintenance commands such as governed Skill synchronization.
+    tenant_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("tenant.id"), nullable=True,
+    )
+    account_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("platform_account.id"), nullable=True,
+    )
     topic: Mapped[str] = mapped_column(String(32), nullable=False)
     action: Mapped[str] = mapped_column(String(100), nullable=False)
     aggregate_type: Mapped[str] = mapped_column(String(64), nullable=False)

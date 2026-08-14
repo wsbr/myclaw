@@ -16,8 +16,10 @@ class Artifact(Base, TimestampMixin, VersionMixin):
         UniqueConstraint("tool_invocation_id", name="uq_artifact_tool_invocation"),
         UniqueConstraint("publication_key", name="uq_artifact_publication_key"),
         Index("ix_artifact_session_status_created", "session_id", "status", "created_at"),
+        Index("ix_artifact_tenant_session", "tenant_id", "session_id", "created_at"),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
+    tenant_id: Mapped[str] = mapped_column(String(36), ForeignKey("tenant.id"), nullable=False)
     user_id: Mapped[str] = mapped_column(String(191), ForeignKey("user_identity.user_id"), nullable=False)
     session_id: Mapped[str] = mapped_column(String(36), ForeignKey("user_session.id"), nullable=False)
     workspace_id: Mapped[str] = mapped_column(String(36), ForeignKey("workspace.id"), nullable=False)

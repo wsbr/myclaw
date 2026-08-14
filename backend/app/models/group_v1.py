@@ -18,8 +18,13 @@ class GroupSession(Base, TimestampMixin, VersionMixin):
             name="ck_group_session_formation_mode",
         ),
         Index("ix_group_session_session_status", "session_id", "status", "created_at"),
+        UniqueConstraint("id", "tenant_id", name="uq_group_session_id_tenant"),
+        Index("ix_group_session_tenant_status", "tenant_id", "status", "created_at"),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
+    tenant_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("tenant.id"), nullable=False
+    )
     session_id: Mapped[str] = mapped_column(String(36), ForeignKey("user_session.id"), nullable=False)
     user_id: Mapped[str] = mapped_column(String(191), ForeignKey("user_identity.user_id"), nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="open", nullable=False)

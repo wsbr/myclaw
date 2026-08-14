@@ -8,6 +8,7 @@ class LoginRequest(BaseModel):
 
 class UserResponse(BaseModel):
     id: str
+    tenant_id: str
     user_id: str
     email: str | None
     username: str

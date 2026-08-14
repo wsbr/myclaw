@@ -13,7 +13,7 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.common import utcnow, uuid7
-from app.models.foundation import PlatformAccount, UserSession
+from app.models.foundation import UserSession
 from app.models.registry import ModelVersion
 from app.models.runtime_v1 import (
     AgentTurn, DurableRunner, ProviderAttempt, ToolAttempt, ToolInvocation, WorkItem,
@@ -44,6 +44,7 @@ def _canonical_hash(payload: dict[str, Any]) -> str:
 def price_snapshot_view(item: UsagePriceSnapshot) -> dict[str, Any]:
     return {
         "id": item.id,
+        "tenant_id": item.tenant_id,
         "subject_type": item.subject_type,
         "provider": item.provider,
         "subject_key": item.subject_key,
@@ -198,12 +199,6 @@ async def record_provider_attempt_usage(
     if work is None or session is None:
         raise LookupError("provider attempt attribution is incomplete")
     account_id = session.account_id
-    if account_id is None:
-        account_id = await db.scalar(select(PlatformAccount.id).where(
-            PlatformAccount.user_id == session.user_id,
-        ))
-    if account_id is None:
-        raise LookupError("provider attempt account attribution is unavailable")
     model = await db.get(ModelVersion, attempt.model_version_id)
     if model is None:
         raise LookupError("provider attempt model version disappeared")
@@ -254,7 +249,8 @@ async def record_provider_attempt_usage(
                 metric=metric, unit=unit, observed_at=observed_at,
             )
         item = UsageLedgerEntry(
-            id=uuid7(), account_id=account_id, session_id=session.id,
+            id=uuid7(), tenant_id=session.tenant_id,
+            account_id=account_id, session_id=session.id,
             run_id=run_id, group_run_id=work.group_run_id,
             work_item_id=work.id, runner_id=runner_id,
             agent_version_id=agent_version_id, agent_turn_id=turn.id,
@@ -296,11 +292,7 @@ async def record_tool_attempt_usage(
     runner = await db.get(DurableRunner, invocation.runner_id)
     if work is None or session is None or runner is None:
         raise LookupError("tool attempt attribution is incomplete")
-    account_id = session.account_id or await db.scalar(select(PlatformAccount.id).where(
-        PlatformAccount.user_id == session.user_id,
-    ))
-    if account_id is None:
-        raise LookupError("tool attempt account attribution is unavailable")
+    account_id = session.account_id
     observed_at = attempt.ended_at or utcnow()
     active_ms = Decimal(0)
     active_status = "unknown"
@@ -334,7 +326,8 @@ async def record_tool_attempt_usage(
                 observed_at=observed_at,
             )
         item = UsageLedgerEntry(
-            id=uuid7(), account_id=account_id, session_id=session.id,
+            id=uuid7(), tenant_id=session.tenant_id,
+            account_id=account_id, session_id=session.id,
             run_id=invocation.run_id, group_run_id=work.group_run_id,
             work_item_id=work.id, runner_id=runner.id,
             agent_version_id=runner.agent_version_id,
@@ -384,6 +377,7 @@ async def create_usage_adjustment(
     )
     item = UsageLedgerEntry(
         id=adjustment_id,
+        tenant_id=original.tenant_id,
         account_id=original.account_id,
         session_id=original.session_id,
         run_id=original.run_id,

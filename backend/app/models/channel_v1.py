@@ -14,8 +14,10 @@ class ChannelAccount(Base, TimestampMixin, VersionMixin):
     __table_args__ = (
         CheckConstraint("status IN ('active','disabled','revoked')", name="ck_channel_account_status"),
         UniqueConstraint("plugin_key", "external_account_key", name="uq_channel_account_external"),
+        Index("ix_channel_account_tenant_status", "tenant_id", "status"),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
+    tenant_id: Mapped[str] = mapped_column(String(36), ForeignKey("tenant.id"), nullable=False)
     plugin_key: Mapped[str] = mapped_column(String(191), nullable=False)
     owner_account_id: Mapped[str] = mapped_column(String(36), ForeignKey("platform_account.id"), nullable=False)
     external_account_key: Mapped[str] = mapped_column(String(500), nullable=False)

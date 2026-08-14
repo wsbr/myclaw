@@ -87,12 +87,20 @@ class Run(Base, TimestampMixin, VersionMixin):
             name="ck_run_terminal_time",
         ),
         UniqueConstraint("id", "user_id", name="uq_run_id_user"),
+        UniqueConstraint("id", "tenant_id", name="uq_run_id_tenant"),
         Index("ix_run_session_created", "session_id", "created_at"),
         Index("ix_run_user_id", "user_id"),
         Index("ix_run_status_updated", "status", "updated_at", "id"),
+        Index("ix_run_tenant_account_created", "tenant_id", "account_id", "created_at"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
+    tenant_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("tenant.id"), nullable=False
+    )
+    account_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("platform_account.id"), nullable=False
+    )
     session_id: Mapped[str] = mapped_column(String(36), ForeignKey("user_session.id"), nullable=False)
     user_id: Mapped[str] = mapped_column(String(191), ForeignKey("user_identity.user_id"), nullable=False)
     mode: Mapped[str] = mapped_column(String(20), nullable=False)
@@ -118,11 +126,15 @@ class WorkItem(Base, TimestampMixin, VersionMixin):
             name="ck_work_item_status",
         ),
         UniqueConstraint("id", "user_id", name="uq_work_item_id_user"),
+        UniqueConstraint("id", "tenant_id", name="uq_work_item_id_tenant"),
         Index("ix_work_item_run_status", "run_id", "status"),
         Index("ix_work_item_status_updated", "status", "updated_at"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
+    tenant_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("tenant.id"), nullable=False
+    )
     run_id: Mapped[str] = mapped_column(String(36), ForeignKey("run.id"), nullable=False)
     session_id: Mapped[str] = mapped_column(String(36), ForeignKey("user_session.id"), nullable=False)
     user_id: Mapped[str] = mapped_column(String(191), ForeignKey("user_identity.user_id"), nullable=False)
@@ -156,11 +168,15 @@ class DurableRunner(Base, TimestampMixin, VersionMixin):
     __table_args__ = (
         CheckConstraint("status IN ('queued','running','succeeded','failed','cancelled','lost')", name="ck_runner_v1_status"),
         UniqueConstraint("work_item_id", "execution_epoch", name="uq_runner_work_epoch"),
+        UniqueConstraint("id", "tenant_id", name="uq_runner_id_tenant"),
         Index("ix_runner_v1_lease", "status", "lease_expires_at"),
         Index("ix_runner_v1_session_created", "session_id", "created_at"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
+    tenant_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("tenant.id"), nullable=False
+    )
     work_item_id: Mapped[str] = mapped_column(String(36), ForeignKey("work_item.id"), nullable=False)
     run_id: Mapped[str] = mapped_column(String(36), ForeignKey("run.id"), nullable=False)
     session_id: Mapped[str] = mapped_column(String(36), ForeignKey("user_session.id"), nullable=False)
@@ -557,9 +573,14 @@ class Workspace(Base, TimestampMixin, VersionMixin):
     __tablename__ = "workspace"
     __table_args__ = (
         CheckConstraint("status IN ('active','cleaning','cleaned','failed')", name="ck_workspace_status"),
+        UniqueConstraint("id", "tenant_id", name="uq_workspace_id_tenant"),
+        Index("ix_workspace_tenant_session", "tenant_id", "session_id"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
+    tenant_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("tenant.id"), nullable=False
+    )
     session_sandbox_id: Mapped[str] = mapped_column(String(36), ForeignKey("session_sandbox.id"), unique=True, nullable=False)
     session_id: Mapped[str] = mapped_column(String(36), ForeignKey("user_session.id"), unique=True, nullable=False)
     root_uri: Mapped[str] = mapped_column(String(1000), nullable=False)
@@ -630,9 +651,16 @@ class ToolInvocation(Base, TimestampMixin, VersionMixin):
         ),
         Index("ix_tool_invocation_status_updated", "status", "updated_at"),
         Index("ix_tool_invocation_tool_status", "platform_tool_id", "status"),
+        Index("ix_tool_invocation_tenant_account", "tenant_id", "account_id", "created_at"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
+    tenant_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("tenant.id"), nullable=False
+    )
+    account_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("platform_account.id"), nullable=False
+    )
     runner_id: Mapped[str] = mapped_column(String(36), ForeignKey("runner_v1.id"), nullable=False)
     work_item_id: Mapped[str] = mapped_column(String(36), ForeignKey("work_item.id"), nullable=False)
     run_id: Mapped[str] = mapped_column(String(36), ForeignKey("run.id"), nullable=False)
@@ -751,9 +779,16 @@ class AgentInvocation(Base, TimestampMixin, VersionMixin):
         Index("ix_agent_invocation_caller_batch_status", "caller_work_item_id", "batch_key", "status"),
         Index("ix_agent_invocation_run_status", "run_id", "status", "created_at"),
         Index("ix_agent_invocation_target_work", "target_work_item_id"),
+        Index("ix_agent_invocation_tenant_account", "tenant_id", "account_id", "created_at"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
+    tenant_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("tenant.id"), nullable=False
+    )
+    account_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("platform_account.id"), nullable=False
+    )
     run_id: Mapped[str] = mapped_column(String(36), ForeignKey("run.id"), nullable=False)
     caller_work_item_id: Mapped[str] = mapped_column(String(36), ForeignKey("work_item.id"), nullable=False)
     caller_runner_id: Mapped[str] = mapped_column(String(36), ForeignKey("runner_v1.id"), nullable=False)

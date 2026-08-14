@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.models.agent_v1 import AgentAssemblyVersion, AgentBlueprint
 from app.models.common import utcnow, uuid7
-from app.models.foundation import PlatformAccount, UserSession
+from app.models.foundation import UserSession
 from app.models.registry import SandboxProfile
 from app.models.runtime_v1 import DurableRunner, Message, Run, SessionSandbox, Workspace, WorkItem
 from app.persistence.reliable_writes import ExecutionEventWriter, OutboxWriter
@@ -24,6 +24,8 @@ class AgentUnavailable(RuntimeError):
 async def create_user_session(
     db: AsyncSession,
     *,
+    tenant_id: str,
+    account_id: str,
     user_id: str,
     entry_agent_id: str,
     origin_type: str = "web",
@@ -32,17 +34,18 @@ async def create_user_session(
     allow_unpublished: bool = False,
     agent_version_id: str | None = None,
 ) -> UserSession:
-    agent = await db.get(AgentBlueprint, entry_agent_id)
+    agent = await db.scalar(select(AgentBlueprint).where(
+        AgentBlueprint.id == entry_agent_id,
+        AgentBlueprint.tenant_id == tenant_id,
+    ))
     if agent is None or (
         not allow_unpublished
         and (agent.status != "published" or agent.current_published_version_id is None)
     ):
         raise AgentUnavailable("Agent is not available for new sessions")
-    account_id = await db.scalar(select(PlatformAccount.id).where(
-        PlatformAccount.user_id == user_id, PlatformAccount.status == "active",
-    ))
     session = UserSession(
-        id=uuid7(), user_id=user_id, account_id=account_id,
+        id=uuid7(), tenant_id=tenant_id,
+        user_id=user_id, account_id=account_id,
         entry_agent_id=entry_agent_id,
         status="active", title=title, origin_type=origin_type,
         origin_api_key_id=origin_api_key_id, next_event_sequence=1,
@@ -75,7 +78,8 @@ async def create_user_session(
             profile_config_version=profile.config_version, status="ready", root_uri=root_uri,
         )
         workspace = Workspace(
-            id=uuid7(), session_sandbox_id=sandbox.id, session_id=session.id,
+            id=uuid7(), tenant_id=tenant_id,
+            session_sandbox_id=sandbox.id, session_id=session.id,
             root_uri=root_uri, status="active", retention_policy_key="session_lifetime",
         )
         db.add_all([sandbox, workspace])
@@ -112,7 +116,10 @@ async def enqueue_chat_message(
         raise LookupError("session not found")
     if session.status != "active":
         raise RuntimeError("session is not active")
-    agent = await db.get(AgentBlueprint, session.entry_agent_id)
+    agent = await db.scalar(select(AgentBlueprint).where(
+        AgentBlueprint.id == session.entry_agent_id,
+        AgentBlueprint.tenant_id == session.tenant_id,
+    ))
     if agent is None:
         raise AgentUnavailable("Agent no longer exists")
     if execution_kind == "normal":
@@ -135,22 +142,26 @@ async def enqueue_chat_message(
     )
     run_budget = default_run_budget(resolved_mode)
     run = Run(
-        id=uuid7(), session_id=session.id, user_id=user_id, mode=resolved_mode,
+        id=uuid7(), tenant_id=session.tenant_id, account_id=session.account_id,
+        session_id=session.id, user_id=user_id, mode=resolved_mode,
         wait_reason=None, status="active",
         permission_mode=session.permission_mode, hard_budget_snapshot=run_budget,
         deadline_at=deadline_from_budget(run_budget, mode=resolved_mode),
     )
     work = WorkItem(
-        id=uuid7(), run_id=run.id, session_id=session.id, user_id=user_id,
+        id=uuid7(), tenant_id=session.tenant_id,
+        run_id=run.id, session_id=session.id, user_id=user_id,
         mode=resolved_mode, owner_agent_id=agent.id, agent_version_id=agent_version_id,
         goal=content, purpose="root_request", status="queued",
         resume_cursor={}, execution_epoch=1, attempt_no=1,
     )
     runner = DurableRunner(
-        id=uuid7(), work_item_id=work.id, run_id=run.id, session_id=session.id,
+        id=uuid7(), tenant_id=session.tenant_id,
+        work_item_id=work.id, run_id=run.id, session_id=session.id,
         agent_id=agent.id, agent_version_id=agent_version_id, execution_epoch=1,
         fencing_token=1,
         status="queued", principal_snapshot={
+            "tenant_id": session.tenant_id,
             "account_id": session.account_id, "user_id": user_id,
             "session_id": session.id,
             "permission_revision": session.permission_revision,
@@ -206,6 +217,7 @@ async def enqueue_chat_message(
         topic="runtime.runner", action="execute", aggregate_type="runner",
         aggregate_id=runner.id, partition_key=session.id,
         dedupe_key=f"event:{runner_event.id}:execute",
+        tenant_id=session.tenant_id, account_id=session.account_id,
         payload_ref={"runner_id": runner.id, "event_id": runner_event.id},
     )
     return message, run, work, runner

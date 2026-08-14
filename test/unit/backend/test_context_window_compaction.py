@@ -111,6 +111,7 @@ async def test_hard_window_rejects_before_generation_and_count_failure_degrades(
             context=context, tool_definitions=[],
             capability_snapshot={"id": "snapshot", "effective_tool_keys": []},
             runtime_context=RuntimeContext(
+                tenant_id="test-tenant",
                 session_id="session", runner_id="runner",
                 user_id="user", agent_id="agent",
             ),

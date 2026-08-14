@@ -27,7 +27,8 @@ async def search_cards(
     if actor.account is None:
         raise HTTPException(status_code=403, detail={"code": "identity_mapping_required"})
     cards = await discover_agent_cards(
-        db, account_id=actor.account.id, query=query, domain_tags=domain_tag,
+        db, tenant_id=actor.account.tenant_id, account_id=actor.account.id,
+        query=query, domain_tags=domain_tag,
         group_enabled=group_enabled, capability_keys=capability,
         governance_labels=governance_label, limit=limit,
     )
@@ -44,7 +45,7 @@ async def get_card(
         raise HTTPException(status_code=403, detail={"code": "identity_mapping_required"})
     try:
         _agent, card = await resolve_callable_agent(
-            db, account_id=actor.account.id,
+            db, tenant_id=actor.account.tenant_id, account_id=actor.account.id,
             actor_agent_id="__http_directory__", target_agent_id=agent_id,
         )
     except (LookupError, PermissionError):

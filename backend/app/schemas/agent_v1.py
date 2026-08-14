@@ -52,6 +52,7 @@ class PublishAgentRequest(BaseModel):
 
 class AgentSummaryV1(BaseModel):
     id: str
+    tenant_id: str
     owner_account_id: str
     visibility: str
     status: str
@@ -139,6 +140,7 @@ class AgentApiKeyCreate(BaseModel):
 
 class AgentApiKeyResponse(BaseModel):
     id: str
+    tenant_id: str
     agent_id: str
     name: str
     caller_label: str

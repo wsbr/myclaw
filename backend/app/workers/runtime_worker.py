@@ -49,7 +49,12 @@ from app.models.runtime_v1 import (
     WorkingPlan,
     Workspace,
 )
-from app.persistence.reliable_writes import EventRecipient, ExecutionEventWriter, OutboxWriter
+from app.persistence.reliable_writes import (
+    EventRecipient,
+    ExecutionEventWriter,
+    OutboxWriter,
+    tenant_command_error,
+)
 from app.persistence.runtime_graph import persist_new_work_runner, persist_replacement_runner
 from app.runtime import (
     ActionDispatcher,
@@ -416,6 +421,20 @@ class RuntimeWorker:
                 command.dispatch_lease_owner = None
                 command.dispatch_lease_token = None
                 command.dispatch_lease_expires_at = None
+                authority_error = (
+                    tenant_command_error(
+                        command, tenant_id=run.tenant_id, account_id=run.account_id,
+                    )
+                    if run is not None else None
+                )
+                if authority_error or (
+                    run is not None and work is not None and (
+                        runner.tenant_id != run.tenant_id
+                        or work.tenant_id != run.tenant_id
+                    )
+                ):
+                    command.last_error = authority_error or "runtime_graph_tenant_mismatch"
+                    return None
                 if (
                     runner is not None and work is not None and run is not None
                     and runner.status == "queued"
@@ -544,6 +563,25 @@ class RuntimeWorker:
                 WorkItem.id == runner.work_item_id,
             ).with_for_update())
             run = await db.scalar(select(Run).where(Run.id == runner.run_id).with_for_update())
+            authority_error = (
+                tenant_command_error(
+                    command, tenant_id=run.tenant_id, account_id=run.account_id,
+                )
+                if run is not None else None
+            )
+            graph_authority_invalid = bool(
+                run is not None and work is not None and (
+                    runner.tenant_id != run.tenant_id
+                    or work.tenant_id != run.tenant_id
+                )
+            )
+            if authority_error or graph_authority_invalid:
+                command.status = "dead"
+                command.last_error = authority_error or "runtime_graph_tenant_mismatch"
+                command.dispatch_lease_owner = None
+                command.dispatch_lease_token = None
+                command.dispatch_lease_expires_at = None
+                return None
             if (
                 work is None or run is None or runner.status != "queued"
                 or work.active_runner_id != runner.id
@@ -707,6 +745,7 @@ class RuntimeWorker:
                     else:
                         group_emergence = await build_group_emergence_candidate_snapshot(
                             db,
+                            tenant_id=session.tenant_id,
                             account_id=session.account_id,
                             current_agent_id=runner.agent_id,
                         )
@@ -1069,6 +1108,7 @@ class RuntimeWorker:
             )
 
             runtime_context = RuntimeContext(
+                tenant_id=run.tenant_id,
                 session_id=fence.session_id, runner_id=fence.runner_id,
                 task_id=fence.work_item_id,
                 user_id=str(runner.principal_snapshot.get("user_id") or "runtime"),
@@ -1445,6 +1485,7 @@ class RuntimeWorker:
                 aggregate_type="run", aggregate_id=run.id,
                 partition_key=run.session_id,
                 dedupe_key=f"event:{completed.id}:verify-run",
+                tenant_id=run.tenant_id, account_id=run.account_id,
                 payload_ref={"run_id": run.id},
             )
             await enqueue_run_terminal_followups(
@@ -1567,6 +1608,7 @@ class RuntimeWorker:
             aggregate_type="group_run", aggregate_id=group_run.id,
             partition_key=run.session_id,
             dedupe_key=f"group-quiescence:{cause_event_id}",
+            tenant_id=run.tenant_id, account_id=run.account_id,
             payload_ref={
                 "group_run_id": group_run.id,
                 "cause_event_id": cause_event_id,
@@ -1745,6 +1787,7 @@ class RuntimeWorker:
             aggregate_type="run", aggregate_id=run.id,
             partition_key=run.session_id,
             dedupe_key=f"event:{completed.id}:verify-run",
+            tenant_id=run.tenant_id, account_id=run.account_id,
             payload_ref={"run_id": run.id},
         )
         await enqueue_run_terminal_followups(
@@ -2365,6 +2408,7 @@ class RuntimeWorker:
                     aggregate_type="tool_invocation", aggregate_id=invocation.id,
                     partition_key=run.session_id,
                     dedupe_key=f"event:{queued.id}:execute_tool",
+                    tenant_id=run.tenant_id, account_id=run.account_id,
                     payload_ref={"tool_invocation_id": invocation.id},
                 )
 
@@ -2613,6 +2657,7 @@ class RuntimeWorker:
                         aggregate_type="tool_invocation", aggregate_id=invocation.id,
                         partition_key=run.session_id,
                         dedupe_key=f"event:{waiting.id}:tool:{invocation.id}",
+                        tenant_id=run.tenant_id, account_id=run.account_id,
                         payload_ref={"tool_invocation_id": invocation.id},
                     )
                 return runner.id
@@ -2754,7 +2799,8 @@ class RuntimeWorker:
             work.status = "queued"
             work.version += 1
             replacement = DurableRunner(
-                id=uuid7(), work_item_id=work.id, run_id=run.id,
+                id=uuid7(), tenant_id=run.tenant_id,
+                work_item_id=work.id, run_id=run.id,
                 session_id=runner.session_id, agent_id=runner.agent_id,
                 agent_version_id=runner.agent_version_id,
                 execution_epoch=work.execution_epoch, fencing_token=work.execution_epoch,
@@ -2783,6 +2829,7 @@ class RuntimeWorker:
                 topic="runtime.runner", action="execute", aggregate_type="runner",
                 aggregate_id=replacement.id, partition_key=runner.session_id,
                 dedupe_key=f"event:{event.id}:execute",
+                tenant_id=run.tenant_id, account_id=run.account_id,
                 payload_ref={"runner_id": replacement.id, "event_id": event.id},
             )
             return runner.id
@@ -2851,7 +2898,8 @@ class RuntimeWorker:
         group_run.version += 1
         epoch = group_run.summary_epoch
         work = WorkItem(
-            id=uuid7(), run_id=run.id, session_id=run.session_id, user_id=run.user_id,
+            id=uuid7(), tenant_id=run.tenant_id,
+            run_id=run.id, session_id=run.session_id, user_id=run.user_id,
             mode="group", owner_agent_id=reporter.agent_id,
             agent_version_id=reporter.agent_version_id,
             group_run_id=group_run.id, group_membership_id=membership.id,
@@ -2859,11 +2907,13 @@ class RuntimeWorker:
             purpose="group_summary", status="queued", execution_epoch=1, attempt_no=1,
         )
         runner = DurableRunner(
-            id=uuid7(), work_item_id=work.id, run_id=run.id,
+            id=uuid7(), tenant_id=run.tenant_id,
+            work_item_id=work.id, run_id=run.id,
             session_id=run.session_id, agent_id=reporter.agent_id,
             agent_version_id=reporter.agent_version_id,
             execution_epoch=1, status="queued",
             principal_snapshot={
+                "tenant_id": run.tenant_id,
                 "user_id": run.user_id, "account_id": session.account_id,
                 "session_id": run.session_id,
                 "entry_agent_id": group.initiator_agent_id,
@@ -2925,6 +2975,7 @@ class RuntimeWorker:
             topic="runtime.runner", action="execute", aggregate_type="runner",
             aggregate_id=runner.id, partition_key=run.session_id,
             dedupe_key=f"event:{queued.id}:execute",
+            tenant_id=run.tenant_id, account_id=run.account_id,
             payload_ref={
                 "runner_id": runner.id, "group_run_id": group_run.id,
                 "summary_epoch": epoch,
@@ -2954,6 +3005,41 @@ class RuntimeWorker:
                 command.dispatch_lease_owner = self.worker_id
                 command.dispatch_lease_token = uuid7()
                 command.attempt_count += 1
+                if command.action in {"verify_run", "emerge_group_after_chat"}:
+                    authority_run = await db.get(
+                        Run,
+                        command.payload_ref.get("run_id")
+                        or command.payload_ref.get("source_run_id")
+                        or command.aggregate_id,
+                    )
+                else:
+                    authority_run = await db.scalar(
+                        select(Run).join(GroupRun, GroupRun.run_id == Run.id).where(
+                            GroupRun.id == (
+                                command.payload_ref.get("group_run_id")
+                                or command.aggregate_id
+                            )
+                        )
+                    )
+                if authority_run is None:
+                    command.status = "dead"
+                    command.last_error = "runtime_control_owner_missing"
+                    command.completed_at = utcnow()
+                    command.dispatch_lease_owner = None
+                    command.dispatch_lease_token = None
+                    return True
+                authority_error = tenant_command_error(
+                    command,
+                    tenant_id=authority_run.tenant_id,
+                    account_id=authority_run.account_id,
+                )
+                if authority_error:
+                    command.status = "dead"
+                    command.last_error = authority_error
+                    command.completed_at = utcnow()
+                    command.dispatch_lease_owner = None
+                    command.dispatch_lease_token = None
+                    return True
                 if command.action == "verify_run":
                     verification_run_id = str(
                         command.payload_ref.get("run_id") or command.aggregate_id

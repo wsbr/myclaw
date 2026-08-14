@@ -6,11 +6,12 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.security import create_access_token, decode_token, verify_password
+from app.core.security import create_access_token, verify_password
 from app.database import get_db
-from app.deps import CurrentAccount, get_current_account
+from app.deps import CurrentAccount, _resolve_account, get_current_account
 from app.models.common import utcnow, uuid7
 from app.models.foundation import PlatformAccount, PlatformAccountRole, UserIdentity
+from app.models.tenant_v1 import DEFAULT_TENANT_ID, Tenant, TenantMembership
 from app.persistence.reliable_writes import PlatformAuditWriter
 from app.schemas.auth import LoginRequest, LoginResponse, UserResponse
 from app.config import settings
@@ -32,10 +33,25 @@ async def _roles(db: AsyncSession, account_id: str) -> frozenset[str]:
     )))
 
 
+async def _require_active_tenant(db: AsyncSession, account: PlatformAccount) -> None:
+    tenant = await db.get(Tenant, account.tenant_id)
+    membership = await db.scalar(select(TenantMembership.id).where(
+        TenantMembership.tenant_id == account.tenant_id,
+        TenantMembership.account_id == account.id,
+        TenantMembership.status == "active",
+    ))
+    if tenant is None or tenant.status != "active" or membership is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Tenant authority unavailable",
+        )
+
+
 def account_response(account: PlatformAccount, roles: frozenset[str]) -> UserResponse:
     primary_role = "admin" if "admin" in roles else "builder" if "builder" in roles else "user"
     return UserResponse(
         id=account.id,
+        tenant_id=account.tenant_id,
         user_id=account.user_id,
         email=account.email,
         username=account.display_name,
@@ -50,6 +66,7 @@ def account_response(account: PlatformAccount, roles: frozenset[str]) -> UserRes
 def token_for(account: PlatformAccount, roles: frozenset[str]) -> str:
     return create_access_token(account.id, claims={
         "account_id": account.id,
+        "tenant_id": account.tenant_id,
         "user_id": account.user_id,
         "auth_revision": account.auth_revision,
         "roles": sorted(roles),
@@ -63,6 +80,7 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
     if account.status != "active":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account disabled")
+    await _require_active_tenant(db, account)
     roles = await _roles(db, account.id)
     await PlatformAuditWriter(db).append(
         category="security", action="account.login", actor_type="account",
@@ -87,14 +105,11 @@ async def logout():
 
 @router.post("/refresh", response_model=LoginResponse)
 async def refresh(body: RefreshRequest, db: AsyncSession = Depends(get_db)):
-    payload = decode_token(body.access_token)
-    account_id = payload.get("account_id") or payload.get("sub")
-    account = await db.get(PlatformAccount, account_id) if account_id else None
-    if (account is None or account.status != "active"
-            or payload.get("auth_revision") != account.auth_revision):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
-    roles = await _roles(db, account.id)
-    return LoginResponse(access_token=token_for(account, roles), user=account_response(account, roles))
+    current = await _resolve_account(body.access_token, db)
+    return LoginResponse(
+        access_token=token_for(current.account, current.roles),
+        user=account_response(current.account, current.roles),
+    )
 
 
 @router.get("/enterprise/start")
@@ -127,7 +142,7 @@ async def enterprise_callback(
         if email and await db.scalar(select(PlatformAccount.id).where(PlatformAccount.email == email)):
             email = None
         account = PlatformAccount(
-            id=uuid7(), user_id=user_id, email=email,
+            id=uuid7(), tenant_id=DEFAULT_TENANT_ID, user_id=user_id, email=email,
             display_name=str(claims.get("name") or user_id)[:200], password_hash=None,
             status="active", auth_revision=1, version=1,
         )
@@ -137,8 +152,13 @@ async def enterprise_callback(
             account_id=account.id, role_key="user", granted_by_account_id=None,
             granted_at=utcnow(),
         ))
+        db.add(TenantMembership(
+            id=uuid7(), tenant_id=account.tenant_id, account_id=account.id,
+            role_key="member", status="active", version=1,
+        ))
     if account.status != "active":
         raise HTTPException(status_code=403, detail="Account disabled")
+    await _require_active_tenant(db, account)
     roles = await _roles(db, account.id)
     await PlatformAuditWriter(db).append(
         category="security", action="account.enterprise_login", actor_type="account",

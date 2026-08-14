@@ -147,7 +147,8 @@ async def queue_work_item_resume(
     }
     work.version += 1
     replacement = DurableRunner(
-        id=uuid7(), work_item_id=work.id, run_id=run.id,
+        id=uuid7(), tenant_id=run.tenant_id,
+        work_item_id=work.id, run_id=run.id,
         session_id=run.session_id, agent_id=source_runner.agent_id,
         agent_version_id=source_runner.agent_version_id,
         execution_epoch=work.execution_epoch, fencing_token=work.execution_epoch,
@@ -194,6 +195,7 @@ async def queue_work_item_resume(
         topic="runtime.runner", action="execute", aggregate_type="runner",
         aggregate_id=replacement.id, partition_key=run.session_id,
         dedupe_key=f"event:{queued.id}:execute",
+        tenant_id=run.tenant_id, account_id=run.account_id,
         payload_ref={"runner_id": replacement.id, "reason": reason},
     )
     return replacement

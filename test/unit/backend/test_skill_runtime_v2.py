@@ -75,6 +75,7 @@ async def test_execute_resolves_only_explicit_frozen_skill_uri(tmp_path, monkeyp
         "app.core.tool_registry.builtin.execute.resolve_read_path", resolved,
     )
     context = RuntimeContext(
+        tenant_id="test-tenant",
         session_id="session1", runner_id="runner1", user_id="user1", agent_id="agent1",
     )
     argv, readonly_roots, inputs = await _resolve_frozen_skill_argv(
@@ -140,7 +141,10 @@ async def test_snapshot_resolver_persists_exact_runner_skill_snapshot(monkeypatc
         await db.commit()
         runner = await db.get(DurableRunner, "runner1")
         resolved = await SnapshotResolver().resolve(
-            db, runner=runner, execution_principal={"account_id": "account1"},
+            db, runner=runner,
+            execution_principal={
+                "tenant_id": "test-tenant", "account_id": "account1",
+            },
             permission_mode="direct",
         )
         await db.commit()
@@ -200,6 +204,7 @@ async def test_read_file_materializes_only_the_frozen_skill_version(tmp_path, mo
         ])
         await db.commit()
         context = RuntimeContext(
+            tenant_id="test-tenant",
             session_id="session1", runner_id="runner1", user_id="user1",
             agent_id="agent1",
         )

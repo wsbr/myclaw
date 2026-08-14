@@ -21,6 +21,7 @@ from app.models.memory_v1 import (
 )
 from app.models.registry import PolicyDefinition
 from app.models.runtime_v1 import DurableRunner, Message, Run, WorkItem
+from app.models.tenant_v1 import DEFAULT_TENANT_ID
 from app.services.memory_service import apply_memory_candidate, normalized_content, recall_memories
 
 pytestmark = pytest.mark.unit
@@ -119,7 +120,8 @@ async def test_user_edit_wins_over_stale_model_candidate_and_delete_stops_recall
             idempotency_key="delete-1", db=db, current=current)
         assert response.status_code == 204
     async with factory.begin() as db:
-        recalled = await recall_memories(db, runner_id=uuid7(), user_id="u1",
+        recalled = await recall_memories(
+            db, tenant_id=DEFAULT_TENANT_ID, runner_id=uuid7(), user_id="u1",
             agent_id=agent_id, policy_key="memory_recall.user_combined")
         assert recalled == []
     await engine.dispose()

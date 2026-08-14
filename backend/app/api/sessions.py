@@ -65,7 +65,10 @@ async def _idempotency(
 
 
 async def _owned_session(db: AsyncSession, session_id: str, actor: SessionActor) -> UserSession:
-    session = await db.get(UserSession, session_id)
+    session = await db.scalar(select(UserSession).where(
+        UserSession.id == session_id,
+        UserSession.tenant_id == actor.tenant_id,
+    ))
     allowed = session is not None and (
         (actor.api_key is None and actor.account is not None
          and session.user_id == actor.account.user_id)
@@ -95,7 +98,11 @@ async def list_sessions(
     if actor.account is None:
         raise HTTPException(status_code=403, detail={"code": "identity_mapping_required"})
     target_user_id = actor.account.user_id
-    query = select(UserSession).where(UserSession.user_id == target_user_id)
+    query = select(UserSession).where(
+        UserSession.tenant_id == actor.account.tenant_id,
+        UserSession.account_id == actor.account.id,
+        UserSession.user_id == target_user_id,
+    )
     if actor.api_key:
         query = query.where(UserSession.origin_api_key_id == actor.api_key.id,
                             UserSession.entry_agent_id == actor.api_key.agent_id)
@@ -119,7 +126,9 @@ async def create_session(
         raise HTTPException(status_code=403, detail={"code": "api_key_agent_mismatch"})
     if actor.api_key and actor.account is None:
         try:
-            account, _ = await ensure_raw_user_account(db, actor.asserted_user_id)
+            account, _ = await ensure_raw_user_account(
+                db, actor.asserted_user_id, tenant_id=actor.api_key.tenant_id,
+            )
         except ValueError:
             raise HTTPException(status_code=409, detail={"code": "identity_mapping_required"})
         actor = SessionActor(
@@ -129,7 +138,10 @@ async def create_session(
     if actor.account is None:
         raise HTTPException(status_code=403, detail={"code": "identity_mapping_required"})
     target_user_id = actor.account.user_id
-    agent = await db.get(AgentBlueprint, body.entry_agent_id)
+    agent = await db.scalar(select(AgentBlueprint).where(
+        AgentBlueprint.id == body.entry_agent_id,
+        AgentBlueprint.tenant_id == actor.account.tenant_id,
+    ))
     if agent is None or (not actor.api_key and agent.visibility == "private" and agent.owner_account_id != actor.account.id and "admin" not in actor.roles):
         raise HTTPException(status_code=404, detail="Agent not found")
     record, replay = await _idempotency(
@@ -140,7 +152,8 @@ async def create_session(
         return SessionResponse.model_validate(record.response_snapshot)
     try:
         session = await create_user_session(
-            db, user_id=target_user_id, entry_agent_id=body.entry_agent_id,
+            db, tenant_id=actor.account.tenant_id, account_id=actor.account.id,
+            user_id=target_user_id, entry_agent_id=body.entry_agent_id,
             origin_type=expected_origin, origin_api_key_id=actor.api_key.id if actor.api_key else None,
         )
     except AgentUnavailable as error:

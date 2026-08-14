@@ -21,8 +21,9 @@ class SessionSandboxResponse(BaseModel):
 
 class SessionResponse(BaseModel):
     id: str
+    tenant_id: str
     user_id: str
-    account_id: str | None = None
+    account_id: str
     entry_agent_id: str
     status: str
     title: str | None
@@ -92,6 +93,8 @@ class MessageResponse(BaseModel):
 
 class RunResponse(BaseModel):
     id: str
+    tenant_id: str
+    account_id: str
     session_id: str
     mode: str
     status: str = "active"

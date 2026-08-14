@@ -211,6 +211,7 @@ class SnapshotResolver:
 
         discoverable_cards = await discover_agent_cards(
             db,
+            tenant_id=str(execution_principal["tenant_id"]),
             account_id=execution_principal.get("account_id"),
             actor_agent_id=runner.agent_id,
             limit=100,

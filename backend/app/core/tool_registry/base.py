@@ -98,6 +98,7 @@ class ToolResult(BaseModel):
 
 
 class RuntimeContext(BaseModel):
+    tenant_id: str
     session_id: str
     runner_id: str
     task_id: str | None = None

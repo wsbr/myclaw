@@ -21,8 +21,10 @@ class MemoryHead(Base, TimestampMixin, VersionMixin):
             name="ck_memory_head_scope_agent",
         ),
         UniqueConstraint("user_id", "scope_discriminator", "fact_key", name="uq_memory_head_logical_key"),
+        Index("ix_memory_head_tenant_user", "tenant_id", "user_id", "updated_at"),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
+    tenant_id: Mapped[str] = mapped_column(String(36), ForeignKey("tenant.id"), nullable=False)
     user_id: Mapped[str] = mapped_column(String(191), ForeignKey("user_identity.user_id"), nullable=False)
     scope: Mapped[str] = mapped_column(String(20), nullable=False)
     agent_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("agent.id"))
@@ -41,8 +43,10 @@ class MemoryRecord(Base, TimestampMixin, VersionMixin):
         CheckConstraint("source_kind IN ('model','user_edit','import')", name="ck_memory_source_kind"),
         UniqueConstraint("active_head_id", name="uq_memory_one_active"),
         Index("ix_memory_user_scope_status_updated", "user_id", "scope", "agent_id", "status", "updated_at"),
+        Index("ix_memory_tenant_user_status", "tenant_id", "user_id", "status", "updated_at"),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
+    tenant_id: Mapped[str] = mapped_column(String(36), ForeignKey("tenant.id"), nullable=False)
     head_id: Mapped[str] = mapped_column(String(36), ForeignKey("memory_head.id"), nullable=False)
     user_id: Mapped[str] = mapped_column(String(191), ForeignKey("user_identity.user_id"), nullable=False)
     agent_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("agent.id"))
@@ -85,8 +89,10 @@ class MemoryWriteCandidate(Base, TimestampMixin, VersionMixin):
         CheckConstraint("scope IN ('user','user_agent')", name="ck_memory_candidate_scope"),
         CheckConstraint("status IN ('pending','accepted','rejected','failed')", name="ck_memory_candidate_status"),
         Index("ix_memory_candidate_status_created", "status", "created_at"),
+        Index("ix_memory_candidate_tenant_status", "tenant_id", "status", "created_at"),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
+    tenant_id: Mapped[str] = mapped_column(String(36), ForeignKey("tenant.id"), nullable=False)
     user_id: Mapped[str] = mapped_column(String(191), ForeignKey("user_identity.user_id"), nullable=False)
     agent_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("agent.id"))
     scope: Mapped[str] = mapped_column(String(20), nullable=False)

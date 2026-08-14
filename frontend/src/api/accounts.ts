@@ -2,6 +2,8 @@ import client from './client'
 
 export interface MyAccount {
   id: string
+  tenant_id: string
+  tenant: { id: string; slug: string; name: string; status: string } | null
   user_id: string
   email: string | null
   display_name: string

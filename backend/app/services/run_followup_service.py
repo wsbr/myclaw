@@ -26,6 +26,7 @@ async def enqueue_run_terminal_followups(db, *, run, runner, completion_event) -
             aggregate_id=run.id,
             partition_key=run.session_id,
             dedupe_key=f"transition:run:{run.id}:emerge-group",
+            tenant_id=run.tenant_id, account_id=run.account_id,
             payload_ref={
                 "source_run_id": run.id,
                 "source_runner_id": runner.id,
@@ -53,6 +54,7 @@ async def enqueue_run_terminal_followups(db, *, run, runner, completion_event) -
         topic="runtime.maintenance", action="extract_memory",
         aggregate_type="run", aggregate_id=run.id, partition_key=run.session_id,
         dedupe_key=f"transition:run:{run.id}:extract_memory",
+        tenant_id=run.tenant_id, account_id=run.account_id,
         payload_ref={
             "run_id": run.id,
             "runner_id": runner.id,

@@ -43,10 +43,21 @@ async def _init_admin():
     from sqlalchemy import select
     from app.database import AsyncSessionLocal
     from app.models.foundation import PlatformAccount, PlatformAccountRole, UserIdentity
+    from app.models.tenant_v1 import (
+        DEFAULT_TENANT_ID, DEFAULT_TENANT_SLUG, Tenant, TenantMembership,
+    )
     from app.models.common import utcnow, uuid7
     from app.core.security import hash_password
 
     async with AsyncSessionLocal.begin() as db:
+        tenant = await db.get(Tenant, DEFAULT_TENANT_ID)
+        if tenant is None:
+            tenant = Tenant(
+                id=DEFAULT_TENANT_ID, slug=DEFAULT_TENANT_SLUG,
+                name="Default Tenant", status="active", version=1,
+            )
+            db.add(tenant)
+            await db.flush()
         account = await db.scalar(select(PlatformAccount).where(
             PlatformAccount.email == settings.init_admin_email,
         ))
@@ -55,7 +66,8 @@ async def _init_admin():
             db.add(UserIdentity(user_id=account_id, status="active"))
             await db.flush()
             account = PlatformAccount(
-                id=account_id, user_id=account_id, email=settings.init_admin_email,
+                id=account_id, tenant_id=tenant.id, user_id=account_id,
+                email=settings.init_admin_email,
                 display_name="admin", password_hash=hash_password(settings.init_admin_password),
                 status="active", auth_revision=1, version=1,
             )
@@ -68,6 +80,15 @@ async def _init_admin():
                     granted_by_account_id=account.id if role == "admin" else None,
                     granted_at=utcnow(),
                 ))
+        membership = await db.scalar(select(TenantMembership).where(
+            TenantMembership.tenant_id == account.tenant_id,
+            TenantMembership.account_id == account.id,
+        ))
+        if membership is None:
+            db.add(TenantMembership(
+                id=uuid7(), tenant_id=account.tenant_id, account_id=account.id,
+                role_key="admin", status="active", version=1,
+            ))
 
 
 async def _init_phase_one_registries():

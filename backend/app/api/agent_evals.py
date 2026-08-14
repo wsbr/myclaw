@@ -34,7 +34,10 @@ router = APIRouter(prefix="/agents", tags=["agent-evals"])
 async def _owned_agent(
     db: AsyncSession, *, agent_id: str, current: CurrentAccount,
 ) -> AgentBlueprint:
-    agent = await db.get(AgentBlueprint, agent_id)
+    agent = await db.scalar(select(AgentBlueprint).where(
+        AgentBlueprint.id == agent_id,
+        AgentBlueprint.tenant_id == current.tenant_id,
+    ))
     if agent is None:
         raise HTTPException(status_code=404, detail="Agent not found")
     if agent.owner_account_id != current.account.id and "admin" not in current.roles:
@@ -316,7 +319,8 @@ async def run_suite(
     try:
         eval_run = await start_eval_run(
             db, suite=suite, expected_draft_revision=body.expected_draft_revision,
-            actor_account_id=current.account.id, actor_user_id=current.account.user_id,
+            tenant_id=current.tenant_id, actor_account_id=current.account.id,
+            actor_user_id=current.account.user_id,
             idempotency_record_id=record.id,
         )
     except AgentDraftConflict:

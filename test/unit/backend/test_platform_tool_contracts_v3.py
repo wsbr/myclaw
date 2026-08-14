@@ -155,6 +155,7 @@ def test_untrusted_output_validation_evidence_does_not_reflect_rejected_values()
 
 def test_runtime_context_call_chains_are_not_shared_between_runs():
     values = {
+        "tenant_id": "test-tenant",
         "session_id": "session", "runner_id": "runner",
         "user_id": "user", "agent_id": "agent",
     }
@@ -188,6 +189,7 @@ async def test_search_tools_reports_authorized_but_plan_blocked_versions_as_disc
     result, durable_wait, wait_reason = await dispatch_coordination_tool(
         "search_tools", {"query": "write file"},
         context=RuntimeContext(
+            tenant_id="test-tenant",
             session_id="session", runner_id="runner",
             user_id="user", agent_id="agent",
             permission_mode="plan_readonly",
@@ -234,6 +236,7 @@ async def test_search_tools_empty_query_can_inventory_the_authorized_catalog():
     result, _, _ = await dispatch_coordination_tool(
         "search_tools", {"query": "", "limit": 50},
         context=RuntimeContext(
+            tenant_id="test-tenant",
             session_id="session", runner_id="runner",
             user_id="user", agent_id="agent",
             permission_mode="plan_readonly",
@@ -269,6 +272,7 @@ async def test_web_fetch_uses_platform_owned_balanced_capture_limits(monkeypatch
     result = await BUILTIN_TOOLS["web_fetch"].execute(
         {"url": "https://example.com/large-document"},
         RuntimeContext(
+            tenant_id="test-tenant",
             session_id="session", runner_id="runner",
             user_id="user", agent_id="agent",
         ),

@@ -29,7 +29,8 @@ SAFE_NAME = re.compile(r"^[^/\\\x00-\x1f\x7f]{1,500}$")
 
 def artifact_view(artifact: Artifact) -> dict:
     return {
-        "id": artifact.id, "user_id": artifact.user_id, "session_id": artifact.session_id,
+        "id": artifact.id, "tenant_id": artifact.tenant_id,
+        "user_id": artifact.user_id, "session_id": artifact.session_id,
         "workspace_id": artifact.workspace_id, "relative_path": artifact.relative_path,
         "source_relative_path": artifact.source_relative_path,
         "name": artifact.name, "mime_type": artifact.mime_type,
@@ -178,7 +179,8 @@ async def publish_artifact(db, *, context, args: dict) -> Artifact:
     target = root.joinpath(*internal_relative.split("/"))
     if replay is None and equivalent is None:
         artifact = Artifact(
-            id=artifact_id, user_id=context.user_id, session_id=context.session_id,
+            id=artifact_id, tenant_id=context.tenant_id,
+            user_id=context.user_id, session_id=context.session_id,
             workspace_id=context.workspace_id, relative_path=internal_relative,
             source_relative_path=source_relative, name=name,
             mime_type=mime_type, size_bytes=len(content), checksum=source_checksum,

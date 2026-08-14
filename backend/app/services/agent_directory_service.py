@@ -29,7 +29,8 @@ def agent_card_view(card: AgentCard) -> dict:
 
 
 async def discover_agent_cards(
-    db, *, account_id: str | None, actor_agent_id: str | None = None,
+    db, *, tenant_id: str, account_id: str | None,
+    actor_agent_id: str | None = None,
     query: str | None = None, domain_tags: list[str] | None = None,
     group_enabled: bool | None = None, capability_keys: list[str] | None = None,
     governance_labels: list[str] | None = None, limit: int = 20,
@@ -47,6 +48,7 @@ async def discover_agent_cards(
         .join(AgentBlueprint, AgentBlueprint.id == AgentCard.agent_id)
         .join(AgentAssemblyVersion, AgentAssemblyVersion.id == AgentCard.agent_version_id)
         .where(
+            AgentBlueprint.tenant_id == tenant_id,
             AgentBlueprint.status == "published",
             AgentBlueprint.current_published_version_id == AgentCard.agent_version_id,
             AgentAssemblyVersion.publication_status == "published",
@@ -118,9 +120,13 @@ async def discover_agent_cards(
 
 
 async def resolve_callable_agent(
-    db, *, account_id: str | None, actor_agent_id: str, target_agent_id: str,
+    db, *, tenant_id: str, account_id: str | None,
+    actor_agent_id: str, target_agent_id: str,
 ) -> tuple[AgentBlueprint, AgentCard]:
-    target = await db.get(AgentBlueprint, target_agent_id)
+    target = await db.scalar(select(AgentBlueprint).where(
+        AgentBlueprint.id == target_agent_id,
+        AgentBlueprint.tenant_id == tenant_id,
+    ))
     if (
         target is None or target.id == actor_agent_id
         or target.status != "published" or not target.current_published_version_id

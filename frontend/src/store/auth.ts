@@ -2,6 +2,7 @@ import { create } from 'zustand'
 
 interface User {
   id: string
+  tenant_id: string
   user_id: string
   email: string | null
   username: string

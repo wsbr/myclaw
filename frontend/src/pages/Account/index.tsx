@@ -20,6 +20,7 @@ export default function AccountPage() {
   const refreshAccount = (updated: MyAccount) => {
     queryClient.setQueryData(['account', 'me'], updated)
     updateUser({
+      tenant_id: updated.tenant_id,
       user_id: updated.user_id,
       email: updated.email,
       username: updated.display_name,
@@ -73,6 +74,12 @@ export default function AccountPage() {
     </div>
     <Card title="账号资料">
       <Descriptions column={1} size="small" className="mb-5">
+        <Descriptions.Item label="当前 Tenant">
+          <Space>
+            <Tag color="blue">{account.tenant?.name ?? 'Unknown Tenant'}</Tag>
+            <Typography.Text copyable code>{account.tenant_id}</Typography.Text>
+          </Space>
+        </Descriptions.Item>
         <Descriptions.Item label="当前 userId"><Typography.Text copyable code>{account.user_id}</Typography.Text></Descriptions.Item>
         <Descriptions.Item label="角色"><Space>{account.roles.map(role => <Tag key={role}>{role}</Tag>)}</Space></Descriptions.Item>
         <Descriptions.Item label="状态"><Tag color="green">{account.status}</Tag></Descriptions.Item>

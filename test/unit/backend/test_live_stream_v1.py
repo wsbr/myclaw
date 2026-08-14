@@ -94,6 +94,7 @@ async def test_inline_tool_progress_projects_running_and_terminal_status():
         [ToolCallItem(call_id="call-1", name="lookup", arguments={}, index=0)],
         capability_snapshot={"effective_tool_keys": ["lookup"]},
         runtime_context=RuntimeContext(
+            tenant_id="test-tenant",
             session_id="session-1", runner_id="runner-1",
             user_id="user-1", agent_id="agent-1",
         ),

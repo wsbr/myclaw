@@ -18,6 +18,7 @@ from app.models.foundation import (
     IdempotencyRecord, PlatformAccount, PlatformAccountRole, UserIdentity,
 )
 from app.models.runtime_v1 import Run
+from app.models.tenant_v1 import Tenant, TenantMembership
 from app.persistence.reliable_writes import PlatformAuditWriter
 from app.services.cursor_service import SortKey, paginate_scalars
 
@@ -62,8 +63,16 @@ async def _account_view(db: AsyncSession, account: PlatformAccount) -> dict:
     roles = sorted(await db.scalars(select(PlatformAccountRole.role_key).where(
         PlatformAccountRole.account_id == account.id,
     )))
+    tenant = await db.get(Tenant, account.tenant_id)
     return {
         "id": account.id,
+        "tenant_id": account.tenant_id,
+        "tenant": ({
+            "id": tenant.id,
+            "slug": tenant.slug,
+            "name": tenant.name,
+            "status": tenant.status,
+        } if tenant is not None else None),
         "user_id": account.user_id,
         "email": account.email,
         "display_name": account.display_name,
@@ -108,7 +117,9 @@ async def list_accounts(
     limit: int = 50, cursor: str | None = None,
     db: AsyncSession = Depends(get_db), current: CurrentAccount = Depends(get_current_admin),
 ):
-    query = select(PlatformAccount)
+    query = select(PlatformAccount).where(
+        PlatformAccount.tenant_id == current.tenant_id,
+    )
     if status:
         query = query.where(PlatformAccount.status == status)
     if user_id_prefix:
@@ -143,7 +154,8 @@ async def create_account(
     if await db.scalar(select(PlatformAccount.id).where(PlatformAccount.email == body.email)):
         raise HTTPException(status_code=409, detail={"code": "email_already_exists"})
     account = PlatformAccount(
-        id=uuid7(), user_id=user_id, email=body.email,
+        id=uuid7(), tenant_id=current.tenant_id,
+        user_id=user_id, email=body.email,
         display_name=body.display_name.strip(), password_hash=hash_password(body.password),
         status="active", auth_revision=1, version=1,
     )
@@ -155,6 +167,11 @@ async def create_account(
         account_id=account.id, role_key=role, granted_by_account_id=current.account.id,
         granted_at=utcnow(),
     ) for role in roles])
+    db.add(TenantMembership(
+        id=uuid7(), tenant_id=current.tenant_id, account_id=account.id,
+        role_key="admin" if "admin" in roles else "member",
+        status="active", version=1,
+    ))
     await db.flush()
     response = await _account_view(db, account)
     await PlatformAuditWriter(db).append(
@@ -178,7 +195,10 @@ async def get_account(
     account_id: str, db: AsyncSession = Depends(get_db),
     current: CurrentAccount = Depends(get_current_admin),
 ):
-    account = await db.get(PlatformAccount, account_id)
+    account = await db.scalar(select(PlatformAccount).where(
+        PlatformAccount.id == account_id,
+        PlatformAccount.tenant_id == current.tenant_id,
+    ))
     if account is None:
         raise HTTPException(status_code=404, detail="Account not found")
     return await _account_view(db, account)
@@ -200,6 +220,7 @@ async def patch_account_roles(
         return record.response_snapshot
     account = await db.scalar(select(PlatformAccount).where(
         PlatformAccount.id == account_id,
+        PlatformAccount.tenant_id == current.tenant_id,
     ).with_for_update())
     if account is None:
         raise HTTPException(status_code=404, detail="Account not found")
@@ -215,6 +236,14 @@ async def patch_account_roles(
         account_id=account.id, role_key=role, granted_by_account_id=current.account.id,
         granted_at=utcnow(),
     ) for role in roles])
+    membership = await db.scalar(select(TenantMembership).where(
+        TenantMembership.tenant_id == current.tenant_id,
+        TenantMembership.account_id == account.id,
+    ).with_for_update())
+    if membership is None:
+        raise HTTPException(status_code=409, detail={"code": "tenant_membership_missing"})
+    membership.role_key = "admin" if "admin" in roles else "member"
+    membership.version += 1
     account.version += 1
     account.auth_revision += 1
     await db.flush()
@@ -250,6 +279,7 @@ async def patch_account_status(
         return record.response_snapshot
     account = await db.scalar(select(PlatformAccount).where(
         PlatformAccount.id == account_id,
+        PlatformAccount.tenant_id == current.tenant_id,
     ).with_for_update())
     if account is None:
         raise HTTPException(status_code=404, detail="Account not found")
@@ -283,7 +313,9 @@ async def list_all_agents(
     db: AsyncSession = Depends(get_db), current: CurrentAccount = Depends(get_current_admin),
 ):
     agents, next_cursor = await paginate_scalars(
-        db, select(AgentBlueprint),
+        db, select(AgentBlueprint).where(
+            AgentBlueprint.tenant_id == current.tenant_id,
+        ),
         sort=(SortKey(AgentBlueprint.created_at), SortKey(AgentBlueprint.id)),
         limit=limit, cursor=cursor, principal=f"account:{current.account.id}",
         resource="admin:agents", filters={},
@@ -305,7 +337,13 @@ async def global_stats(
     db: AsyncSession = Depends(get_db), current: CurrentAccount = Depends(get_current_admin),
 ):
     return {
-        "total_users": await db.scalar(select(func.count(PlatformAccount.id))),
-        "total_agents": await db.scalar(select(func.count(AgentBlueprint.id))),
-        "total_runs": await db.scalar(select(func.count(Run.id))),
+        "total_users": await db.scalar(select(func.count(PlatformAccount.id)).where(
+            PlatformAccount.tenant_id == current.tenant_id,
+        )),
+        "total_agents": await db.scalar(select(func.count(AgentBlueprint.id)).where(
+            AgentBlueprint.tenant_id == current.tenant_id,
+        )),
+        "total_runs": await db.scalar(select(func.count(Run.id)).where(
+            Run.tenant_id == current.tenant_id,
+        )),
     }

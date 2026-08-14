@@ -71,6 +71,7 @@ async def memory_view(db, memory: MemoryRecord, head: MemoryHead | None = None) 
 async def _locked_head(db, candidate: MemoryWriteCandidate) -> MemoryHead:
     fact_key = canonical_fact_key(candidate.fact_key)
     head = await db.scalar(select(MemoryHead).where(
+        MemoryHead.tenant_id == candidate.tenant_id,
         MemoryHead.user_id == candidate.user_id, MemoryHead.scope == candidate.scope,
         MemoryHead.agent_id.is_(None) if candidate.scope == "user" else MemoryHead.agent_id == candidate.agent_id,
         MemoryHead.fact_key == fact_key,
@@ -80,7 +81,8 @@ async def _locked_head(db, candidate: MemoryWriteCandidate) -> MemoryHead:
     try:
         async with db.begin_nested():
             head = MemoryHead(
-                id=uuid7(), user_id=candidate.user_id, scope=candidate.scope,
+                id=uuid7(), tenant_id=candidate.tenant_id,
+                user_id=candidate.user_id, scope=candidate.scope,
                 agent_id=candidate.agent_id if candidate.scope == "user_agent" else None,
                 fact_key=fact_key,
             )
@@ -88,6 +90,7 @@ async def _locked_head(db, candidate: MemoryWriteCandidate) -> MemoryHead:
             await db.flush()
     except IntegrityError:
         head = await db.scalar(select(MemoryHead).where(
+            MemoryHead.tenant_id == candidate.tenant_id,
             MemoryHead.user_id == candidate.user_id, MemoryHead.scope == candidate.scope,
             MemoryHead.agent_id.is_(None) if candidate.scope == "user" else MemoryHead.agent_id == candidate.agent_id,
             MemoryHead.fact_key == fact_key,
@@ -161,7 +164,8 @@ async def apply_memory_candidate(db, candidate_id: str) -> MemoryWriteCandidate:
             head.version += 1
             await db.flush()
             result = MemoryRecord(
-                id=uuid7(), head_id=head.id, user_id=candidate.user_id,
+                id=uuid7(), tenant_id=candidate.tenant_id,
+                head_id=head.id, user_id=candidate.user_id,
                 agent_id=candidate.agent_id if candidate.scope == "user_agent" else None,
                 scope=candidate.scope, fact_key=candidate.fact_key, content=content,
                 normalized_hash=digest, status="active", source_kind="model",
@@ -198,7 +202,8 @@ async def apply_memory_candidate(db, candidate_id: str) -> MemoryWriteCandidate:
 
 
 async def recall_memories(
-    db, *, runner_id: str, user_id: str, agent_id: str, policy_key: str,
+    db, *, tenant_id: str, runner_id: str, user_id: str,
+    agent_id: str, policy_key: str,
     parameters: dict | None = None,
 ) -> list[MemoryRecord]:
     snapshots = list(await db.scalars(select(RunnerMemorySnapshot).where(
@@ -206,6 +211,7 @@ async def recall_memories(
     ).order_by(RunnerMemorySnapshot.rank)))
     if snapshots:
         by_id = {row.id: row for row in await db.scalars(select(MemoryRecord).where(
+            MemoryRecord.tenant_id == tenant_id,
             MemoryRecord.id.in_([snapshot.memory_id for snapshot in snapshots])
         ))}
         return [by_id[snapshot.memory_id] for snapshot in snapshots if snapshot.memory_id in by_id]
@@ -217,6 +223,7 @@ async def recall_memories(
     if max_items == 0 or token_budget == 0:
         return []
     statement = select(MemoryRecord).where(
+        MemoryRecord.tenant_id == tenant_id,
         MemoryRecord.user_id == user_id, MemoryRecord.status == "active",
     )
     if policy_key == "memory_recall.user_agent":

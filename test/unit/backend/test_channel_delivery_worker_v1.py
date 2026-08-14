@@ -9,6 +9,7 @@ from app.database import Base
 from app.models.channel_v1 import ChannelAccount, NotificationDelivery, NotificationDeliveryAttempt
 from app.models.common import utcnow, uuid7
 from app.models.foundation import ExecutionEvent, OutboxCommand, UserSession
+from app.models.tenant_v1 import DEFAULT_TENANT_ID
 from app.workers.channel_delivery_worker import ChannelDeliveryWorker
 
 pytestmark = pytest.mark.unit
@@ -33,9 +34,11 @@ async def test_delivery_worker_claims_attempt_and_settles_without_copying_event_
         await connection.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     session_id, event_id, account_id, delivery_id = uuid7(), uuid7(), uuid7(), uuid7()
+    owner_account_id = uuid7()
     async with factory.begin() as db:
         db.add(UserSession(
-            id=session_id, user_id="u1", entry_agent_id=uuid7(), status="active",
+            id=session_id, account_id=owner_account_id, user_id="u1",
+            entry_agent_id=uuid7(), status="active",
             origin_type="channel", next_event_sequence=2,
         ))
         db.add(ExecutionEvent(
@@ -45,7 +48,7 @@ async def test_delivery_worker_claims_attempt_and_settles_without_copying_event_
             payload={"secret": "must-not-be-rendered"}, correlation_id="run-1",
         ))
         db.add(ChannelAccount(
-            id=account_id, plugin_key="unit-test-channel", owner_account_id=uuid7(),
+            id=account_id, plugin_key="unit-test-channel", owner_account_id=owner_account_id,
             external_account_key="external-account", credential_ref="env://UNIT_TEST_CHANNEL_TOKEN",
             status="active", config={"safe": True},
         ))
@@ -61,6 +64,7 @@ async def test_delivery_worker_claims_attempt_and_settles_without_copying_event_
             id=uuid7(), topic="runtime.delivery", action="deliver_notification",
             aggregate_type="notification_delivery", aggregate_id=delivery_id,
             partition_key=session_id, dedupe_key="deliver-1", payload_ref={"delivery_id": delivery_id},
+            tenant_id=DEFAULT_TENANT_ID, account_id=owner_account_id,
             available_at=utcnow(), status="pending",
         ))
 

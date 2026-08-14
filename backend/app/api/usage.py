@@ -149,7 +149,10 @@ async def add_usage_adjustment(
     )
     if replay and record.response_snapshot:
         return record.response_snapshot
-    original = await db.get(UsageLedgerEntry, body.original_entry_id)
+    original = await db.scalar(select(UsageLedgerEntry).where(
+        UsageLedgerEntry.id == body.original_entry_id,
+        UsageLedgerEntry.tenant_id == current.tenant_id,
+    ))
     if original is None:
         raise HTTPException(status_code=404, detail="Usage entry not found")
     item = await create_usage_adjustment(
@@ -180,10 +183,12 @@ async def add_usage_adjustment(
 
 
 def _entry_query(
-    *, run_id: str | None, account_id: str | None,
+    *, tenant_id: str, run_id: str | None, account_id: str | None,
     agent_version_id: str | None, model_version_id: str | None,
 ):
-    query = select(UsageLedgerEntry)
+    query = select(UsageLedgerEntry).where(
+        UsageLedgerEntry.tenant_id == tenant_id,
+    )
     for column, value in (
         (UsageLedgerEntry.run_id, run_id),
         (UsageLedgerEntry.account_id, account_id),
@@ -213,7 +218,7 @@ async def list_usage_entries(
     }
     rows, next_cursor = await paginate_scalars(
         db,
-        _entry_query(**filters),
+        _entry_query(tenant_id=current.tenant_id, **filters),
         sort=(
             SortKey(UsageLedgerEntry.created_at, descending=True),
             SortKey(UsageLedgerEntry.id, descending=True),
@@ -238,13 +243,13 @@ async def get_usage_rollups(
     db: AsyncSession = Depends(get_db),
     current: CurrentAccount = Depends(get_current_admin),
 ):
-    del current
     allowed = {
         "run_id", "account_id", "group_run_id", "agent_version_id", "model_version_id",
     }
     if group_by not in allowed:
         raise HTTPException(status_code=422, detail={"code": "invalid_usage_group_by"})
     rows = list(await db.scalars(_entry_query(
+        tenant_id=current.tenant_id,
         run_id=run_id, account_id=account_id,
         agent_version_id=agent_version_id, model_version_id=model_version_id,
     ).order_by(UsageLedgerEntry.created_at, UsageLedgerEntry.id)))
@@ -259,6 +264,7 @@ async def get_owned_run_usage(
 ):
     await _owned_run(db, run_id, actor)
     rows = list(await db.scalars(select(UsageLedgerEntry).where(
+        UsageLedgerEntry.tenant_id == actor.tenant_id,
         UsageLedgerEntry.run_id == run_id,
     ).order_by(UsageLedgerEntry.created_at, UsageLedgerEntry.id)))
     return {

@@ -9,8 +9,10 @@ from datetime import datetime
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.agent_v1 import AgentBlueprint
 from app.models.common import utcnow, uuid7
 from app.models.foundation import AgentApiKey
+from app.models.tenant_v1 import Tenant
 from app.persistence.reliable_writes import PlatformAuditWriter
 
 
@@ -30,6 +32,7 @@ async def create_api_key(
     db: AsyncSession,
     *,
     agent_id: str,
+    tenant_id: str,
     name: str,
     caller_label: str,
     created_by_account_id: str,
@@ -39,7 +42,8 @@ async def create_api_key(
 ) -> tuple[AgentApiKey, str]:
     prefix, plaintext, digest = _new_secret()
     key = AgentApiKey(
-        id=uuid7(), agent_id=agent_id, name=name, caller_label=caller_label,
+        id=uuid7(), tenant_id=tenant_id, agent_id=agent_id,
+        name=name, caller_label=caller_label,
         prefix=prefix, secret_hash=digest, status="active",
         created_by_account_id=created_by_account_id, expires_at=expires_at,
         rotated_from_id=rotated_from_id,
@@ -86,6 +90,14 @@ async def authenticate_api_key(db: AsyncSession, plaintext: str) -> AgentApiKey 
         return None
     key = await db.scalar(select(AgentApiKey).where(AgentApiKey.prefix == parts[1]))
     if key is None or key.status != "active" or not verify_api_key(plaintext, key.secret_hash):
+        return None
+    tenant = await db.get(Tenant, key.tenant_id)
+    agent = await db.get(AgentBlueprint, key.agent_id)
+    if (
+        tenant is None or tenant.status != "active"
+        or agent is None or agent.tenant_id != key.tenant_id
+        or agent.status not in {"draft", "published"}
+    ):
         return None
     if key.expires_at is not None and key.expires_at <= utcnow():
         key.status = "expired"

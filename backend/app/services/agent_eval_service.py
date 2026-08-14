@@ -185,7 +185,8 @@ async def create_eval_suite_version(
 
 async def start_eval_run(
     db: AsyncSession, *, suite: AgentEvalSuite, expected_draft_revision: int,
-    actor_account_id: str, actor_user_id: str, idempotency_record_id: str,
+    tenant_id: str, actor_account_id: str, actor_user_id: str,
+    idempotency_record_id: str,
 ) -> AgentEvalRun:
     if suite.status != "active" or not suite.current_version_id:
         raise ValueError("eval suite is not active")
@@ -211,7 +212,8 @@ async def start_eval_run(
     await db.flush()
     for case in cases:
         session = await create_user_session(
-            db, user_id=actor_user_id, entry_agent_id=suite.agent_id,
+            db, tenant_id=tenant_id, account_id=actor_account_id,
+            user_id=actor_user_id, entry_agent_id=suite.agent_id,
             origin_type="web", title=f"Eval · {version.name} · {case.name}",
             allow_unpublished=True, agent_version_id=snapshot.id,
         )

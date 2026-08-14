@@ -63,7 +63,8 @@ def _group_card_is_eligible(card: AgentCard) -> bool:
 
 
 async def build_group_emergence_candidate_snapshot(
-    db, *, account_id: str | None, current_agent_id: str | None = None,
+    db, *, tenant_id: str, account_id: str | None,
+    current_agent_id: str | None = None,
 ) -> dict:
     """Freeze the complete model-facing semantic candidate catalog for Chat.
 
@@ -74,6 +75,7 @@ async def build_group_emergence_candidate_snapshot(
 
     cards = await discover_agent_cards(
         db,
+        tenant_id=tenant_id,
         account_id=account_id,
         group_enabled=True,
         limit=500,
@@ -139,7 +141,8 @@ async def build_group_emergence_candidate_snapshot(
 
 
 async def _resolve_group_members(
-    db, *, account_id: str, agent_ids: Iterable[str], actor_agent_id: str,
+    db, *, tenant_id: str, account_id: str,
+    agent_ids: Iterable[str], actor_agent_id: str,
 ) -> list[ResolvedGroupMember]:
     normalized = [str(item).strip() for item in agent_ids if str(item).strip()]
     if len(normalized) < 2 or len(set(normalized)) != len(normalized):
@@ -160,6 +163,7 @@ async def _resolve_group_members(
         try:
             agent, card = await resolve_callable_agent(
                 db,
+                tenant_id=tenant_id,
                 account_id=account_id,
                 actor_agent_id=actor_agent_id,
                 target_agent_id=agent_id,
@@ -194,6 +198,7 @@ async def _resolve_group_members(
 def group_session_view(group: GroupSession) -> dict:
     return {
         "id": group.id,
+        "tenant_id": group.tenant_id,
         "session_id": group.session_id,
         "status": group.status,
         "initiator_agent_id": group.initiator_agent_id,
@@ -236,6 +241,8 @@ def group_run_member_view(row: GroupRunMember) -> dict:
 def _run_projection(run: Run) -> dict:
     return {
         "id": run.id,
+        "tenant_id": run.tenant_id,
+        "account_id": run.account_id,
         "session_id": run.session_id,
         "mode": run.mode,
         "status": run.status,
@@ -293,6 +300,7 @@ def _member_runner(
 ) -> DurableRunner:
     return DurableRunner(
         id=uuid7(),
+        tenant_id=session.tenant_id,
         work_item_id=work.id,
         run_id=work.run_id,
         session_id=work.session_id,
@@ -301,6 +309,7 @@ def _member_runner(
         execution_epoch=work.execution_epoch,
         status="queued",
         principal_snapshot={
+            "tenant_id": session.tenant_id,
             "user_id": session.user_id,
             "account_id": session.account_id,
             "session_id": session.id,
@@ -348,7 +357,8 @@ async def _create_native_group_run_graph(
 
     default_budget = default_run_budget("group")
     run = Run(
-        id=uuid7(), session_id=session.id, user_id=session.user_id, mode="group",
+        id=uuid7(), tenant_id=session.tenant_id, account_id=session.account_id,
+        session_id=session.id, user_id=session.user_id, mode="group",
         status="active",
         permission_mode="direct", hard_budget_snapshot=default_budget,
         deadline_at=deadline_from_budget(default_budget, mode="group"),
@@ -411,7 +421,8 @@ async def _create_native_group_run_graph(
     target_membership = membership_by_agent[recipient_id]
     target_snapshot = snapshots[recipient_id]
     work = WorkItem(
-        id=uuid7(), run_id=run.id, session_id=session.id, user_id=session.user_id,
+        id=uuid7(), tenant_id=session.tenant_id,
+        run_id=run.id, session_id=session.id, user_id=session.user_id,
         mode="group", owner_agent_id=recipient_id,
         agent_version_id=target_snapshot.agent_version_id,
         group_run_id=group_run.id, group_membership_id=target_membership.id,
@@ -501,6 +512,7 @@ async def _create_native_group_run_graph(
         topic="runtime.runner", action="execute", aggregate_type="runner",
         aggregate_id=runner.id, partition_key=session.id,
         dedupe_key=f"event:{queued.id}:execute",
+        tenant_id=session.tenant_id, account_id=session.account_id,
         payload_ref={"runner_id": runner.id, "group_run_id": group_run.id},
     )
     return group_run
@@ -519,14 +531,16 @@ async def create_group_with_initial_run(
         UserSession.id == session.id,
     ).with_for_update())
     members = await _resolve_group_members(
-        db, account_id=account_id, agent_ids=member_agent_ids,
+        db, tenant_id=session.tenant_id, account_id=account_id,
+        agent_ids=member_agent_ids,
         actor_agent_id="__group_creation__",
     )
     initiator_id = reporter_agent_id or members[0].agent_id
     if initiator_id not in {item.agent_id for item in members}:
         raise GroupPolicyError("reporter_unavailable", "Reporter must be a selected member")
     group = GroupSession(
-        id=uuid7(), session_id=session.id, user_id=session.user_id,
+        id=uuid7(), tenant_id=session.tenant_id,
+        session_id=session.id, user_id=session.user_id,
         initiator_agent_id=initiator_id,
         status="open", goal=goal, bootstrap_context="",
         membership_policy="fixed_for_run", formation_mode="manual_selected",
@@ -679,6 +693,7 @@ async def emerge_group_after_chat(
     try:
         resolved = await _resolve_group_members(
             db,
+            tenant_id=session.tenant_id,
             account_id=session.account_id,
             agent_ids=selected_ids,
             actor_agent_id="__group_emergence__",
@@ -780,6 +795,7 @@ async def emerge_group_after_chat(
     if group is None:
         group = GroupSession(
             id=uuid7(),
+            tenant_id=session.tenant_id,
             session_id=session.id,
             user_id=session.user_id,
             initiator_agent_id=reporter_id,
@@ -947,7 +963,7 @@ async def create_followup_group_run(
             "Group no longer has enough active members for a new GroupRun",
         )
     resolved = await _resolve_group_members(
-        db, account_id=account_id,
+        db, tenant_id=session.tenant_id, account_id=account_id,
         agent_ids=[item.agent_id for item in memberships],
         actor_agent_id="__group_followup__",
     )
@@ -994,7 +1010,8 @@ async def create_user_group_message(
         raise GroupPolicyError("group_member_unavailable", "Target member is unavailable")
     membership = await db.get(GroupMembership, snapshot.membership_id)
     work = WorkItem(
-        id=uuid7(), run_id=run.id, session_id=session.id, user_id=session.user_id,
+        id=uuid7(), tenant_id=session.tenant_id,
+        run_id=run.id, session_id=session.id, user_id=session.user_id,
         mode="group", owner_agent_id=target_id,
         agent_version_id=snapshot.agent_version_id,
         group_run_id=group_run.id, group_membership_id=membership.id,
@@ -1062,6 +1079,7 @@ async def create_user_group_message(
         topic="runtime.runner", action="execute", aggregate_type="runner",
         aggregate_id=runner.id, partition_key=session.id,
         dedupe_key=f"event:{queued.id}:execute",
+        tenant_id=session.tenant_id, account_id=session.account_id,
         payload_ref={"runner_id": runner.id, "group_run_id": group_run.id},
     )
     return message, runner
@@ -1165,7 +1183,8 @@ async def send_agent_group_message(
     if target_snapshot is None:
         return message, None
     target_work = WorkItem(
-        id=uuid7(), run_id=run.id, session_id=run.session_id, user_id=run.user_id,
+        id=uuid7(), tenant_id=run.tenant_id,
+        run_id=run.id, session_id=run.session_id, user_id=run.user_id,
         mode="group", owner_agent_id=recipient_agent_id,
         agent_version_id=target_snapshot.agent_version_id,
         parent_work_item_id=work.id, group_run_id=group_run.id,
@@ -1196,6 +1215,7 @@ async def send_agent_group_message(
         topic="runtime.runner", action="execute", aggregate_type="runner",
         aggregate_id=target_runner.id, partition_key=run.session_id,
         dedupe_key=f"event:{queued.id}:execute",
+        tenant_id=run.tenant_id, account_id=run.account_id,
         payload_ref={"runner_id": target_runner.id, "group_run_id": group_run.id},
     )
     return message, target_runner

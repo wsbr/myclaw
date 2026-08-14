@@ -12,6 +12,7 @@ from app.models.foundation import (
     PlatformAccount, UserIdentity, UserSession,
 )
 from app.models.runtime_v1 import DurableRunner, Message, Run, WorkItem
+from app.models.tenant_v1 import DEFAULT_TENANT_ID
 from app.services.chat_service import create_user_session, enqueue_chat_message
 
 pytestmark = pytest.mark.unit
@@ -44,15 +45,18 @@ async def chat_db():
             instructions="Work", group_enabled=False, created_by_account_id=account_id,
             immutable_at=utcnow(), published_at=utcnow(), content_hash="a" * 64,
         ))
-    yield factory, agent_id, version_id
+    yield factory, account_id, agent_id, version_id
     await engine.dispose()
 
 
 @pytest.mark.asyncio
 async def test_chat_command_creates_all_aggregates_event_and_outbox(chat_db):
-    factory, agent_id, version_id = chat_db
+    factory, account_id, agent_id, version_id = chat_db
     async with factory.begin() as db:
-        session = await create_user_session(db, user_id="user-1", entry_agent_id=agent_id)
+        session = await create_user_session(
+            db, tenant_id=DEFAULT_TENANT_ID, account_id=account_id,
+            user_id="user-1", entry_agent_id=agent_id,
+        )
         message, run, work, runner = await enqueue_chat_message(
             db, session_id=session.id, user_id="user-1", content="Analyze this",
             idempotency_record_id="idem-1",
@@ -75,9 +79,12 @@ async def test_chat_command_creates_all_aggregates_event_and_outbox(chat_db):
 
 @pytest.mark.asyncio
 async def test_empty_message_rolls_back_without_partial_run(chat_db):
-    factory, agent_id, _ = chat_db
+    factory, account_id, agent_id, _ = chat_db
     async with factory.begin() as db:
-        session = await create_user_session(db, user_id="user-1", entry_agent_id=agent_id)
+        session = await create_user_session(
+            db, tenant_id=DEFAULT_TENANT_ID, account_id=account_id,
+            user_id="user-1", entry_agent_id=agent_id,
+        )
     with pytest.raises(ValueError):
         async with factory.begin() as db:
             await enqueue_chat_message(

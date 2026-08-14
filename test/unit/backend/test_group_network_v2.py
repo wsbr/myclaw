@@ -30,6 +30,7 @@ from app.models.group_v1 import (
 )
 from app.persistence.reliable_writes import ExecutionEventWriter
 from app.models.runtime_v1 import AgentInvocation, DurableRunner, Message, Run, WorkItem
+from app.models.tenant_v1 import DEFAULT_TENANT_ID
 from app.models.registry import PolicyDefinition, PolicyVersion
 from app.schemas.group_v1 import GroupCreateRequest
 from app.services.group_collaboration_service import (
@@ -439,7 +440,8 @@ async def test_completed_chat_emerges_only_model_selected_agents_idempotently():
         ])
         await db.flush()
         candidate_snapshot = await build_group_emergence_candidate_snapshot(
-            db, account_id=account_id, current_agent_id=agents[0][0].id,
+            db, tenant_id=DEFAULT_TENANT_ID,
+            account_id=account_id, current_agent_id=agents[0][0].id,
         )
         assert candidate_snapshot["status"] == "ready"
         assert set(candidate_snapshot["candidates"][0]) == {
@@ -461,6 +463,7 @@ async def test_completed_chat_emerges_only_model_selected_agents_idempotently():
                 "rationale": "Development assesses implementation and Test verifies it; Product remains the Chat anchor.",
             },
             context=RuntimeContext(
+                tenant_id=DEFAULT_TENANT_ID,
                 session_id=session_id,
                 runner_id=runner_id,
                 user_id="emergent-user",
@@ -482,6 +485,7 @@ async def test_completed_chat_emerges_only_model_selected_agents_idempotently():
                     "task": "Do the review before the selected Group emerges",
                 },
                 context=RuntimeContext(
+                    tenant_id=DEFAULT_TENANT_ID,
                     session_id=session_id,
                     runner_id=runner_id,
                     user_id="emergent-user",
@@ -574,6 +578,7 @@ async def test_completed_chat_emerges_only_model_selected_agents_idempotently():
                 "task": "Own the implementation review and return the integrated result",
             },
             context=RuntimeContext(
+                tenant_id=DEFAULT_TENANT_ID,
                 session_id=session_id,
                 runner_id=root_runner.id,
                 user_id="emergent-user",
@@ -697,6 +702,7 @@ async def test_group_peers_message_invoke_audit_and_repeat_history():
             ))
         }
         product_context = RuntimeContext(
+            tenant_id=DEFAULT_TENANT_ID,
             session_id=session_id, runner_id=product_runner.id, user_id="peer-user",
             account_id=account_id, agent_id=product_id,
             group_session_id=group_view["id"], group_run_id=group_run.id,
@@ -710,6 +716,7 @@ async def test_group_peers_message_invoke_audit_and_repeat_history():
         )
         development_work = await db.get(WorkItem, development_runner.work_item_id)
         development_context = RuntimeContext(
+            tenant_id=DEFAULT_TENANT_ID,
             session_id=session_id, runner_id=development_runner.id, user_id="peer-user",
             account_id=account_id, agent_id=development_id,
             group_session_id=group_view["id"], group_run_id=group_run.id,
@@ -827,6 +834,7 @@ async def test_group_peers_message_invoke_audit_and_repeat_history():
         # The delegated Test Agent may deliver to Development, but it cannot
         # create another invocation back into its causal delegation chain.
         test_context = RuntimeContext(
+            tenant_id=DEFAULT_TENANT_ID,
             session_id=session_id, runner_id=test_runner.id, user_id="peer-user",
             account_id=account_id, agent_id=test_id,
             group_session_id=group_view["id"], group_run_id=group_run.id,
@@ -1019,6 +1027,7 @@ async def test_group_peers_message_invoke_audit_and_repeat_history():
 
     async with factory() as db:
         history_context = RuntimeContext(
+            tenant_id=DEFAULT_TENANT_ID,
             session_id=session_id, runner_id=uuid7(), user_id="peer-user",
             account_id=account_id, agent_id=product_id,
             group_session_id=group_view["id"], group_run_id=group_run.id,

@@ -217,6 +217,7 @@ async def select_history(
                         aggregate_type="history_summary", aggregate_id=pending.id,
                         partition_key=run.session_id,
                         dedupe_key=f"history_summary:{pending.id}",
+                        tenant_id=run.tenant_id, account_id=run.account_id,
                         payload_ref={
                             "history_summary_id": pending.id,
                             "policy_definition_id": policy.id if policy else None,

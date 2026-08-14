@@ -35,9 +35,14 @@ class AgentBlueprint(Base, TimestampMixin, VersionMixin):
         ),
         Index("ix_agent_owner_status", "owner_account_id", "status"),
         Index("ix_agent_visibility_status", "visibility", "status"),
+        UniqueConstraint("id", "tenant_id", name="uq_agent_id_tenant"),
+        Index("ix_agent_tenant_visibility_status", "tenant_id", "visibility", "status"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
+    tenant_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("tenant.id"), nullable=False
+    )
     owner_account_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("platform_account.id"), nullable=False
     )

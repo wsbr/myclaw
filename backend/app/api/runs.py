@@ -86,11 +86,18 @@ async def _owned_run(
     db: AsyncSession, run_id: str, current: CurrentAccount | SessionActor,
     *, lock: bool = False,
 ) -> Run:
-    query = select(Run).where(Run.id == run_id)
+    query = select(Run).where(
+        Run.id == run_id,
+        Run.tenant_id == current.tenant_id,
+    )
     if lock:
         query = query.with_for_update()
     run = await db.scalar(query)
-    allowed = run is not None and current.account is not None and run.user_id == current.account.user_id
+    allowed = (
+        run is not None and current.account is not None
+        and run.account_id == current.account.id
+        and run.user_id == current.account.user_id
+    )
     if allowed and isinstance(current, SessionActor) and current.api_key is not None:
         session = await db.get(UserSession, run.session_id)
         allowed = bool(
@@ -202,7 +209,10 @@ async def list_session_runs(
     await _owned_session(db, session_id, current)
     if mode is not None and mode not in {"chat", "plan", "group"}:
         raise HTTPException(status_code=422, detail={"code": "invalid_run_mode"})
-    statement = select(Run).where(Run.session_id == session_id)
+    statement = select(Run).where(
+        Run.tenant_id == current.tenant_id,
+        Run.session_id == session_id,
+    )
     if mode is not None:
         statement = statement.where(Run.mode == mode)
     rows = list(await db.scalars(statement.order_by(Run.created_at.desc(), Run.id.desc())))
@@ -747,7 +757,8 @@ async def retry_work_item(
     if source_runner is None:
         raise HTTPException(status_code=409, detail={"code": "retry_source_runner_unavailable"})
     runner = DurableRunner(
-        id=uuid7(), work_item_id=item.id, run_id=run.id, session_id=run.session_id,
+        id=uuid7(), tenant_id=run.tenant_id,
+        work_item_id=item.id, run_id=run.id, session_id=run.session_id,
         agent_id=source_runner.agent_id, agent_version_id=source_runner.agent_version_id,
         execution_epoch=item.execution_epoch, status="queued",
         principal_snapshot=dict(source_runner.principal_snapshot),
@@ -769,7 +780,9 @@ async def retry_work_item(
     )
     await OutboxWriter(db).enqueue(
         topic="runtime.runner", action="execute", aggregate_type="runner", aggregate_id=runner.id,
-        partition_key=run.session_id, dedupe_key=f"event:{event.id}:execute", payload_ref={"runner_id": runner.id},
+        partition_key=run.session_id, dedupe_key=f"event:{event.id}:execute",
+        tenant_id=run.tenant_id, account_id=run.account_id,
+        payload_ref={"runner_id": runner.id},
     )
     response = RunnerResponse.model_validate(runner)
     record.resource_type, record.resource_id, record.http_status = "runner", runner.id, 202

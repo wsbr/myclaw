@@ -27,6 +27,7 @@ Start with the repository [README](../README.md). It contains the supported loca
 | Context and memory scopes | [Context and memory](modules/context-memory.md) |
 | Workspace, Sandbox, and Artifact | [Sandbox and Artifact](modules/sandbox-artifact.md) |
 | Identity and Agent API | [Identity API](modules/identity-api.md) |
+| Persisted local Tenant authority and isolation | [Minimum Tenant boundary](modules/tenant-boundary.md) |
 | Channels and notifications | [Channel system](modules/channel-system.md) |
 | Events, checkpoints, and telemetry | [Observability](modules/observability.md) |
 
