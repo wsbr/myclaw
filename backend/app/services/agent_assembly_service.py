@@ -41,6 +41,7 @@ from app.services.skill_catalog_service import (
     SkillCatalogOverflow,
     build_skill_catalog_sections,
 )
+from app.services.agent_eval_gate_service import agent_eval_gate_issues
 
 
 class AgentDraftConflict(RuntimeError):
@@ -276,6 +277,13 @@ async def publish_agent(
     if issues:
         raise AgentPublishValidationError(issues)
     assert resolved is not None
+    candidate_content_hash = _content_hash(draft, selection, resolved)
+    gate_issues = await agent_eval_gate_issues(
+        db, agent_id=agent.id, candidate_content_hash=candidate_content_hash,
+        lock_suites=True,
+    )
+    if gate_issues:
+        raise AgentPublishValidationError(gate_issues)
 
     published = AgentAssemblyVersion(
         id=uuid7(),
@@ -310,7 +318,7 @@ async def publish_agent(
     # Selection rows must exist before the version is sealed. MySQL triggers
     # intentionally reject any relation INSERT once immutable_at is set.
     await db.flush()
-    published.content_hash = _content_hash(published, selection, resolved)
+    published.content_hash = candidate_content_hash
     published.immutable_at = utcnow()
     published.published_at = published.immutable_at
     db.add(_agent_card(agent, published, resolved))
@@ -516,6 +524,16 @@ def _content_hash(
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def assembly_content_hash(
+    version: AgentAssemblyVersion,
+    selection: AssemblySelection,
+    resolved: ResolvedAssembly,
+) -> str:
+    """Public name for the exact draft/publish candidate identity."""
+
+    return _content_hash(version, selection, resolved)
+
+
 def _agent_card(
     agent: AgentBlueprint,
     version: AgentAssemblyVersion,
@@ -619,7 +637,9 @@ async def create_draft_test_snapshot(
         memory_recall_policy_version_id=resolved.policy_versions["memory_recall"].id,
         discovery_config=dict(draft.discovery_config or {}),
         collaboration_config=dict(draft.collaboration_config or {}),
-        group_enabled=False, created_by_account_id=actor_account_id,
+        # Runtime draft-test isolation prevents Plan/Group entry. Preserve the
+        # assembly bit so this snapshot hash is the exact publish candidate.
+        group_enabled=draft.group_enabled, created_by_account_id=actor_account_id,
     )
     db.add(snapshot)
     await db.flush()

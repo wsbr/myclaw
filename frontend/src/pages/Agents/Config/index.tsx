@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Alert, Button, Card, Form, Input, Modal, Radio, Select, Space, Spin, Switch, Table, Tabs, Tag, Typography, message } from 'antd'
-import { ArrowLeftOutlined, CloudUploadOutlined, ExperimentOutlined, KeyOutlined, PauseCircleOutlined, PlayCircleOutlined, SaveOutlined } from '@ant-design/icons'
-import { agentsApi, AgentApiKey, AgentDraft, AgentOption, AgentPublishedVersion } from '@/api/agents'
+import { Alert, Button, Card, Form, Input, InputNumber, Modal, Radio, Select, Space, Spin, Switch, Table, Tabs, Tag, Typography, message } from 'antd'
+import { ArrowLeftOutlined, CloudUploadOutlined, ExperimentOutlined, KeyOutlined, PauseCircleOutlined, PlayCircleOutlined, PlusOutlined, SaveOutlined } from '@ant-design/icons'
+import { agentsApi, AgentApiKey, AgentDraft, AgentEvalRun, AgentEvalSuite, AgentOption, AgentPublishedVersion } from '@/api/agents'
 import PromptEditor from '@/components/PromptEditor'
 
 const policyTypes = ['context', 'history', 'memory_write', 'memory_recall'] as const
@@ -18,6 +18,9 @@ export default function AgentConfigPage() {
   const [testOpen, setTestOpen] = useState(false)
   const [testContent, setTestContent] = useState('')
   const [keyOpen, setKeyOpen] = useState(false)
+  const [evalOpen, setEvalOpen] = useState(false)
+  const [editingSuite, setEditingSuite] = useState<AgentEvalSuite | null>(null)
+  const [evalForm] = Form.useForm()
 
   const { data: detail, isLoading } = useQuery({
     queryKey: ['agent', id], queryFn: () => agentsApi.get(id!), enabled: !isNew,
@@ -97,6 +100,80 @@ export default function AgentConfigPage() {
   })
   const versions = useQuery({
     queryKey: ['agent-versions', id], queryFn: () => agentsApi.listVersions(id!), enabled: !isNew,
+  })
+  const evalSuites = useQuery({
+    queryKey: ['agent-eval-suites', id], queryFn: () => agentsApi.listEvalSuites(id!),
+    enabled: !isNew,
+  })
+  const evalRuns = useQuery({
+    queryKey: ['agent-eval-runs', id], queryFn: () => agentsApi.listEvalRuns(id!),
+    enabled: !isNew,
+    refetchInterval: query => query.state.data?.some(run => ['queued', 'running'].includes(run.status)) ? 3000 : false,
+  })
+  const openEvalDefinition = (suite?: AgentEvalSuite) => {
+    const selected = suite ?? null
+    setEditingSuite(selected)
+    evalForm.setFieldsValue({
+      name: selected?.name ?? '发布质量门禁',
+      description: selected?.description ?? '',
+      min_pass_rate: Number(selected?.gate_policy?.min_pass_rate ?? 1),
+      cases_json: JSON.stringify(selected?.cases.map(item => ({
+        case_key: item.case_key, name: item.name, input_text: item.input_text,
+        assertions: item.assertions, weight: item.weight,
+      })) ?? [{
+        case_key: 'basic', name: '基础结果', input_text: '请完成一项典型任务',
+        assertions: { min_chars: 1 }, weight: 1,
+      }], null, 2),
+    })
+    setEvalOpen(true)
+  }
+  const saveEvalSuite = useMutation({
+    mutationFn: async (values: { name: string; description?: string; min_pass_rate: number; cases_json: string }) => {
+      let cases
+      try { cases = JSON.parse(values.cases_json) } catch { throw new Error('cases_json_invalid') }
+      if (!Array.isArray(cases)) throw new Error('cases_json_invalid')
+      const definition = {
+        name: values.name, description: values.description ?? '',
+        gate_policy: { min_pass_rate: String(values.min_pass_rate) }, cases,
+      }
+      return editingSuite
+        ? agentsApi.versionEvalSuite(id!, editingSuite.id, definition)
+        : agentsApi.createEvalSuite(id!, definition)
+    },
+    onSuccess: () => {
+      setEvalOpen(false); setEditingSuite(null); evalForm.resetFields()
+      message.success(editingSuite ? '已发布新的不可变评测套件版本' : '已创建发布门禁套件')
+      queryClient.invalidateQueries({ queryKey: ['agent-eval-suites', id] })
+      queryClient.invalidateQueries({ queryKey: ['agent-capability-check', id] })
+    },
+    onError: (error: any) => message.error(
+      error?.message === 'cases_json_invalid'
+        ? '用例 JSON 必须是数组'
+        : error?.response?.data?.error?.message || '评测套件保存失败',
+    ),
+  })
+  const runEval = useMutation({
+    mutationFn: (suite: AgentEvalSuite) => agentsApi.runEvalSuite(
+      id!, suite.id, detail!.draft.draft_revision,
+    ),
+    onSuccess: () => {
+      message.success('评测已启动，每个用例都创建了独立的真实 Run')
+      queryClient.invalidateQueries({ queryKey: ['agent-eval-runs', id] })
+    },
+    onError: (error: any) => message.error(
+      error?.response?.data?.error?.details?.issues?.join('；')
+      || error?.response?.data?.error?.message || '评测启动失败',
+    ),
+  })
+  const evalState = useMutation({
+    mutationFn: (suite: AgentEvalSuite) => agentsApi.setEvalSuiteState(
+      id!, suite.id, suite.status === 'active' ? 'deactivate' : 'activate',
+    ),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['agent-eval-suites', id] })
+      queryClient.invalidateQueries({ queryKey: ['agent-capability-check', id] })
+    },
+    onError: () => message.error('评测门禁状态更新失败'),
   })
   const showSecret = (key: AgentApiKey) => Modal.success({
     title: 'API Key 仅显示一次',
@@ -215,6 +292,52 @@ export default function AgentConfigPage() {
                 { title: '发布时间', dataIndex: 'published_at', render: (value: string | null) => value ? new Date(value).toLocaleString() : '—' },
               ]} />
           </Card> }] : []),
+          ...(!isNew ? [{ key: 'evals', label: '评测与门禁', children: <Space direction="vertical" size="large" className="w-full">
+            <Alert showIcon type="info" message="评测证据与发布候选精确绑定"
+              description="每个用例创建独立的真实 Draft Test Run。只有当前套件版本通过，且草稿与冻结依赖的候选哈希完全一致，发布按钮才会放行；任何草稿或依赖变化都会使旧成绩失效。" />
+            <Card title="发布门禁套件" extra={<Button type="primary" icon={<PlusOutlined />} onClick={() => openEvalDefinition()}>新建套件</Button>}>
+              <Table rowKey="id" loading={evalSuites.isLoading} dataSource={evalSuites.data ?? []} pagination={false}
+                expandable={{ expandedRowRender: (suite: AgentEvalSuite) => <div className="space-y-2">
+                  <Typography.Paragraph>{suite.description || '无说明'}</Typography.Paragraph>
+                  <Typography.Paragraph copyable={{ text: suite.content_hash }}><Typography.Text strong>套件哈希：</Typography.Text> {suite.content_hash}</Typography.Paragraph>
+                  <Table rowKey="id" size="small" pagination={false} dataSource={suite.cases} columns={[
+                    { title: '用例', dataIndex: 'name' },
+                    { title: 'Key', dataIndex: 'case_key' },
+                    { title: '输入', dataIndex: 'input_text', ellipsis: true },
+                    { title: '断言', dataIndex: 'assertions', render: (value: object) => <Typography.Text code>{JSON.stringify(value)}</Typography.Text> },
+                  ]} />
+                </div> }}
+                columns={[
+                  { title: '名称', dataIndex: 'name' },
+                  { title: '版本', dataIndex: 'current_version_no', render: (value: number) => `v${value}` },
+                  { title: '状态', dataIndex: 'status', render: (value: string) => <Tag color={value === 'active' ? 'success' : 'default'}>{value}</Tag> },
+                  { title: '通过线', dataIndex: 'gate_policy', render: (value: { min_pass_rate?: string }) => `${Number(value?.min_pass_rate ?? 1) * 100}%` },
+                  { title: '用例数', dataIndex: 'cases', render: (value: unknown[]) => value.length },
+                  { title: '操作', render: (_: unknown, suite: AgentEvalSuite) => <Space wrap>
+                    <Button size="small" onClick={() => openEvalDefinition(suite)}>发布新版本</Button>
+                    <Button size="small" type="primary" disabled={suite.status !== 'active'} loading={runEval.isPending} onClick={() => runEval.mutate(suite)}>运行评测</Button>
+                    <Button size="small" loading={evalState.isPending} onClick={() => evalState.mutate(suite)}>{suite.status === 'active' ? '停用门禁' : '启用门禁'}</Button>
+                  </Space> },
+                ]} />
+            </Card>
+            <Card title="评测运行">
+              <Table rowKey="id" loading={evalRuns.isLoading} dataSource={evalRuns.data ?? []} pagination={false}
+                expandable={{ expandedRowRender: (run: AgentEvalRun) => <Table rowKey="id" size="small" pagination={false} dataSource={run.case_runs} columns={[
+                  { title: '用例', dataIndex: 'name' },
+                  { title: '状态', dataIndex: 'status', render: (value: string) => <Tag color={value === 'passed' ? 'success' : value === 'failed' || value === 'error' ? 'error' : 'processing'}>{value}</Tag> },
+                  { title: '断言结果', dataIndex: 'assertion_results', render: (value: object[]) => value.length ? <Typography.Text code>{JSON.stringify(value)}</Typography.Text> : '等待结算' },
+                  { title: '错误', dataIndex: 'failure_code', render: (value: string | null) => value || '—' },
+                  { title: 'Run', render: (_: unknown, item: { session_id: string; run_id: string }) => <Button size="small" onClick={() => navigate(`/agents/${id}/chat/${item.session_id}`)}>查看过程</Button> },
+                ]} /> }}
+                columns={[
+                  { title: '套件', render: (_: unknown, run: AgentEvalRun) => `${run.suite_name} v${run.suite_version_no}` },
+                  { title: '候选哈希', dataIndex: 'candidate_content_hash', render: (value: string) => <Typography.Text code copyable>{value.slice(0, 16)}</Typography.Text> },
+                  { title: '状态', dataIndex: 'status', render: (value: string) => <Tag color={value === 'passed' ? 'success' : value === 'failed' || value === 'error' ? 'error' : 'processing'}>{value}</Tag> },
+                  { title: '结果', render: (_: unknown, run: AgentEvalRun) => `${run.passed_count}/${run.case_count} · ${run.score == null ? '—' : `${(Number(run.score) * 100).toFixed(1)}%`}` },
+                  { title: '时间', dataIndex: 'created_at', render: (value: string) => new Date(value).toLocaleString() },
+                ]} />
+            </Card>
+          </Space> }] : []),
           ...(!isNew ? [{ key: 'api', label: 'API 接入', children: <Card title="Agent API Keys"
             extra={<Button type="primary" icon={<KeyOutlined />} onClick={() => setKeyOpen(true)}>创建 Key</Button>}>
             <Alert className="mb-4" type="info" showIcon message="外部系统使用 AgentApiKey + userId 调用；Key 不代表新的用户身份。" />
@@ -252,6 +375,19 @@ export default function AgentConfigPage() {
           <Form.Item name="name" label="名称" rules={[{ required: true }]}><Input /></Form.Item>
           <Form.Item name="caller_label" label="调用方标识" rules={[{ required: true }]}><Input /></Form.Item>
           <Form.Item name="expires_at" label="到期时间（ISO 8601，可选）"><Input placeholder="2026-12-31T23:59:59+08:00" /></Form.Item>
+        </Form>
+      </Modal>
+      <Modal title={editingSuite ? '发布评测套件新版本' : '新建评测门禁套件'} open={evalOpen}
+        width={760} onCancel={() => { setEvalOpen(false); setEditingSuite(null) }}
+        onOk={() => evalForm.submit()} confirmLoading={saveEvalSuite.isPending}>
+        <Alert className="mb-4" type="warning" showIcon message="保存后定义与用例不可修改；编辑会发布新版本，并立即使旧版本成绩不再满足门禁。" />
+        <Form form={evalForm} layout="vertical" onFinish={values => saveEvalSuite.mutate(values)}>
+          <Form.Item name="name" label="套件名称" rules={[{ required: true }]}><Input maxLength={200} /></Form.Item>
+          <Form.Item name="description" label="说明"><Input.TextArea rows={2} /></Form.Item>
+          <Form.Item name="min_pass_rate" label="最低加权通过率（0–1）" rules={[{ required: true }]}><InputNumber min={0} max={1} step={0.05} className="w-full" /></Form.Item>
+          <Form.Item name="cases_json" label="用例 JSON" rules={[{ required: true }]} extra={'支持 contains_all、contains_none、min_chars、max_chars、max_cost；最多 20 个用例。'}>
+            <Input.TextArea autoSize={{ minRows: 12, maxRows: 24 }} style={{ fontFamily: 'monospace' }} />
+          </Form.Item>
         </Form>
       </Modal>
     </div>

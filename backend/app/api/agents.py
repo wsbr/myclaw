@@ -48,7 +48,9 @@ from app.services.agent_assembly_service import (
     update_agent_draft,
     create_draft_test_snapshot,
     check_publish_capabilities,
+    assembly_content_hash,
 )
+from app.services.agent_eval_gate_service import agent_eval_gate_issues
 from app.services.agent_api_key_service import create_api_key, revoke_api_key
 from app.services.chat_service import create_user_session, enqueue_chat_message
 from app.services.cursor_service import SortKey, paginate_scalars
@@ -359,10 +361,19 @@ async def check_agent_draft_capabilities(
     draft = await db.get(AgentAssemblyVersion, agent.draft_version_id)
     selection = await _selection(db, draft.id)
     issues, resolved = await check_publish_capabilities(db, draft, selection)
+    candidate_hash = None
+    if resolved is not None:
+        candidate_hash = assembly_content_hash(draft, selection, resolved)
+        issues.extend(await agent_eval_gate_issues(
+            db, agent_id=agent.id, candidate_content_hash=candidate_hash,
+        ))
+    resolved_snapshot = resolved.safe_snapshot() if resolved else None
+    if resolved_snapshot is not None:
+        resolved_snapshot["candidate_content_hash"] = candidate_hash
     return CapabilityCheckResponse(
         publishable=not issues,
         issues=issues,
-        resolved_dependencies=resolved.safe_snapshot() if resolved else None,
+        resolved_dependencies=resolved_snapshot,
     )
 
 

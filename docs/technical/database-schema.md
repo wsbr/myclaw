@@ -322,6 +322,12 @@ Reporter 必须是本快照中 available 的成员。唯一 `(group_run_id,agent
 
 Provider 的每次成功、失败、重试或 `outcome_unknown` Attempt 都会生成请求、Token 与活跃时间条目；Sandbox ToolAttempt 生成 Tool unit 与 Sandbox 时间条目。缺少可信计量或生效价格时必须保存 `unknown`，不得以 0 成本代替。纠错只能追加 `source_type=adjustment` 的正/负条目并引用原条目。两张表均由 MySQL trigger 禁止 UPDATE/DELETE；v0.3.0 Tenant 扩展会在保留当前 account 归因的同时补入非空 tenant authority。
 
+### `agent_eval_suite*`、`agent_eval_run*`
+
+- `agent_eval_suite` 是 Agent 下稳定的发布门禁标识，保存 active/inactive 与当前版本指针；`agent_eval_suite_version` 和 `agent_eval_case` 冻结名称、阈值、逐用例输入/权重/断言及内容哈希，由 MySQL trigger 禁止 UPDATE/DELETE。修改套件只能发布新版本。
+- `agent_eval_run` 绑定一个 `draft_test_snapshot` 的精确 `candidate_content_hash`、一个不可变 SuiteVersion 和门禁阈值快照；`agent_eval_case_run` 一对一引用真实 Session/Run，维护 Worker 在 Run 终态后读取最终 Message，并结算文本、长度与 Usage 账本成本断言。
+- 发布事务锁定当前 active Suite，逐个要求存在 `suite_version_id + candidate_content_hash + passed` 的终态 EvalRun。草稿内容、Model/Tool/Skill/Policy/Sandbox 当前版本或评测套件版本任一变化，都会改变匹配条件，旧成绩不会误放行新版本。
+
 ### `verification_result`
 
 `verification_result`：`id PK`、`run_id FK`、`group_run_id FK NULL`、`rule_key`、`rule_version`、`verification_epoch BIGINT`、`status passed|failed|insufficient_evidence`、`fact_fingerprint CHAR(64)`、`observed_facts_json`、`missing_facts_json`、`created_at`；唯一 `(run_id,rule_key,rule_version,verification_epoch)` 和 `(run_id,rule_key,rule_version,fact_fingerprint)`。epoch 在锁定 `run_id + rule_key + rule_version` 后单调分配；完全相同的权威事实幂等返回旧结果，新事实才创建新 epoch，旧结果不覆盖。

@@ -498,6 +498,86 @@ paths:
         '202': {description: Draft snapshot and private test Run created., content: {application/json: {schema: {$ref: '#/components/schemas/RunEnvelope'}}}}
         default: {$ref: '#/components/responses/Error'}
 
+  /agents/{agent_id}/eval-suites:
+    get:
+      tags: [Agents]
+      operationId: listAgentEvalSuites
+      parameters: [{$ref: '#/components/parameters/AgentId'}]
+      responses:
+        '200': {description: Current version of every release-gate suite., content: {application/json: {schema: {$ref: '#/components/schemas/AgentEvalSuitePage'}}}}
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Agents]
+      operationId: createAgentEvalSuite
+      parameters:
+        - {$ref: '#/components/parameters/AgentId'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/AgentEvalSuiteDefinition'}}}}
+      responses:
+        '201': {description: Immutable evaluation suite version created and activated., content: {application/json: {schema: {$ref: '#/components/schemas/AgentEvalSuite'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /agents/{agent_id}/eval-suites/{suite_id}/versions:
+    post:
+      tags: [Agents]
+      operationId: versionAgentEvalSuite
+      parameters:
+        - {$ref: '#/components/parameters/AgentId'}
+        - {name: suite_id, in: path, required: true, schema: {$ref: '#/components/schemas/Uuid'}}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/AgentEvalSuiteDefinition'}}}}
+      responses:
+        '200': {description: New immutable current suite version., content: {application/json: {schema: {$ref: '#/components/schemas/AgentEvalSuite'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /agents/{agent_id}/eval-suites/{suite_id}/state/{target}:
+    post:
+      tags: [Agents]
+      operationId: changeAgentEvalSuiteState
+      parameters:
+        - {$ref: '#/components/parameters/AgentId'}
+        - {name: suite_id, in: path, required: true, schema: {$ref: '#/components/schemas/Uuid'}}
+        - {name: target, in: path, required: true, schema: {type: string, enum: [activate, deactivate]}}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      responses:
+        '200': {description: Updated logical suite state., content: {application/json: {schema: {$ref: '#/components/schemas/AgentEvalSuite'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /agents/{agent_id}/eval-suites/{suite_id}/runs:
+    post:
+      tags: [Agents]
+      operationId: startAgentEvalRun
+      parameters:
+        - {$ref: '#/components/parameters/AgentId'}
+        - {name: suite_id, in: path, required: true, schema: {$ref: '#/components/schemas/Uuid'}}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/AgentEvalRunCreate'}}}}
+      responses:
+        '202': {description: Exact candidate frozen and one real runtime Run queued per case., content: {application/json: {schema: {$ref: '#/components/schemas/AgentEvalRun'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /agents/{agent_id}/eval-runs:
+    get:
+      tags: [Agents]
+      operationId: listAgentEvalRuns
+      parameters:
+        - {$ref: '#/components/parameters/AgentId'}
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200': {description: Recent evaluation runs with case settlements., content: {application/json: {schema: {$ref: '#/components/schemas/AgentEvalRunPage'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /agents/{agent_id}/eval-runs/{eval_run_id}:
+    get:
+      tags: [Agents]
+      operationId: getAgentEvalRun
+      parameters:
+        - {$ref: '#/components/parameters/AgentId'}
+        - {name: eval_run_id, in: path, required: true, schema: {$ref: '#/components/schemas/Uuid'}}
+      responses:
+        '200': {description: Evaluation aggregate and assertion evidence., content: {application/json: {schema: {$ref: '#/components/schemas/AgentEvalRun'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
   /agents/{agent_id}/api-keys:
     get:
       tags: [Identity]
@@ -2139,6 +2219,120 @@ components:
       additionalProperties: false
       required: [expected_draft_revision, content]
       properties: {expected_draft_revision: {type: integer, minimum: 1}, content: {type: string, minLength: 1}}
+    AgentEvalAssertions:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        contains_all: {type: array, items: {type: string, minLength: 1}}
+        contains_none: {type: array, items: {type: string, minLength: 1}}
+        min_chars: {type: integer, minimum: 0}
+        max_chars: {type: integer, minimum: 0}
+        max_cost:
+          type: object
+          additionalProperties: false
+          required: [currency, amount]
+          properties:
+            currency: {type: string, pattern: '^[A-Z]{3}$'}
+            amount: {type: string, pattern: '^[0-9]+(\.[0-9]+)?$'}
+            allow_unknown: {type: boolean, default: false}
+    AgentEvalCaseDefinition:
+      type: object
+      additionalProperties: false
+      required: [case_key, name, input_text, assertions]
+      properties:
+        case_key: {type: string, minLength: 1, maxLength: 100}
+        name: {type: string, minLength: 1, maxLength: 200}
+        input_text: {type: string, minLength: 1}
+        assertions: {$ref: '#/components/schemas/AgentEvalAssertions'}
+        weight: {type: number, exclusiveMinimum: 0, default: 1}
+    AgentEvalSuiteDefinition:
+      type: object
+      additionalProperties: false
+      required: [name, cases]
+      properties:
+        name: {type: string, minLength: 1, maxLength: 200}
+        description: {type: string}
+        gate_policy:
+          type: object
+          additionalProperties: false
+          properties: {min_pass_rate: {type: string, pattern: '^(0(\.[0-9]+)?|1(\.0+)?)$'}}
+        cases: {type: array, minItems: 1, maxItems: 20, items: {$ref: '#/components/schemas/AgentEvalCaseDefinition'}}
+    AgentEvalSuite:
+      type: object
+      additionalProperties: false
+      required: [id, agent_id, name, status, version, current_version_id, current_version_no, gate_policy, content_hash, cases, created_at, updated_at]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        agent_id: {$ref: '#/components/schemas/Uuid'}
+        name: {type: string}
+        status: {type: string, enum: [active, inactive]}
+        version: {type: integer, format: int64, minimum: 1}
+        current_version_id: {$ref: '#/components/schemas/Uuid'}
+        current_version_no: {type: integer, minimum: 1}
+        description: {type: string}
+        gate_policy: {type: object}
+        content_hash: {$ref: '#/components/schemas/Sha256'}
+        cases: {type: array, items: {$ref: '#/components/schemas/AgentEvalCaseDefinition'}}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        updated_at: {$ref: '#/components/schemas/Timestamp'}
+    AgentEvalSuitePage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/AgentEvalSuite'}}}
+    AgentEvalRunCreate:
+      type: object
+      additionalProperties: false
+      required: [expected_draft_revision]
+      properties: {expected_draft_revision: {type: integer, minimum: 1}}
+    AgentEvalCaseRun:
+      type: object
+      additionalProperties: false
+      required: [id, eval_case_id, case_key, name, session_id, run_id, status, assertion_results]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        eval_case_id: {$ref: '#/components/schemas/Uuid'}
+        case_key: {type: string}
+        name: {type: string}
+        session_id: {$ref: '#/components/schemas/Uuid'}
+        run_id: {$ref: '#/components/schemas/Uuid'}
+        status: {type: string, enum: [queued, running, passed, failed, error]}
+        score: {type: [number, 'null'], minimum: 0, maximum: 1}
+        response_message_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        assertion_results: {type: array, items: {type: object}}
+        failure_code: {type: [string, 'null']}
+        started_at: {oneOf: [{$ref: '#/components/schemas/Timestamp'}, {type: 'null'}]}
+        ended_at: {oneOf: [{$ref: '#/components/schemas/Timestamp'}, {type: 'null'}]}
+    AgentEvalRun:
+      type: object
+      additionalProperties: false
+      required: [id, agent_id, suite_version_id, suite_name, suite_version_no, candidate_agent_version_id, candidate_content_hash, status, case_count, passed_count, failed_count, error_count, gate_policy_snapshot, case_runs, created_at, updated_at]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        agent_id: {$ref: '#/components/schemas/Uuid'}
+        suite_version_id: {$ref: '#/components/schemas/Uuid'}
+        suite_name: {type: string}
+        suite_version_no: {type: integer, minimum: 1}
+        candidate_agent_version_id: {$ref: '#/components/schemas/Uuid'}
+        candidate_content_hash: {$ref: '#/components/schemas/Sha256'}
+        status: {type: string, enum: [queued, running, passed, failed, error]}
+        case_count: {type: integer, minimum: 1}
+        passed_count: {type: integer, minimum: 0}
+        failed_count: {type: integer, minimum: 0}
+        error_count: {type: integer, minimum: 0}
+        score: {type: [number, 'null'], minimum: 0, maximum: 1}
+        gate_policy_snapshot: {type: object}
+        case_runs: {type: array, items: {$ref: '#/components/schemas/AgentEvalCaseRun'}}
+        started_at: {oneOf: [{$ref: '#/components/schemas/Timestamp'}, {type: 'null'}]}
+        ended_at: {oneOf: [{$ref: '#/components/schemas/Timestamp'}, {type: 'null'}]}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        updated_at: {$ref: '#/components/schemas/Timestamp'}
+    AgentEvalRunPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/AgentEvalRun'}}}
 
     ApiKeyMetadata:
       type: object

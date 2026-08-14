@@ -91,6 +91,68 @@ export interface AgentCard {
   published_at: string
 }
 
+export interface AgentEvalCaseDefinition {
+  case_key: string
+  name: string
+  input_text: string
+  assertions: Record<string, unknown>
+  weight: number | string
+}
+
+export interface AgentEvalSuite {
+  id: string
+  agent_id: string
+  name: string
+  status: 'active' | 'inactive'
+  version: number
+  current_version_id: string
+  current_version_no: number
+  description: string
+  gate_policy: { min_pass_rate?: string }
+  content_hash: string
+  cases: Array<AgentEvalCaseDefinition & { id: string; sort_order: number }>
+  created_at: string
+  updated_at: string
+}
+
+export interface AgentEvalCaseRun {
+  id: string
+  eval_case_id: string
+  case_key: string
+  name: string
+  session_id: string
+  run_id: string
+  status: string
+  score: string | null
+  response_message_id: string | null
+  assertion_results: Array<Record<string, unknown>>
+  failure_code: string | null
+  started_at: string | null
+  ended_at: string | null
+}
+
+export interface AgentEvalRun {
+  id: string
+  agent_id: string
+  suite_version_id: string
+  suite_name: string
+  suite_version_no: number
+  candidate_agent_version_id: string
+  candidate_content_hash: string
+  status: 'queued' | 'running' | 'passed' | 'failed' | 'error'
+  case_count: number
+  passed_count: number
+  failed_count: number
+  error_count: number
+  score: string | null
+  gate_policy_snapshot: Record<string, unknown>
+  case_runs: AgentEvalCaseRun[]
+  started_at: string | null
+  ended_at: string | null
+  created_at: string
+  updated_at: string
+}
+
 export const agentsApi = {
   searchNetwork: (params?: {
     query?: string
@@ -128,6 +190,34 @@ export const agentsApi = {
     client.get<CapabilityCheck>(`/agents/${id}/draft/capability-check`).then(r => r.data),
   listVersions: (id: string) =>
     client.get<{ items: AgentPublishedVersion[] }>(`/agents/${id}/versions`).then(r => r.data.items),
+  listEvalSuites: (id: string) =>
+    client.get<{ items: AgentEvalSuite[] }>(`/agents/${id}/eval-suites`).then(r => r.data.items),
+  createEvalSuite: (id: string, definition: {
+    name: string
+    description: string
+    gate_policy: Record<string, unknown>
+    cases: AgentEvalCaseDefinition[]
+  }) => client.post<AgentEvalSuite>(`/agents/${id}/eval-suites`, definition, {
+    headers: { 'Idempotency-Key': crypto.randomUUID() },
+  }).then(r => r.data),
+  versionEvalSuite: (id: string, suiteId: string, definition: {
+    name: string
+    description: string
+    gate_policy: Record<string, unknown>
+    cases: AgentEvalCaseDefinition[]
+  }) => client.post<AgentEvalSuite>(`/agents/${id}/eval-suites/${suiteId}/versions`, definition, {
+    headers: { 'Idempotency-Key': crypto.randomUUID() },
+  }).then(r => r.data),
+  setEvalSuiteState: (id: string, suiteId: string, target: 'activate' | 'deactivate') =>
+    client.post<AgentEvalSuite>(`/agents/${id}/eval-suites/${suiteId}/state/${target}`, {}, {
+      headers: { 'Idempotency-Key': crypto.randomUUID() },
+    }).then(r => r.data),
+  runEvalSuite: (id: string, suiteId: string, revision: number) =>
+    client.post<AgentEvalRun>(`/agents/${id}/eval-suites/${suiteId}/runs`, {
+      expected_draft_revision: revision,
+    }, { headers: { 'Idempotency-Key': crypto.randomUUID() } }).then(r => r.data),
+  listEvalRuns: (id: string) =>
+    client.get<{ items: AgentEvalRun[] }>(`/agents/${id}/eval-runs`).then(r => r.data.items),
   listApiKeys: (id: string) => client.get<{ items: AgentApiKey[] }>(`/agents/${id}/api-keys`).then(r => r.data.items),
   createApiKey: (id: string, values: { name: string; caller_label: string; expires_at?: string | null }) =>
     client.post<AgentApiKey>(`/agents/${id}/api-keys`, values, {

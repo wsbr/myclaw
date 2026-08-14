@@ -59,6 +59,10 @@ from app.models.verification_v1 import (
     VerificationResult,
 )
 from app.models.usage_v1 import UsageLedgerEntry, UsagePriceSnapshot
+from app.models.agent_eval_v1 import (
+    AgentEvalCase, AgentEvalCaseRun, AgentEvalRun, AgentEvalSuite,
+    AgentEvalSuiteVersion,
+)
 
 __all__ = [
     "UserIdentity", "PlatformAccount", "PlatformAccountRole", "IdempotencyRecord", "AgentApiKey",
@@ -89,4 +93,6 @@ __all__ = [
     "VerificationResult", "VerificationEvidenceRef", "RunProgressMark",
     "LateResultObservation",
     "UsageLedgerEntry", "UsagePriceSnapshot",
+    "AgentEvalCase", "AgentEvalCaseRun", "AgentEvalRun", "AgentEvalSuite",
+    "AgentEvalSuiteVersion",
 ]

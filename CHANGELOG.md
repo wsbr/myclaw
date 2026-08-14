@@ -12,6 +12,7 @@ All notable changes to MyClaw are documented in this file. The format follows [K
 - Added an administrator-only, read-only Runtime Console for global Runs, budget/progress projections, WorkItems, Runners, Provider/Tool/Agent calls, causal events, active lease observations, Group diagnostics, and redacted Outbox health.
 - Extended the real-model Group UAT gate with a pathological causal re-entry scenario that must be safely bounded by exactly one durable diagnostic while the useful Group work still completes.
 - Added an append-only Usage/cost ledger with effective-dated immutable price snapshots, automatic Provider and durable Tool/Sandbox attempt attribution, explicit unknown cost, reconciled rollups, audited adjustments, owned-Run APIs, and an administrator Usage console.
+- Added versioned Agent evaluation suites that execute real isolated draft-test Runs, deterministically settle quality and cost assertions, bind evidence to the exact candidate assembly hash, and block publication when an active current suite has not passed that candidate.
 
 ## [0.1.1] - 2026-08-14
 

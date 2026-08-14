@@ -134,6 +134,12 @@ Runtime 必须忠实于结果：
 
 Draft Test 只能证明当前装配候选，不自动发布，也不代表业务 UAT 已通过。
 
+### 版本化 Eval 与发布门禁
+
+Builder 可以为 Agent 配置一个或多个 active Eval Suite。套件的名称、阈值、用例输入、权重与断言按 SuiteVersion 冻结；修改会发布新版本，不覆盖旧定义。启动评测时平台先生成与发布内容哈希一致的 `draft_test_snapshot`，再为每个用例建立独立的真实 Session/Run。维护 Worker 在 Run 终态后对最终回复结算 `contains_all`、`contains_none`、长度与最大成本断言；未知成本默认不能冒充 0 成本通过。
+
+发布门禁匹配的是当前 active SuiteVersion 和当前草稿解析全部 Model、Tool、Skill、Policy、Sandbox 依赖后得到的精确 candidate content hash。草稿或任一依赖 current version 发生变化，即使 draft revision 未变，旧 EvalRun 也不再满足门禁。没有 active Suite 的 Agent 保持原发布行为；启用 Suite 表示 Builder 明确选择强制门禁。
+
 ## Agent 的专业成长
 
 运行反馈可以形成改进候选：

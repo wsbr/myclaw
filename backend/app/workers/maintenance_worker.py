@@ -14,6 +14,7 @@ from app.database import engine
 from app.models.common import uuid7
 from app.services.retention_service import run_retention_cleanup
 from app.services.maintenance_command_service import MaintenanceCommandWorker
+from app.services.agent_eval_service import reconcile_one_eval_case
 
 
 logger = logging.getLogger(__name__)
@@ -64,8 +65,21 @@ async def _command_loop() -> None:
             await asyncio.sleep(settings.maintenance_command_poll_seconds)
 
 
+async def _agent_eval_loop() -> None:
+    while True:
+        try:
+            async with AsyncSession(engine, expire_on_commit=False) as db:
+                async with db.begin():
+                    worked = await reconcile_one_eval_case(db)
+        except Exception:
+            logger.exception("Agent eval reconciliation iteration failed")
+            worked = False
+        if not worked:
+            await asyncio.sleep(settings.maintenance_command_poll_seconds)
+
+
 async def main() -> None:
-    await asyncio.gather(_retention_loop(), _command_loop())
+    await asyncio.gather(_retention_loop(), _command_loop(), _agent_eval_loop())
 
 
 if __name__ == "__main__":
