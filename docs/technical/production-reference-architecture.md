@@ -98,7 +98,7 @@ Redis 使用跨区复制和自动 failover，但其全部内容都必须可重�
 
 ### Qdrant
 
-Qdrant 使用跨可用区副本和定期 snapshot，但不成为 Knowledge 正文、授权或 revision 权威。Collection 按冻结的维度与 ModelVersion content hash 分区，point payload 至少携带 `tenant_id`、`knowledge_base_id` 和 `index_revision_id` 并建立 payload index。API 查询先从 MySQL 得到允许访问的 ready revision，再以 Tenant/revision filter 查询 Qdrant，最后回到 MySQL 复核 current pointer 与 source checksum。Qdrant 全失时停止 semantic 查询和新索引发布；恢复 snapshot 或从 MySQL/source object 重建投影，不能把 point 缺失的 revision 标为 ready。
+Qdrant 使用跨可用区副本和定期 snapshot，但不成为 Knowledge 正文、授权或 revision 权威。Collection 按冻结的维度与 ModelVersion content hash 分区，每个 point 使用 `dense`、`bm25`、`lexicon` named vectors，payload 至少携带 `tenant_id`、`knowledge_base_id` 和 `index_revision_id` 并建立 payload index。BM25 的 IDF 由 Worker 在不可变 revision 内冻结到 sparse 权重，不使用 collection 级统计，避免其他 Tenant/revision 影响排序。API 查询先从 MySQL 得到允许访问的 ready revision，三路分别以 Tenant/revision filter 查询 Qdrant，由平台用冻结参数执行可留痕的 RRF，最后回到 MySQL 复核 current pointer 与 source checksum。Embedding Provider 故障可以显式降级到 sparse 路由；Qdrant 全失时停止查询和新索引发布。恢复 snapshot 或从 MySQL/source object 重建投影，不能把任一路 point 缺失的 revision 标为 ready。
 
 ## 5. 身份与授权
 

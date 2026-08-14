@@ -88,7 +88,7 @@ for volume in "${TARGET_VOLUMES[@]}"; do
   docker volume create \
     --label com.myclaw.project=myclaw \
     --label com.myclaw.scope=uat \
-    --label com.myclaw.schema=0041 \
+    --label com.myclaw.schema=0042 \
     "$volume" >/dev/null
 done
 

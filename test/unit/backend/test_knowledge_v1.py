@@ -14,6 +14,7 @@ from app.models.knowledge_v1 import (
     KnowledgeBase,
     KnowledgeChunk,
     KnowledgeIndexRevision,
+    KnowledgeLexiconRevision,
     KnowledgeRetrievalSnapshot,
     KnowledgeSource,
 )
@@ -26,6 +27,7 @@ from app.services.knowledge_service import (
     ingest_source,
     parse_source_bytes,
     reconcile_knowledge_storage,
+    replace_knowledge_lexicon,
     search_knowledge,
 )
 
@@ -225,6 +227,60 @@ def test_bounded_parser_rejects_non_utf8_and_invalid_pdf():
     with pytest.raises(KnowledgeError) as pdf_error:
         parse_source_bytes(b"not-a-pdf", media_type="application/pdf")
     assert pdf_error.value.code == "knowledge_pdf_invalid"
+
+
+@pytest.mark.asyncio
+async def test_domain_lexicon_revisions_are_immutable_idempotent_and_unambiguous(knowledge_db):
+    async with knowledge_db.begin() as db:
+        base = await create_knowledge_base(
+            db, tenant_id=TENANT_A, account_id=ACCOUNT_A,
+            name="Lexicon", description="Domain aliases", agent_ids=[],
+        )
+        first, index_revision, replay = await replace_knowledge_lexicon(
+            db, knowledge_base=base, account_id=ACCOUNT_A,
+            raw_terms=[{
+                "canonical_name": "checkpoint recovery",
+                "term_type": "concept", "description": "durable resume",
+                "aliases": ["断点续跑"],
+            }],
+        )
+        assert index_revision is None
+        assert replay is False
+        assert base.current_lexicon_revision_id == first.id
+        assert first.revision_no == 1
+        replayed, _, replay = await replace_knowledge_lexicon(
+            db, knowledge_base=base, account_id=ACCOUNT_A,
+            raw_terms=[{
+                "canonical_name": "checkpoint recovery",
+                "term_type": "concept", "description": "durable resume",
+                "aliases": ["断点续跑"],
+            }],
+        )
+        assert replay is True
+        assert replayed.id == first.id
+        second, _, replay = await replace_knowledge_lexicon(
+            db, knowledge_base=base, account_id=ACCOUNT_A,
+            raw_terms=[{
+                "canonical_name": "checkpoint recovery",
+                "term_type": "concept", "description": "durable resume",
+                "aliases": ["断点续跑", "检查点恢复"],
+            }],
+        )
+        assert replay is False
+        assert second.revision_no == 2
+        assert first.terms[0]["aliases"] != second.terms[0]["aliases"]
+        with pytest.raises(KnowledgeError) as ambiguous:
+            await replace_knowledge_lexicon(
+                db, knowledge_base=base, account_id=ACCOUNT_A,
+                raw_terms=[
+                    {"canonical_name": "alpha", "aliases": ["shared"]},
+                    {"canonical_name": "beta", "aliases": ["shared"]},
+                ],
+            )
+        assert ambiguous.value.code == "knowledge_lexicon_invalid"
+        assert await db.scalar(select(func.count()).select_from(
+            KnowledgeLexiconRevision
+        )) == 2
 
 
 @pytest.mark.asyncio

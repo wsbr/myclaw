@@ -23,14 +23,17 @@ from app.services.knowledge_service import (
     build_index_revision,
     create_knowledge_base,
     configure_knowledge_embedding,
+    current_knowledge_lexicon,
     delete_document,
     document_view,
     index_revision_view,
     ingest_source,
     knowledge_base_view,
+    lexicon_revision_view,
     owned_knowledge_base,
     reconcile_knowledge_storage,
     replace_agent_access,
+    replace_knowledge_lexicon,
     search_knowledge_detached,
     source_view,
 )
@@ -61,6 +64,17 @@ class KnowledgeReconcileRequest(BaseModel):
 
 class KnowledgeEmbeddingPatch(BaseModel):
     embedding_model_id: str = Field(min_length=1, max_length=36)
+
+
+class KnowledgeLexiconTermInput(BaseModel):
+    canonical_name: str = Field(min_length=1, max_length=200)
+    term_type: str = Field(default="concept", max_length=32)
+    description: str = Field(default="", max_length=2000)
+    aliases: list[str] = Field(default_factory=list, max_length=100)
+
+
+class KnowledgeLexiconReplace(BaseModel):
+    terms: list[KnowledgeLexiconTermInput] = Field(default_factory=list, max_length=10_000)
 
 
 def _raise(error: KnowledgeError):
@@ -218,6 +232,67 @@ async def patch_knowledge_embedding_model(
     )
     await db.commit()
     return await knowledge_base_view(db, item)
+
+
+@router.get("/{knowledge_base_id}/lexicon")
+async def get_knowledge_lexicon(
+    knowledge_base_id: str,
+    db: AsyncSession = Depends(get_db),
+    current: CurrentAccount = Depends(get_current_account),
+):
+    try:
+        item = await owned_knowledge_base(
+            db, tenant_id=current.tenant_id, account_id=current.account.id,
+            knowledge_base_id=knowledge_base_id,
+        )
+        revision = await current_knowledge_lexicon(db, item)
+    except KnowledgeError as error:
+        _raise(error)
+    return lexicon_revision_view(revision)
+
+
+@router.put("/{knowledge_base_id}/lexicon")
+async def put_knowledge_lexicon(
+    knowledge_base_id: str,
+    body: KnowledgeLexiconReplace,
+    db: AsyncSession = Depends(get_db),
+    current: CurrentAccount = Depends(get_current_account),
+):
+    try:
+        item = await owned_knowledge_base(
+            db, tenant_id=current.tenant_id, account_id=current.account.id,
+            knowledge_base_id=knowledge_base_id, lock=True,
+        )
+        lexicon, index_revision, replay = await replace_knowledge_lexicon(
+            db, knowledge_base=item, account_id=current.account.id,
+            raw_terms=[term.model_dump() for term in body.terms],
+        )
+    except KnowledgeError as error:
+        _raise(error)
+    await PlatformAuditWriter(db).append(
+        category="knowledge", action="knowledge_base.lexicon_replaced",
+        actor_type="account", actor_id=current.account.id,
+        actor_user_id=current.account.user_id,
+        resource_type="knowledge_lexicon_revision", resource_id=lexicon.id,
+        resource_version=lexicon.revision_no, outcome="succeeded",
+        summary="Knowledge domain lexicon replaced with an immutable revision",
+        changes={
+            "knowledge_base_id": item.id,
+            "term_count": len(lexicon.terms),
+            "content_hash": lexicon.content_hash,
+            "index_revision_id": index_revision.id if index_revision else None,
+            "idempotent_replay": replay,
+        },
+        dedupe_key=f"audit:knowledge_lexicon:{lexicon.id}",
+    )
+    await db.commit()
+    return {
+        **lexicon_revision_view(lexicon),
+        "index_revision": (
+            index_revision_view(index_revision) if index_revision else None
+        ),
+        "idempotent_replay": replay,
+    }
 
 
 @router.get("/{knowledge_base_id}/documents")

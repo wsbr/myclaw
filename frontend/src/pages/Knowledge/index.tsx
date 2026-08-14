@@ -12,7 +12,8 @@ import {
 import { agentsApi } from '@/api/agents'
 import {
   knowledgeApi, type KnowledgeBase, type KnowledgeDocument,
-  type KnowledgeSearchResult, type KnowledgeStorageReconciliation,
+  type KnowledgeLexiconTerm, type KnowledgeSearchResult,
+  type KnowledgeStorageReconciliation,
 } from '@/api/knowledge'
 
 
@@ -42,6 +43,9 @@ export default function KnowledgePage() {
   const [file, setFile] = useState<File | null>(null)
   const [searchText, setSearchText] = useState('')
   const [searchResults, setSearchResults] = useState<KnowledgeSearchResult[]>([])
+  const [degradedRoutes, setDegradedRoutes] = useState<unknown[]>([])
+  const [lexiconOpen, setLexiconOpen] = useState(false)
+  const [lexiconDraft, setLexiconDraft] = useState<KnowledgeLexiconTerm[]>([])
   const [reconciliation, setReconciliation] = useState<KnowledgeStorageReconciliation | null>(null)
 
   const bases = useQuery({
@@ -74,6 +78,7 @@ export default function KnowledgePage() {
     setEmbeddingModelId(selected?.embedding_model_id ?? undefined)
     setSearchResults([])
     setSearchText('')
+    setDegradedRoutes([])
     setFile(null)
     setReconciliation(null)
   }, [selected?.id, selected?.agent_ids, selected?.embedding_model_id])
@@ -134,9 +139,34 @@ export default function KnowledgePage() {
 
   const search = useMutation({
     mutationFn: () => knowledgeApi.search(selected!.id, searchText.trim()),
-    onSuccess: result => setSearchResults(result.results),
+    onSuccess: result => {
+      setSearchResults(result.results)
+      setDegradedRoutes(result.degraded_routes)
+    },
     onError: () => message.error('检索失败'),
   })
+
+  const replaceLexicon = useMutation({
+    mutationFn: () => knowledgeApi.replaceLexicon(selected!.id, lexiconDraft.map(term => ({
+      ...term,
+      canonical_name: term.canonical_name.trim(),
+      description: term.description.trim(),
+      aliases: term.aliases.map(value => value.trim()).filter(Boolean),
+    }))),
+    onSuccess: async result => {
+      setLexiconOpen(false)
+      message.success(result.idempotent_replay ? '词表内容未变化' : '词表已发布，混合索引正在重建')
+      await refresh()
+    },
+    onError: () => message.error('领域词表发布失败，请检查重复别名或字段长度'),
+  })
+
+  const openLexicon = () => {
+    setLexiconDraft((selected?.current_lexicon_revision.terms ?? []).map(term => ({
+      ...term, aliases: [...term.aliases],
+    })))
+    setLexiconOpen(true)
+  }
 
   const reindex = useMutation({
     mutationFn: () => knowledgeApi.reindex(selected!.id),
@@ -232,6 +262,9 @@ export default function KnowledgePage() {
               {selected.current_index_revision?.vector_backend === 'qdrant' ? 'Semantic Hybrid · Qdrant' : 'Legacy Hybrid'}
             </Tag></Descriptions.Item>
             <Descriptions.Item label="向量点数">{selected.current_index_revision?.vector_point_count ?? 0}</Descriptions.Item>
+            <Descriptions.Item label="领域词表">
+              revision {selected.current_lexicon_revision.revision_no} · {selected.current_lexicon_revision.terms.length} 词
+            </Descriptions.Item>
             <Descriptions.Item label="后台索引">
               {selected.pending_index_revision
                 ? <Tag color={selected.pending_index_revision.status === 'failed' ? 'error' : 'processing'}>{selected.pending_index_revision.status}</Tag>
@@ -272,6 +305,17 @@ export default function KnowledgePage() {
           </Space.Compact>
         </Card>
 
+        <Card title="领域词表" extra={<Button onClick={openLexicon}>编辑并发布 revision</Button>}>
+          <Typography.Paragraph type="secondary">
+            为平台术语、产品名、错误码和业务别名建立第三路召回。每次发布生成不可变 revision，并触发 Dense + BM25 + Lexicon 全量重建。
+          </Typography.Paragraph>
+          {selected.current_lexicon_revision.terms.length ? <Space wrap>
+            {selected.current_lexicon_revision.terms.map(term => <Tag key={term.id ?? term.canonical_name} color="cyan">
+              {term.canonical_name}{term.aliases.length ? `（${term.aliases.join(' / ')}）` : ''}
+            </Tag>)}
+          </Space> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="尚未配置领域词表；检索仍使用 Dense + BM25" />}
+        </Card>
+
         <Card title="文档">
           <Space className="mb-4" wrap>
             <Upload accept=".txt,.md,.markdown,.pdf" maxCount={1} fileList={file ? [{
@@ -302,11 +346,19 @@ export default function KnowledgePage() {
             <Button type="primary" icon={<FileSearchOutlined />} disabled={!searchText.trim()}
               loading={search.isPending} onClick={() => search.mutate()}>检索</Button>
           </Space.Compact>
+          {degradedRoutes.length > 0 && <Alert className="mb-3" type="warning" showIcon
+            message="部分检索路由已降级" description={JSON.stringify(degradedRoutes)} />}
           {searchResults.length ? <List dataSource={searchResults} renderItem={item => <List.Item>
             <List.Item.Meta title={<Space wrap>
               <Typography.Text strong>{citationLabel(item)}</Typography.Text>
               <Tag color="blue">score {item.score.toFixed(3)}</Tag>
-              <Tag color={item.retrieval_kind === 'semantic' ? 'purple' : 'default'}>{item.retrieval_kind}</Tag>
+              <Tag color={item.retrieval_kind === 'hybrid_rrf' ? 'purple' : 'default'}>{item.retrieval_kind}</Tag>
+              {Object.entries(item.route_evidence).map(([route, evidence]) => <Tag key={route}>
+                {route} #{evidence.rank} · {evidence.score.toFixed(3)}
+              </Tag>)}
+              {item.matched_lexicon_terms.map(term => <Tag key={term.term_id} color="cyan">
+                词表：{term.matched_value} → {term.canonical_name}
+              </Tag>)}
               <Tag>revision {item.index_revision_id.slice(0, 8)}</Tag>
             </Space>} description={<>
               <Typography.Paragraph className="mt-2 whitespace-pre-wrap">{item.excerpt}</Typography.Paragraph>
@@ -331,6 +383,29 @@ export default function KnowledgePage() {
           }))} />
         </Form.Item>
       </Form>
+    </Modal>
+    <Modal title="发布领域词表 revision" width={960} open={lexiconOpen}
+      onCancel={() => setLexiconOpen(false)} onOk={() => replaceLexicon.mutate()}
+      okText="发布并重建" confirmLoading={replaceLexicon.isPending}
+      okButtonProps={{ disabled: lexiconDraft.some(term => !term.canonical_name.trim()) }}>
+      <Alert className="mb-4" showIcon type="info" message="别名在同一词表中必须唯一"
+        description="文档命中规范词或任一别名时，会写入同一个稳定 term id；用户查询命中别名后可召回包含规范词的片段。" />
+      <Table rowKey={(_, index) => String(index)} pagination={false} size="small"
+        dataSource={lexiconDraft} columns={[
+          { title: '规范词', width: 180, render: (_: unknown, item: KnowledgeLexiconTerm, index: number) => <Input
+            value={item.canonical_name} maxLength={200} onChange={event => setLexiconDraft(current => current.map((term, i) => i === index ? { ...term, canonical_name: event.target.value } : term))} /> },
+          { title: '类型', width: 120, render: (_: unknown, item: KnowledgeLexiconTerm, index: number) => <Select
+            className="w-full" value={item.term_type} onChange={value => setLexiconDraft(current => current.map((term, i) => i === index ? { ...term, term_type: value } : term))}
+            options={['concept', 'entity', 'code', 'product', 'agent', 'other'].map(value => ({ value, label: value }))} /> },
+          { title: '别名（逗号分隔）', render: (_: unknown, item: KnowledgeLexiconTerm, index: number) => <Input
+            value={item.aliases.join(', ')} onChange={event => setLexiconDraft(current => current.map((term, i) => i === index ? { ...term, aliases: event.target.value.split(/[,，]/) } : term))} /> },
+          { title: '说明', render: (_: unknown, item: KnowledgeLexiconTerm, index: number) => <Input
+            value={item.description} maxLength={2000} onChange={event => setLexiconDraft(current => current.map((term, i) => i === index ? { ...term, description: event.target.value } : term))} /> },
+          { title: '', width: 64, render: (_: unknown, _item: KnowledgeLexiconTerm, index: number) => <Button danger type="link" onClick={() => setLexiconDraft(current => current.filter((_, i) => i !== index))}>删除</Button> },
+        ]} />
+      <Button className="mt-3" icon={<PlusOutlined />} onClick={() => setLexiconDraft(current => [...current, {
+        canonical_name: '', term_type: 'concept', description: '', aliases: [],
+      }])}>添加术语</Button>
     </Modal>
   </div>
 }

@@ -68,6 +68,11 @@ class Settings(BaseSettings):
     knowledge_index_heartbeat_seconds: int = Field(default=30, gt=0)
     knowledge_embedding_timeout_seconds: float = Field(default=60.0, gt=0, le=600)
     knowledge_vector_candidate_multiplier: int = Field(default=8, ge=2, le=50)
+    knowledge_bm25_candidate_limit: int = Field(default=80, ge=10, le=500)
+    knowledge_dense_candidate_limit: int = Field(default=80, ge=10, le=500)
+    knowledge_lexicon_candidate_limit: int = Field(default=40, ge=5, le=500)
+    knowledge_lexicon_max_terms: int = Field(default=500, ge=1, le=10_000)
+    knowledge_lexicon_max_aliases_per_term: int = Field(default=20, ge=0, le=100)
     skill_package_root: str = "/var/lib/myclaw/skill-packages"
     shared_skill_root: str = "/var/lib/myclaw/shared-skills"
     skill_storage_backend: str = "local"

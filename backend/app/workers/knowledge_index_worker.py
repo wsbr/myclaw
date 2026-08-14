@@ -9,6 +9,7 @@ import logging
 import os
 import socket
 import uuid
+from collections import Counter
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -22,6 +23,7 @@ from app.models.knowledge_v1 import (
     KnowledgeBase,
     KnowledgeChunk,
     KnowledgeIndexRevision,
+    KnowledgeLexiconRevision,
     KnowledgeSource,
 )
 from app.models.registry import ModelVersion
@@ -40,11 +42,17 @@ from app.services.knowledge_service import (
     parse_source_bytes,
 )
 from app.services.provider_credentials import resolve_provider_credential
+from app.services.sparse_retrieval_service import (
+    bm25_document_vector,
+    lexicon_vector,
+    match_lexicon,
+)
 from app.services.vector_store_service import (
     QdrantVectorStore,
     VectorPoint,
     VectorStoreError,
     collection_name,
+    hybrid_collection_name,
 )
 from app.services.worker_heartbeat_service import run_worker_heartbeat
 
@@ -75,6 +83,8 @@ class KnowledgeIndexClaim:
     sources: tuple[KnowledgeSource, ...]
     spec: EmbeddingSpec
     credential: str
+    retrieval_profile: dict
+    lexicon_terms: tuple[dict, ...]
 
 
 def _embedding_checksum(vector: tuple[float, ...]) -> str:
@@ -198,6 +208,24 @@ class KnowledgeIndexWorker:
                 command.dispatch_lease_token = None
                 command.dispatch_lease_expires_at = None
                 return None
+            lexicon = (
+                await db.get(KnowledgeLexiconRevision, revision.lexicon_revision_id)
+                if revision.lexicon_revision_id else None
+            )
+            if lexicon is not None and (
+                lexicon.tenant_id != revision.tenant_id
+                or lexicon.knowledge_base_id != revision.knowledge_base_id
+            ):
+                command.status = "dead"
+                command.last_error = "knowledge_lexicon_authority_invalid"
+                command.completed_at = now
+                revision.status = "failed"
+                revision.error_code = command.last_error
+                revision.completed_at = now
+                command.dispatch_lease_owner = None
+                command.dispatch_lease_token = None
+                command.dispatch_lease_expires_at = None
+                return None
             source_ids = [str(item["source_id"]) for item in revision.source_manifest]
             sources = tuple(await db.scalars(select(KnowledgeSource).where(
                 KnowledgeSource.tenant_id == revision.tenant_id,
@@ -238,6 +266,8 @@ class KnowledgeIndexWorker:
                 manifest=tuple(dict(item) for item in revision.source_manifest),
                 sources=sources,
                 spec=spec, credential=credential,
+                retrieval_profile=dict(revision.retrieval_profile or {}),
+                lexicon_terms=tuple(dict(item) for item in (lexicon.terms if lexicon else [])),
             )
 
     async def _heartbeat_claim(self, claim: KnowledgeIndexClaim, stop: asyncio.Event) -> None:
@@ -261,7 +291,9 @@ class KnowledgeIndexWorker:
                     seconds=settings.knowledge_index_claim_lease_seconds,
                 )
 
-    async def _build(self, claim: KnowledgeIndexClaim) -> tuple[list[IndexChunk], list[tuple[float, ...]], str]:
+    async def _build(
+        self, claim: KnowledgeIndexClaim,
+    ) -> tuple[list[IndexChunk], list[tuple[float, ...]], list[list[str]], str]:
         source_by_id = {item.id: item for item in claim.sources}
         chunks: list[IndexChunk] = []
         for manifest_item in claim.manifest:
@@ -294,16 +326,40 @@ class KnowledgeIndexWorker:
                 texts=[item.draft.content for item in batch],
             )
             vectors.extend(result.vectors)
-        collection = collection_name(
-            dimensions=claim.spec.dimensions,
-            model_content_hash=claim.spec.model_content_hash,
+        hybrid = claim.retrieval_profile.get("profile") == "qdrant.hybrid.v1"
+        collection = (
+            hybrid_collection_name(
+                dimensions=claim.spec.dimensions,
+                model_content_hash=claim.spec.model_content_hash,
+            )
+            if hybrid else collection_name(
+                dimensions=claim.spec.dimensions,
+                model_content_hash=claim.spec.model_content_hash,
+            )
         )
-        await self._vectors.ensure_collection(
-            name=collection, dimensions=claim.spec.dimensions,
+        if hybrid:
+            await self._vectors.ensure_hybrid_collection(
+                name=collection, dimensions=claim.spec.dimensions,
+            )
+        else:
+            await self._vectors.ensure_collection(
+                name=collection, dimensions=claim.spec.dimensions,
+            )
+        average_length = (
+            sum(item.draft.token_count for item in chunks) / len(chunks)
+            if chunks else 1.0
         )
+        document_frequencies = Counter()
+        for item in chunks:
+            document_frequencies.update(item.draft.terms.keys())
+        chunk_lexicon_matches = [
+            match_lexicon(item.draft.content, claim.lexicon_terms)
+            for item in chunks
+        ]
         for offset in range(0, len(chunks), 256):
             batch_chunks = chunks[offset:offset + 256]
             batch_vectors = vectors[offset:offset + 256]
+            batch_lexicon_matches = chunk_lexicon_matches[offset:offset + 256]
             await self._vectors.upsert(
                 collection=collection,
                 points=[VectorPoint(
@@ -316,13 +372,32 @@ class KnowledgeIndexWorker:
                         "source_id": item.source_id,
                         "ordinal": item.ordinal,
                     },
-                ) for item, vector in zip(batch_chunks, batch_vectors)],
+                    bm25=(
+                        bm25_document_vector(
+                            item.draft.terms,
+                            document_length=item.draft.token_count,
+                            average_document_length=average_length,
+                            document_frequencies=dict(document_frequencies),
+                            document_count=len(chunks),
+                        ) if hybrid else None
+                    ),
+                    lexicon=(
+                        lexicon_vector(matches) if hybrid else None
+                    ),
+                ) for item, vector, matches in zip(
+                    batch_chunks, batch_vectors, batch_lexicon_matches,
+                )],
             )
-        return chunks, vectors, collection
+        return (
+            chunks, vectors,
+            [[match.term_id for match in matches] for matches in chunk_lexicon_matches],
+            collection,
+        )
 
     async def _complete(
         self, claim: KnowledgeIndexClaim, chunks: list[IndexChunk],
-        vectors: list[tuple[float, ...]], collection: str,
+        vectors: list[tuple[float, ...]], lexicon_term_ids: list[list[str]],
+        collection: str,
     ) -> None:
         async with AsyncSessionLocal.begin() as db:
             command = await db.scalar(select(OutboxCommand).where(
@@ -355,10 +430,11 @@ class KnowledgeIndexWorker:
                 ordinal=item.ordinal, page_number=item.draft.page_number,
                 section=item.draft.section, content=item.draft.content,
                 content_hash=hashlib.sha256(item.draft.content.encode()).hexdigest(),
-                term_frequencies=item.draft.terms, vector={},
+                term_frequencies=item.draft.terms,
+                lexicon_term_ids=term_ids, vector={},
                 embedding_checksum=_embedding_checksum(vector),
                 token_count=item.draft.token_count,
-            ) for item, vector in zip(chunks, vectors)])
+            ) for item, vector, term_ids in zip(chunks, vectors, lexicon_term_ids)])
             now = utcnow()
             revision.status = "ready"
             revision.chunk_count = len(chunks)
@@ -431,8 +507,10 @@ class KnowledgeIndexWorker:
             name=f"knowledge-claim-heartbeat:{claim.command_id}",
         )
         try:
-            chunks, vectors, collection = await self._build(claim)
-            await self._complete(claim, chunks, vectors, collection)
+            chunks, vectors, lexicon_term_ids, collection = await self._build(claim)
+            await self._complete(
+                claim, chunks, vectors, lexicon_term_ids, collection,
+            )
         except Exception as error:
             logger.warning(
                 "Semantic Knowledge indexing failed",

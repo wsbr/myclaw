@@ -27,6 +27,7 @@ from app.models.knowledge_v1 import (
     KnowledgeChunk,
     KnowledgeDocument,
     KnowledgeIndexRevision,
+    KnowledgeLexiconRevision,
     KnowledgeRetrievalSnapshot,
     KnowledgeSource,
 )
@@ -42,6 +43,20 @@ from app.services.embedding_service import (
 )
 from app.services.model_registry_service import latest_terminal_conformance
 from app.services.provider_credentials import resolve_provider_credential
+from app.services.sparse_retrieval_service import (
+    BM25_B,
+    BM25_K1,
+    BM25_TOKENIZER_PROFILE,
+    RRF_K,
+    RRF_PROFILE,
+    RankedRouteHit,
+    bm25_query_vector,
+    lexicon_vector,
+    match_lexicon,
+    normalize_lexicon_terms,
+    reciprocal_rank_fusion,
+    tokenize_for_bm25,
+)
 from app.services.vector_store_service import QdrantVectorStore, VectorStoreError
 
 
@@ -57,7 +72,6 @@ DEFAULT_EMBEDDING_PROFILE = {
     "lexical_fallback": "local.term_frequency.v1",
 }
 SAFE_FILENAME = re.compile(r"^[^/\\\x00-\x1f\x7f]{1,500}$")
-TOKEN_PATTERN = re.compile(r"[a-z0-9_]+|[\u3400-\u4dbf\u4e00-\u9fff]", re.I)
 SUPPORTED_EXTENSIONS = {
     ".txt": "text/plain",
     ".md": "text/markdown",
@@ -191,20 +205,7 @@ def parse_source_bytes(data: bytes, *, media_type: str) -> list[ParsedBlock]:
 
 
 def tokenize(text: str) -> list[str]:
-    base = [match.group(0).casefold() for match in TOKEN_PATTERN.finditer(text)]
-    values = list(base)
-    cjk_run: list[str] = []
-    for item in base + [" "]:
-        if len(item) == 1 and "\u3400" <= item <= "\u9fff":
-            cjk_run.append(item)
-            continue
-        if len(cjk_run) > 1:
-            values.extend(
-                cjk_run[index] + cjk_run[index + 1]
-                for index in range(len(cjk_run) - 1)
-            )
-        cjk_run = []
-    return values
+    return tokenize_for_bm25(text)
 
 
 def feature_vector(terms: dict[str, int], dimensions: int = 256) -> dict[str, float]:
@@ -413,6 +414,140 @@ async def resolve_knowledge_embedding_model(
     return model, version
 
 
+def _hybrid_retrieval_profile(
+    *, lexicon_revision: KnowledgeLexiconRevision | None,
+) -> dict:
+    return {
+        "profile": "qdrant.hybrid.v1",
+        "routes": {
+            "dense": {
+                "vector_name": "dense",
+                "candidate_limit": settings.knowledge_dense_candidate_limit,
+            },
+            "bm25": {
+                "vector_name": "bm25",
+                "candidate_limit": settings.knowledge_bm25_candidate_limit,
+                "tokenizer": BM25_TOKENIZER_PROFILE,
+                "k1": BM25_K1,
+                "b": BM25_B,
+                "idf": "myclaw.revision_frozen.v1",
+            },
+            "lexicon": {
+                "vector_name": "lexicon",
+                "candidate_limit": settings.knowledge_lexicon_candidate_limit,
+                "revision_id": lexicon_revision.id if lexicon_revision else None,
+                "revision_no": lexicon_revision.revision_no if lexicon_revision else 0,
+                "content_hash": (
+                    lexicon_revision.content_hash if lexicon_revision else _digest([])
+                ),
+                "term_count": len(lexicon_revision.terms) if lexicon_revision else 0,
+            },
+        },
+        "fusion": {"profile": RRF_PROFILE, "k": RRF_K},
+        "reranker": {"enabled": False, "fallback": "rrf"},
+    }
+
+
+def lexicon_revision_view(item: KnowledgeLexiconRevision | None) -> dict:
+    if item is None:
+        return {
+            "id": None, "revision_no": 0, "content_hash": _digest([]),
+            "terms": [], "created_at": None,
+        }
+    return {
+        "id": item.id,
+        "revision_no": item.revision_no,
+        "content_hash": item.content_hash,
+        "terms": [{
+            "id": term["id"],
+            "canonical_name": term["canonical_name"],
+            "term_type": term["term_type"],
+            "description": term.get("description", ""),
+            "aliases": [alias["value"] for alias in term.get("aliases", [])],
+        } for term in item.terms],
+        "created_at": item.created_at.isoformat() if item.created_at else None,
+    }
+
+
+async def current_knowledge_lexicon(db, knowledge_base: KnowledgeBase) -> KnowledgeLexiconRevision | None:
+    if not knowledge_base.current_lexicon_revision_id:
+        return None
+    lexicon = await db.get(
+        KnowledgeLexiconRevision, knowledge_base.current_lexicon_revision_id,
+    )
+    if (
+        lexicon is None or lexicon.tenant_id != knowledge_base.tenant_id
+        or lexicon.knowledge_base_id != knowledge_base.id
+    ):
+        raise KnowledgeError(
+            "knowledge_lexicon_authority_invalid",
+            "Knowledge lexicon revision authority is invalid",
+            status_code=500,
+        )
+    return lexicon
+
+
+async def replace_knowledge_lexicon(
+    db, *, knowledge_base: KnowledgeBase, account_id: str, raw_terms: list[dict],
+) -> tuple[KnowledgeLexiconRevision, KnowledgeIndexRevision | None, bool]:
+    if len(raw_terms) > settings.knowledge_lexicon_max_terms:
+        raise KnowledgeError(
+            "knowledge_lexicon_term_limit",
+            f"A lexicon may contain at most {settings.knowledge_lexicon_max_terms} terms",
+        )
+    for raw in raw_terms:
+        aliases = raw.get("aliases") or []
+        if len(aliases) > settings.knowledge_lexicon_max_aliases_per_term:
+            raise KnowledgeError(
+                "knowledge_lexicon_alias_limit",
+                "A lexicon term has too many aliases",
+            )
+        if str(raw.get("term_type") or "concept").casefold() not in {
+            "concept", "entity", "code", "product", "agent", "other",
+        }:
+            raise KnowledgeError(
+                "knowledge_lexicon_term_type_invalid", "Lexicon term type is invalid",
+            )
+        if len(str(raw.get("description") or "")) > 2000:
+            raise KnowledgeError(
+                "knowledge_lexicon_description_invalid",
+                "Lexicon term description exceeds 2000 characters",
+            )
+    try:
+        terms = normalize_lexicon_terms(raw_terms)
+    except ValueError as error:
+        raise KnowledgeError("knowledge_lexicon_invalid", str(error)) from error
+    content_hash = _digest(terms)
+    current = await current_knowledge_lexicon(db, knowledge_base)
+    if current is not None and current.content_hash == content_hash:
+        return current, None, True
+    revision = await db.scalar(select(KnowledgeLexiconRevision).where(
+        KnowledgeLexiconRevision.knowledge_base_id == knowledge_base.id,
+        KnowledgeLexiconRevision.tenant_id == knowledge_base.tenant_id,
+        KnowledgeLexiconRevision.content_hash == content_hash,
+    ).with_for_update())
+    if revision is None:
+        revision = KnowledgeLexiconRevision(
+            id=uuid7(), tenant_id=knowledge_base.tenant_id,
+            knowledge_base_id=knowledge_base.id,
+            revision_no=knowledge_base.next_lexicon_revision_no,
+            terms=terms, content_hash=content_hash,
+            created_by_account_id=account_id,
+        )
+        db.add(revision)
+        await db.flush([revision])
+        knowledge_base.next_lexicon_revision_no += 1
+    knowledge_base.current_lexicon_revision_id = revision.id
+    knowledge_base.version += 1
+    await db.flush()
+    index_revision = None
+    if knowledge_base.embedding_model_id:
+        index_revision = await schedule_semantic_index_revision(
+            db, knowledge_base=knowledge_base, account_id=account_id,
+        )
+    return revision, index_revision, False
+
+
 async def configure_knowledge_embedding(
     db, *, knowledge_base: KnowledgeBase, account_id: str,
     embedding_model_id: str,
@@ -615,10 +750,15 @@ async def schedule_semantic_index_revision(
         "filename": source_by_id[item.current_source_id].filename,
     } for item in documents if item.current_source_id in source_by_id]
     profile = spec.snapshot()
+    lexicon_revision = await current_knowledge_lexicon(db, knowledge_base)
+    retrieval_profile = _hybrid_retrieval_profile(
+        lexicon_revision=lexicon_revision,
+    )
     manifest_hash = _digest({
         "sources": manifest,
         "chunking_profile": knowledge_base.chunking_profile,
         "embedding_profile": profile,
+        "retrieval_profile": retrieval_profile,
         "vector_backend": settings.knowledge_vector_backend,
     })
     content_hash = _digest({
@@ -659,6 +799,8 @@ async def schedule_semantic_index_revision(
             chunking_profile=dict(knowledge_base.chunking_profile),
             embedding_profile=profile,
             embedding_model_version_id=version.id,
+            lexicon_revision_id=(lexicon_revision.id if lexicon_revision else None),
+            retrieval_profile=retrieval_profile,
             vector_backend=settings.knowledge_vector_backend,
             vector_collection=None, vector_point_count=0,
             document_count=len(manifest), chunk_count=0,
@@ -923,9 +1065,12 @@ def _lexical(query_terms: dict[str, int], document_terms: dict[str, int]) -> flo
 @dataclass(frozen=True)
 class SemanticSearchGroup:
     spec: EmbeddingSpec
-    credential: str
+    credential: str | None
+    dense_prepare_error: str | None
     collection: str
     revision_ids: tuple[str, ...]
+    retrieval_profile: dict
+    lexicon_terms: tuple[dict, ...]
 
 
 @dataclass(frozen=True)
@@ -1031,6 +1176,12 @@ async def prepare_detached_search(
             "id": item.id,
             "name": item.name,
             "index_revision_id": item.current_index_revision_id,
+            "retrieval_profile": dict(
+                revisions[item.current_index_revision_id].retrieval_profile or {}
+            ),
+            "lexicon_revision_id": revisions[
+                item.current_index_revision_id
+            ].lexicon_revision_id,
         } for item in bases if item.current_index_revision_id in revisions)
         local_revision_ids = [
             revision.id for revision in revisions.values()
@@ -1052,7 +1203,7 @@ async def prepare_detached_search(
             local_candidates = local_candidates[
                 :limit * settings.knowledge_vector_candidate_multiplier
             ]
-        semantic_revision_groups: dict[tuple[str, str], list[str]] = {}
+        semantic_revision_groups: dict[tuple[str, str, str | None], list[str]] = {}
         for revision in revisions.values():
             if (
                 revision.vector_backend == "qdrant"
@@ -1060,10 +1211,16 @@ async def prepare_detached_search(
                 and revision.embedding_model_version_id
             ):
                 semantic_revision_groups.setdefault(
-                    (revision.embedding_model_version_id, revision.vector_collection), [],
+                    (
+                        revision.embedding_model_version_id,
+                        revision.vector_collection,
+                        revision.lexicon_revision_id,
+                    ), [],
                 ).append(revision.id)
         semantic_groups: list[SemanticSearchGroup] = []
-        for (model_version_id, collection), revision_ids in semantic_revision_groups.items():
+        for (
+            model_version_id, collection, lexicon_revision_id
+        ), revision_ids in semantic_revision_groups.items():
             version = await db.get(ModelVersion, model_version_id)
             if version is None:
                 raise KnowledgeError(
@@ -1071,11 +1228,30 @@ async def prepare_detached_search(
                     "Indexed Embedding model evidence is unavailable",
                     status_code=503,
                 )
+            lexicon = (
+                await db.get(KnowledgeLexiconRevision, lexicon_revision_id)
+                if lexicon_revision_id else None
+            )
+            sample_revision = revisions[revision_ids[0]]
+            credential = None
+            dense_prepare_error = None
+            try:
+                credential = await resolve_provider_credential(
+                    db, version.credential_ref,
+                )
+            except Exception as error:
+                dense_prepare_error = str(
+                    getattr(error, "code", type(error).__name__)
+                )[:100]
             semantic_groups.append(SemanticSearchGroup(
-                spec=embedding_spec(version),
-                credential=await resolve_provider_credential(db, version.credential_ref),
+                spec=embedding_spec(version), credential=credential,
+                dense_prepare_error=dense_prepare_error,
                 collection=collection,
                 revision_ids=tuple(sorted(revision_ids)),
+                retrieval_profile=dict(sample_revision.retrieval_profile or {}),
+                lexicon_terms=tuple(
+                    dict(item) for item in (lexicon.terms if lexicon else [])
+                ),
             ))
         return DetachedSearchPlan(
             tenant_id=tenant_id, account_id=account_id,
@@ -1088,34 +1264,124 @@ async def prepare_detached_search(
 
 
 async def execute_detached_search(plan: DetachedSearchPlan) -> dict:
-    semantic_scores: dict[str, float] = {}
+    route_scores: dict[str, dict[str, float]] = {}
+    degraded_routes: list[dict] = []
+    skipped_routes: list[dict] = []
+    query_lexicon_matches: dict[str, dict] = {}
+    hybrid_enabled = any(
+        group.retrieval_profile.get("profile") == "qdrant.hybrid.v1"
+        for group in plan.semantic_groups
+    )
     embedding_client, vector_store = _shared_retrieval_clients()
-    try:
-        for group in plan.semantic_groups:
-            embedded = await embedding_client.embed(
-                spec=group.spec, api_key=group.credential, texts=[plan.query],
-            )
-            matches = await vector_store.query(
+    for group in plan.semantic_groups:
+        hybrid = group.retrieval_profile.get("profile") == "qdrant.hybrid.v1"
+
+        async def dense_route():
+            if group.credential is None:
+                return group.dense_prepare_error or "embedding_credential_unavailable"
+            try:
+                embedded = await embedding_client.embed(
+                    spec=group.spec, api_key=group.credential, texts=[plan.query],
+                )
+                return await (
+                    vector_store.query_dense(
+                        collection=group.collection,
+                        vector=embedded.vectors[0], tenant_id=plan.tenant_id,
+                        revision_ids=list(group.revision_ids),
+                        limit=settings.knowledge_dense_candidate_limit,
+                    ) if hybrid else vector_store.query(
+                        collection=group.collection,
+                        vector=embedded.vectors[0], tenant_id=plan.tenant_id,
+                        revision_ids=list(group.revision_ids),
+                        limit=plan.limit * settings.knowledge_vector_candidate_multiplier,
+                    )
+                )
+            except EmbeddingProviderError as error:
+                degraded_routes.append({
+                    "route": "dense", "code": error.code,
+                    "retryable": error.retryable,
+                })
+                return None
+
+        tasks: dict[str, asyncio.Task] = {
+            "dense": asyncio.create_task(dense_route()),
+        }
+        lexicon_matches = match_lexicon(plan.query, group.lexicon_terms)
+        for item in lexicon_matches:
+            query_lexicon_matches[item.term_id] = {
+                "term_id": item.term_id,
+                "canonical_name": item.canonical_name,
+                "matched_value": item.matched_value,
+            }
+        if hybrid:
+            tasks["bm25"] = asyncio.create_task(vector_store.query_sparse(
                 collection=group.collection,
-                vector=embedded.vectors[0],
+                vector=bm25_query_vector(plan.query), using="bm25",
                 tenant_id=plan.tenant_id,
                 revision_ids=list(group.revision_ids),
-                limit=plan.limit * settings.knowledge_vector_candidate_multiplier,
-            )
-            semantic_scores.update({item.id: max(0.0, item.score) for item in matches})
-    except (EmbeddingProviderError, VectorStoreError) as error:
-        raise KnowledgeError(
-            error.code,
-            "Semantic Knowledge retrieval is temporarily unavailable"
-            if error.retryable else "Semantic Knowledge retrieval configuration is invalid",
-            status_code=503,
-        ) from error
+                limit=settings.knowledge_bm25_candidate_limit,
+            ))
+            if lexicon_matches:
+                tasks["lexicon"] = asyncio.create_task(vector_store.query_sparse(
+                    collection=group.collection,
+                    vector=lexicon_vector(lexicon_matches), using="lexicon",
+                    tenant_id=plan.tenant_id,
+                    revision_ids=list(group.revision_ids),
+                    limit=settings.knowledge_lexicon_candidate_limit,
+                ))
+            else:
+                skipped_routes.append({
+                    "route": "lexicon", "reason": "no_query_term_match",
+                    "revision_ids": list(group.revision_ids),
+                })
+        for route_name, task in tasks.items():
+            try:
+                matches = await task
+            except VectorStoreError as error:
+                for pending in tasks.values():
+                    if not pending.done():
+                        pending.cancel()
+                await asyncio.gather(*tasks.values(), return_exceptions=True)
+                raise KnowledgeError(
+                    error.code,
+                    "Knowledge vector storage is temporarily unavailable"
+                    if error.retryable else "Knowledge vector storage configuration is invalid",
+                    status_code=503,
+                ) from error
+            if isinstance(matches, str):
+                degraded_routes.append({
+                    "route": "dense", "code": matches, "retryable": False,
+                })
+                continue
+            if matches is None:
+                continue
+            bucket = route_scores.setdefault(route_name, {})
+            for item in matches:
+                if item.score > 0:
+                    bucket[item.id] = max(
+                        bucket.get(item.id, float("-inf")), item.score,
+                    )
 
     local_by_id = {
         chunk_id: (score, local_vector)
         for chunk_id, score, local_vector in plan.local_candidates
     }
-    candidate_ids = set(local_by_id) | set(semantic_scores)
+    if local_by_id:
+        route_scores["legacy_local"] = {
+            chunk_id: score for chunk_id, (score, _) in local_by_id.items()
+        }
+    ranked_routes = {
+        route_name: [
+            RankedRouteHit(id=chunk_id, score=score)
+            for chunk_id, score in sorted(
+                scores.items(), key=lambda item: (-item[1], item[0]),
+            )
+        ]
+        for route_name, scores in route_scores.items()
+    }
+    fused_hits = reciprocal_rank_fusion(ranked_routes, k=RRF_K)
+    fused_by_id = {item.id: item for item in fused_hits}
+    candidate_ids = set(fused_by_id)
     planned_revision_ids = {item["index_revision_id"] for item in plan.bases}
     planned_base_by_id = {item["id"]: item for item in plan.bases}
     async with AsyncSessionLocal.begin() as db:
@@ -1155,19 +1421,24 @@ async def execute_detached_search(plan: DetachedSearchPlan) -> dict:
                     availability[source.id] = False
             if not availability[source.id]:
                 continue
-            lexical = _lexical(plan.query_terms, chunk.term_frequencies or {})
-            if chunk.id in semantic_scores:
-                semantic = semantic_scores[chunk.id]
-                score = 0.25 * lexical + 0.75 * semantic
-                profile = "semantic"
-            else:
-                score, semantic = local_by_id[chunk.id]
-                profile = "local_feature_hash"
-            if score > 0:
-                scored.append((score, chunk, source, base, lexical, semantic, profile))
+            fused = fused_by_id[chunk.id]
+            matched_terms = [
+                query_lexicon_matches[term_id]
+                for term_id in (chunk.lexicon_term_ids or [])
+                if term_id in query_lexicon_matches
+            ]
+            scored.append((
+                fused.score, chunk, source, base, fused.routes, matched_terms,
+            ))
         scored.sort(key=lambda item: (-item[0], item[1].id))
         results = []
-        for score, chunk, source, base, lexical, semantic, profile in scored[:plan.limit]:
+        for score, chunk, source, base, routes, matched_terms in scored[:plan.limit]:
+            dense_score = float(routes.get("dense", {}).get("score", 0.0))
+            lexical_score = float(routes.get("bm25", {}).get("score", 0.0))
+            retrieval_kind = (
+                "hybrid_rrf" if base["retrieval_profile"].get("profile")
+                == "qdrant.hybrid.v1" else "semantic_legacy"
+            )
             results.append({
                 "knowledge_base_id": base["id"],
                 "knowledge_base_name": base["name"],
@@ -1181,9 +1452,12 @@ async def execute_detached_search(plan: DetachedSearchPlan) -> dict:
                 "source_checksum": source.checksum,
                 "chunk_checksum": chunk.content_hash,
                 "score": round(score, 6),
-                "lexical_score": round(lexical, 6),
-                "semantic_score": round(semantic, 6),
-                "retrieval_kind": profile,
+                "rrf_score": round(score, 10),
+                "lexical_score": round(lexical_score, 6),
+                "semantic_score": round(dense_score, 6),
+                "retrieval_kind": retrieval_kind,
+                "route_evidence": routes,
+                "matched_lexicon_terms": matched_terms,
                 "excerpt": chunk.content[:1600],
                 "citation": {
                     "source_id": source.id,
@@ -1198,6 +1472,8 @@ async def execute_detached_search(plan: DetachedSearchPlan) -> dict:
         manifest = [{
             "knowledge_base_id": item["id"],
             "index_revision_id": item["index_revision_id"],
+            "retrieval_profile": item["retrieval_profile"].get("profile") or "legacy",
+            "lexicon_revision_id": item["lexicon_revision_id"],
         } for item in plan.bases if item["id"] in valid_base_ids]
         manifest_hash = _digest(manifest)
         query_hash = _digest(plan.query.encode("utf-8"))
@@ -1221,7 +1497,7 @@ async def execute_detached_search(plan: DetachedSearchPlan) -> dict:
             if existing is None:
                 snapshot_results = [{
                     key: value for key, value in item.items()
-                    if key not in {"excerpt", "lexical_score", "semantic_score"}
+                    if key != "excerpt"
                 } for item in results]
                 db.add(KnowledgeRetrievalSnapshot(
                     id=uuid7(), tenant_id=plan.tenant_id,
@@ -1230,10 +1506,20 @@ async def execute_detached_search(plan: DetachedSearchPlan) -> dict:
                     revision_manifest=manifest,
                     revision_manifest_hash=manifest_hash,
                     result_snapshot=snapshot_results,
+                    retrieval_profile={
+                        "profile": (
+                            "qdrant.hybrid.v1" if hybrid_enabled
+                            else "legacy.hybrid.v1"
+                        ),
+                        "fusion": {"profile": RRF_PROFILE, "k": RRF_K},
+                        "routes": sorted(route_scores),
+                    },
+                    degraded_routes=degraded_routes,
                     content_hash=_digest({
                         "query_hash": query_hash,
                         "revision_manifest": manifest,
                         "results": snapshot_results,
+                        "degraded_routes": degraded_routes,
                     }),
                 ))
         return {
@@ -1241,10 +1527,18 @@ async def execute_detached_search(plan: DetachedSearchPlan) -> dict:
             "count": len(results),
             "results": results,
             "revision_manifest": manifest,
+            "degraded_routes": degraded_routes,
+            "skipped_routes": skipped_routes,
             "retrieval_profile": {
-                "hybrid": "semantic.embedding.v1+local.term_frequency.v1",
+                "profile": (
+                    "qdrant.hybrid.v1" if hybrid_enabled
+                    else "semantic.embedding.v1+local.term_frequency.v1"
+                ),
                 "vector_backend": "qdrant" if plan.semantic_groups else "mysql_json",
                 "external_embedding": bool(plan.semantic_groups),
+                "routes": sorted(route_scores),
+                "fusion": {"profile": RRF_PROFILE, "k": RRF_K},
+                "reranker": {"enabled": False, "fallback": "rrf"},
             },
         }
 
@@ -1442,6 +1736,7 @@ async def knowledge_base_view(db, item: KnowledgeBase) -> dict:
         await db.get(KnowledgeIndexRevision, item.pending_index_revision_id)
         if item.pending_index_revision_id else None
     )
+    lexicon_revision = await current_knowledge_lexicon(db, item)
     document_count = len(list(await db.scalars(select(KnowledgeDocument.id).where(
         KnowledgeDocument.tenant_id == item.tenant_id,
         KnowledgeDocument.knowledge_base_id == item.id,
@@ -1464,6 +1759,7 @@ async def knowledge_base_view(db, item: KnowledgeBase) -> dict:
         "chunking_profile": dict(item.chunking_profile or {}),
         "embedding_profile": dict(item.embedding_profile or {}),
         "embedding_model_id": item.embedding_model_id,
+        "current_lexicon_revision": lexicon_revision_view(lexicon_revision),
         "version": item.version,
         "created_at": item.created_at.isoformat() if item.created_at else None,
         "updated_at": item.updated_at.isoformat() if item.updated_at else None,
@@ -1480,6 +1776,8 @@ def index_revision_view(item: KnowledgeIndexRevision) -> dict:
         "chunk_count": item.chunk_count,
         "embedding_model_version_id": item.embedding_model_version_id,
         "embedding_profile": dict(item.embedding_profile or {}),
+        "lexicon_revision_id": item.lexicon_revision_id,
+        "retrieval_profile": dict(item.retrieval_profile or {}),
         "vector_backend": item.vector_backend,
         "vector_collection": item.vector_collection,
         "vector_point_count": item.vector_point_count,

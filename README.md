@@ -35,7 +35,7 @@ make up
 - **Governed actions:** CapabilitySnapshot、Approval、ToolInvocation、Sandbox和Artifact把模型意图转换成可审计行动。
 - **Evidence over claims:** Tool结果、测试、checksum、Artifact和Verification与模型文字声明分离。
 - **Operational controls:** Group防循环诊断、Runtime控制台、Usage/成本账本和Agent版本评测门禁让执行质量可解释、可核算、可阻断。
-- **Semantic knowledge:** Tenant隔离的TXT/Markdown/PDF知识库通过独立Embedding ModelVersion和Qdrant进行语义检索，只有显式授权并启用Tool的Agent才能取得精确引用。
+- **Hybrid knowledge:** Tenant隔离的TXT/Markdown/PDF知识库通过独立Dense、BM25和领域词表召回与可解释RRF融合，只有显式授权并启用Tool的Agent才能取得精确引用。
 
 ## Group model
 
@@ -161,7 +161,7 @@ Real-model full-stack acceptance requires explicit Provider credentials and cont
 
 ## Project maturity
 
-| Area | v0.4.0 status |
+| Area | v0.4.1 status |
 | --- | --- |
 | Durable Runtime, Outbox, lease/fencing | Implemented and unit tested |
 | Chat / Plan / Group unified loop | Implemented; real-model behavior requires UAT |
@@ -169,13 +169,13 @@ Real-model full-stack acceptance requires explicit Provider credentials and cont
 | Runtime Console and Usage/cost ledger | Implemented for local administration and estimation; not customer billing |
 | Agent Eval suites and publish gates | Implemented; configured suites bind to exact candidate assembly evidence |
 | Minimum Tenant boundary | Persisted and enforced locally; not a production multi-tenant SaaS claim |
-| Semantic KnowledgeBase and citations | Real Embedding + Qdrant hybrid retrieval; durable async indexing; no directory scanning or OCR |
+| Semantic KnowledgeBase and citations | Dense + BM25 + domain lexicon over Qdrant, explainable RRF, durable async indexing; no directory scanning or OCR |
 | Tool, Skill, Browser, MCP, Artifact | Implemented in the local/UAT profile |
 | Local Workspace and Sandbox | Development/UAT only; not strong untrusted-code isolation |
 | Production OIDC/OBO/SCIM and Tenant operations | Designed, not implemented as a production profile |
 | Kubernetes, multi-AZ, committed SLO/RPO/RTO | Reference architecture only |
 
-See [`ROADMAP.md`](ROADMAP.md) for the delivery record through `v0.4.0`, [`PRODUCT.md`](PRODUCT.md) for product semantics, [`TECH.md`](TECH.md) for target architecture, and [`docs/README.md`](docs/README.md) for the authoritative documentation map.
+See [`ROADMAP.md`](ROADMAP.md) for the delivery record through `v0.4.1`, [`PRODUCT.md`](PRODUCT.md) for product semantics, [`TECH.md`](TECH.md) for target architecture, and [`docs/README.md`](docs/README.md) for the authoritative documentation map.
 
 ## Contributing and security
 

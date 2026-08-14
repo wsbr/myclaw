@@ -17,6 +17,26 @@ export interface KnowledgeIndexRevision {
   completed_at: string | null
   error_code: string | null
   error_detail: string | null
+  lexicon_revision_id: string | null
+  retrieval_profile: Record<string, unknown>
+}
+
+export interface KnowledgeLexiconTerm {
+  id?: string
+  canonical_name: string
+  term_type: 'concept' | 'entity' | 'code' | 'product' | 'agent' | 'other'
+  description: string
+  aliases: string[]
+}
+
+export interface KnowledgeLexiconRevision {
+  id: string | null
+  revision_no: number
+  content_hash: string
+  terms: KnowledgeLexiconTerm[]
+  created_at: string | null
+  index_revision?: KnowledgeIndexRevision | null
+  idempotent_replay?: boolean
 }
 
 export interface KnowledgeEmbeddingModel {
@@ -44,6 +64,7 @@ export interface KnowledgeBase {
   document_count: number
   chunking_profile: Record<string, unknown>
   embedding_profile: Record<string, unknown>
+  current_lexicon_revision: KnowledgeLexiconRevision
   version: number
   created_at: string
   updated_at: string
@@ -90,7 +111,14 @@ export interface KnowledgeSearchResult {
   score: number
   lexical_score: number
   semantic_score: number
-  retrieval_kind: 'semantic' | 'local_feature_hash'
+  retrieval_kind: 'hybrid_rrf' | 'semantic_legacy' | 'local_feature_hash'
+  rrf_score: number
+  route_evidence: Record<string, { rank: number; score: number }>
+  matched_lexicon_terms: Array<{
+    term_id: string
+    canonical_name: string
+    matched_value: string
+  }>
   excerpt: string
   citation: Record<string, unknown>
 }
@@ -121,6 +149,10 @@ export const knowledgeApi = {
     }).then(r => r.data),
   updateAccess: (id: string, agentIds: string[]) =>
     client.patch<KnowledgeBase>(`/knowledge-bases/${id}/access`, { agent_ids: agentIds }).then(r => r.data),
+  getLexicon: (id: string) =>
+    client.get<KnowledgeLexiconRevision>(`/knowledge-bases/${id}/lexicon`).then(r => r.data),
+  replaceLexicon: (id: string, terms: KnowledgeLexiconTerm[]) =>
+    client.put<KnowledgeLexiconRevision>(`/knowledge-bases/${id}/lexicon`, { terms }).then(r => r.data),
   listDocuments: (id: string) =>
     client.get<{ items: KnowledgeDocument[] }>(`/knowledge-bases/${id}/documents`).then(r => r.data.items),
   upload: (id: string, file: File) => {
@@ -129,7 +161,7 @@ export const knowledgeApi = {
     return client.post(`/knowledge-bases/${id}/documents`, form).then(r => r.data)
   },
   search: (id: string, query: string, limit = 8) =>
-    client.post<{ query: string; count: number; results: KnowledgeSearchResult[]; revision_manifest: unknown[] }>(
+    client.post<{ query: string; count: number; results: KnowledgeSearchResult[]; revision_manifest: unknown[]; degraded_routes: unknown[] }>(
       `/knowledge-bases/${id}/search`, { query, limit },
     ).then(r => r.data),
   reindex: (id: string) =>

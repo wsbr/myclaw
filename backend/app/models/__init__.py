@@ -5,6 +5,7 @@ from app.models.knowledge_v1 import (
     KnowledgeChunk,
     KnowledgeDocument,
     KnowledgeIndexRevision,
+    KnowledgeLexiconRevision,
     KnowledgeRetrievalSnapshot,
     KnowledgeSource,
 )
@@ -105,4 +106,7 @@ __all__ = [
     "UsageLedgerEntry", "UsagePriceSnapshot",
     "AgentEvalCase", "AgentEvalCaseRun", "AgentEvalRun", "AgentEvalSuite",
     "AgentEvalSuiteVersion",
+    "KnowledgeBase", "KnowledgeBaseAgentAccess", "KnowledgeChunk",
+    "KnowledgeDocument", "KnowledgeIndexRevision", "KnowledgeLexiconRevision",
+    "KnowledgeRetrievalSnapshot", "KnowledgeSource",
 ]

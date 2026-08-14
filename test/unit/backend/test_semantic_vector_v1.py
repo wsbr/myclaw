@@ -24,14 +24,22 @@ from app.services.embedding_service import (
     OpenAICompatibleEmbeddingClient,
     embedding_spec,
 )
-from app.services.knowledge_service import create_knowledge_base, ingest_source
+from app.services.knowledge_service import (
+    create_knowledge_base,
+    ingest_source,
+    search_knowledge_detached,
+)
+from app.services.sparse_retrieval_service import SparseVector
 from app.services.vector_store_service import (
     QdrantVectorStore,
     VectorPoint,
+    VectorMatch,
     collection_name,
+    hybrid_collection_name,
 )
 from app.workers.knowledge_index_worker import KnowledgeIndexWorker
 import app.workers.knowledge_index_worker as knowledge_worker_module
+import app.services.knowledge_service as knowledge_service_module
 
 
 pytestmark = pytest.mark.unit
@@ -102,6 +110,74 @@ async def test_embedding_client_uses_openai_wire_and_validates_shape():
     assert requests[0].url.path.endswith("/compatible-mode/v1/embeddings")
     assert requests[0].headers["authorization"] == "Bearer same-bailian-key"
     assert requests[0].read().decode().count('"dimensions":8') == 1
+    await http.aclose()
+
+
+@pytest.mark.asyncio
+async def test_qdrant_hybrid_collection_uses_named_dense_bm25_and_lexicon_vectors(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.vector_store_service.settings.knowledge_qdrant_collection_prefix",
+        "myclaw_test",
+    )
+    observed: list[tuple[str, str, dict | None]] = []
+    collection_exists = False
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal collection_exists
+        body = __import__("json").loads(request.content) if request.content else None
+        observed.append((request.method, request.url.path, body))
+        if request.method == "GET" and request.url.path.startswith("/collections/"):
+            if not collection_exists:
+                return httpx.Response(404, json={"status": "not found"})
+            return httpx.Response(200, json={
+                "result": {"config": {"params": {
+                    "vectors": {"dense": {"size": 3, "distance": "Cosine"}},
+                    "sparse_vectors": {
+                        "bm25": {}, "lexicon": {},
+                    },
+                }}},
+            })
+        if request.method == "PUT" and request.url.path.count("/") == 2:
+            collection_exists = True
+            return httpx.Response(200, json={"result": True})
+        if request.method == "POST" and request.url.path.endswith("/points/query"):
+            return httpx.Response(200, json={
+                "result": {"points": [{"id": "chunk-1", "score": 1.25}]},
+            })
+        return httpx.Response(200, json={"result": True})
+
+    http = httpx.AsyncClient(
+        base_url="http://qdrant.test:6333", transport=httpx.MockTransport(handler),
+    )
+    store = QdrantVectorStore(client=http)
+    name = hybrid_collection_name(dimensions=3, model_content_hash="c" * 64)
+    await store.ensure_hybrid_collection(name=name, dimensions=3)
+    await store.upsert(collection=name, points=[VectorPoint(
+        id="chunk-1", vector=(1.0, 0.0, 0.0),
+        bm25=SparseVector((7,), (1.25,)),
+        lexicon=SparseVector((9,), (1.0,)),
+        payload={
+            "tenant_id": "tenant-a", "knowledge_base_id": "base-a",
+            "index_revision_id": "revision-a",
+        },
+    )])
+    sparse_matches = await store.query_sparse(
+        collection=name, vector=SparseVector((7,), (1.0,)), using="bm25",
+        tenant_id="tenant-a", revision_ids=["revision-a"], limit=80,
+    )
+    assert sparse_matches[0].score == pytest.approx(1.25)
+    create = next(
+        item for item in observed
+        if item[0] == "PUT" and item[1] == f"/collections/{name}"
+    )
+    assert create[2]["sparse_vectors"] == {
+        "bm25": {}, "lexicon": {},
+    }
+    upsert = next(item for item in observed if item[1].endswith("/points"))
+    assert set(upsert[2]["points"][0]["vector"]) == {"dense", "bm25", "lexicon"}
+    query = next(item for item in observed if item[0] == "POST")
+    assert query[2]["using"] == "bm25"
+    assert query[2]["query"] == {"indices": [7], "values": [1.0]}
     await http.aclose()
 
 
@@ -292,9 +368,20 @@ async def test_semantic_revision_is_durable_and_worker_publishes_only_after_vect
             assert dimensions == 8
             assert name.startswith("myclaw_knowledge_d8_")
 
+        async def ensure_hybrid_collection(self, *, name, dimensions):
+            assert dimensions == 8
+            assert name.startswith("myclaw_knowledge_hybrid_v1_d8_")
+
         async def upsert(self, *, collection, points):
             del collection
             self.points.extend(points)
+
+        async def query_dense(self, **_kwargs):
+            return [VectorMatch(id=self.points[0].id, score=0.93)]
+
+        async def query_sparse(self, *, using, **_kwargs):
+            score = 4.2 if using == "bm25" else 1.0
+            return [VectorMatch(id=self.points[0].id, score=score)]
 
         async def close(self):
             return None
@@ -320,9 +407,51 @@ async def test_semantic_revision_is_durable_and_worker_publishes_only_after_vect
         ))
         assert revision.status == "ready"
         assert revision.vector_backend == "qdrant"
+        assert revision.retrieval_profile["profile"] == "qdrant.hybrid.v1"
         assert revision.vector_point_count == len(chunks) == len(vectors.points) > 0
+        assert all(point.bm25 and point.bm25.indices for point in vectors.points)
+        assert all(point.lexicon is not None for point in vectors.points)
         assert all(chunk.embedding_checksum for chunk in chunks)
         assert base.current_index_revision_id == revision_id
         assert base.pending_index_revision_id is None
         assert command.status == "completed"
+
+    monkeypatch.setattr(knowledge_service_module, "AsyncSessionLocal", factory)
+    monkeypatch.setattr(
+        knowledge_service_module, "_retrieval_embedding_client", FakeEmbedding(),
+    )
+    monkeypatch.setattr(
+        knowledge_service_module, "_retrieval_vector_store", vectors,
+    )
+    result = await search_knowledge_detached(
+        tenant_id=tenant_id, account_id=account_id, agent_id=None,
+        knowledge_base_id=base_id, query="恢复 检查点", limit=5,
+    )
+    assert result["retrieval_profile"]["profile"] == "qdrant.hybrid.v1"
+    assert result["degraded_routes"] == []
+    assert result["results"][0]["retrieval_kind"] == "hybrid_rrf"
+    assert set(result["results"][0]["route_evidence"]) == {"dense", "bm25"}
+
+    class FailingEmbedding:
+        async def embed(self, **_kwargs):
+            raise EmbeddingProviderError(
+                "embedding_provider_unavailable", "offline", retryable=True,
+            )
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(
+        knowledge_service_module, "_retrieval_embedding_client", FailingEmbedding(),
+    )
+    degraded = await search_knowledge_detached(
+        tenant_id=tenant_id, account_id=account_id, agent_id=None,
+        knowledge_base_id=base_id, query="恢复 检查点", limit=5,
+    )
+    assert degraded["results"]
+    assert set(degraded["results"][0]["route_evidence"]) == {"bm25"}
+    assert degraded["degraded_routes"] == [{
+        "route": "dense", "code": "embedding_provider_unavailable",
+        "retryable": True,
+    }]
     await engine.dispose()

@@ -221,6 +221,31 @@ Verification gate:
   Conformance, index a document into Qdrant and retrieve a semantically related
   query with revision/checksum citations.
 
+## v0.4.1 — Three-route hybrid retrieval
+
+Core delivered:
+
+- project independent named Dense, sparse BM25 with revision-frozen IDF, and conditional
+  domain-lexicon vectors instead of refining only Dense candidates;
+- freeze tokenizer/BM25 parameters, lexicon identity and RRF parameters into
+  every immutable IndexRevision;
+- publish owner-managed immutable LexiconRevisions and rebuild the complete
+  projection before advancing the current index pointer;
+- fuse independent route ranks with deterministic RRF and retain per-route
+  rank/raw score plus matched canonical-term evidence;
+- degrade an unavailable query Embedding route to BM25/Lexicon with explicit
+  evidence while keeping Qdrant authority/projection errors fail-closed;
+- keep legacy local and dense-only Qdrant revisions readable.
+
+Verification gate:
+
+- deterministic tests cover Unicode/CJK tokenization, sparse vectors, alias
+  ambiguity, Qdrant named-vector wire shape, RRF evidence, publish ordering and
+  Dense degradation;
+- clean MySQL migration reaches `0042`, frontend/API contracts build, and real
+  UAT independently proves Dense, exact-code BM25 and cross-language alias
+  retrieval against one immutable revision.
+
 ## Common definition of done
 
 Every roadmap capability must include:

@@ -4,6 +4,31 @@ All notable changes to MyClaw are documented in this file. The format follows [K
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-08-15
+
+### Added
+
+- Added independent Qdrant named-vector routes for Dense semantic retrieval,
+  sparse BM25 retrieval with revision-frozen IDF, and an optional tenant-owned domain
+  lexicon route.
+- Added immutable domain lexicon revisions with canonical terms, aliases,
+  stable term identities, ambiguity validation, an owner API, and Knowledge
+  console editing.
+- Added deterministic reciprocal-rank fusion with per-result route rank/score,
+  matched-term evidence, frozen retrieval profiles, and Runner snapshot
+  evidence for degraded routes.
+- Added real-UAT assertions for independent Dense, exact-code BM25, and
+  cross-language lexicon-alias recall.
+
+### Changed
+
+- Replaced the candidate-only lexical score blend with three independent
+  retrievers; raw cosine and BM25 scores are no longer added across scales.
+- Kept old Qdrant and feature-hash revisions readable while publishing new
+  hybrid revisions only after every dense and sparse vector is acknowledged.
+- Dense Provider failure now degrades explicitly to BM25 plus any matched
+  lexicon route; a Qdrant authority/projection failure remains fail-closed.
+
 ## [0.4.0] - 2026-08-15
 
 ### Added

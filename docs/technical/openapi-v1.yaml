@@ -1768,6 +1768,26 @@ paths:
         '200': {description: Embedding model selected and semantic reindex queued., content: {application/json: {schema: {$ref: '#/components/schemas/KnowledgeBase'}}}}
         default: {$ref: '#/components/responses/Error'}
 
+  /knowledge-bases/{knowledge_base_id}/lexicon:
+    parameters:
+      - {$ref: '#/components/parameters/KnowledgeBaseId'}
+      - {$ref: '#/components/parameters/RawUserId'}
+    get:
+      tags: [Knowledge]
+      operationId: getKnowledgeLexicon
+      responses:
+        '200': {description: Current immutable domain lexicon revision., content: {application/json: {schema: {$ref: '#/components/schemas/KnowledgeLexiconRevision'}}}}
+        default: {$ref: '#/components/responses/Error'}
+    put:
+      tags: [Knowledge]
+      operationId: replaceKnowledgeLexicon
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/KnowledgeLexiconReplace'}}}
+      responses:
+        '200': {description: Immutable lexicon revision selected and hybrid reindex queued., content: {application/json: {schema: {$ref: '#/components/schemas/KnowledgeLexiconRevision'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
   /knowledge-bases/{knowledge_base_id}/documents:
     get:
       tags: [Knowledge]
@@ -3565,7 +3585,7 @@ components:
     KnowledgeIndexRevision:
       type: object
       additionalProperties: false
-      required: [id, revision_no, status, source_manifest_hash, document_count, chunk_count, embedding_model_version_id, embedding_profile, vector_backend, vector_collection, vector_point_count, error_code, error_detail, content_hash, built_at, started_at, completed_at]
+      required: [id, revision_no, status, source_manifest_hash, document_count, chunk_count, embedding_model_version_id, embedding_profile, lexicon_revision_id, retrieval_profile, vector_backend, vector_collection, vector_point_count, error_code, error_detail, content_hash, built_at, started_at, completed_at]
       properties:
         id: {$ref: '#/components/schemas/Uuid'}
         revision_no: {type: integer, format: int64, minimum: 1}
@@ -3575,6 +3595,8 @@ components:
         chunk_count: {type: integer, minimum: 0}
         embedding_model_version_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
         embedding_profile: {$ref: '#/components/schemas/JsonObject'}
+        lexicon_revision_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        retrieval_profile: {$ref: '#/components/schemas/JsonObject'}
         vector_backend: {type: string, enum: [mysql_json, qdrant]}
         vector_collection: {type: [string, 'null']}
         vector_point_count: {type: integer, minimum: 0}
@@ -3587,7 +3609,7 @@ components:
     KnowledgeBase:
       type: object
       additionalProperties: false
-      required: [id, tenant_id, owner_account_id, name, description, sharing_policy, status, agent_ids, current_index_revision, pending_index_revision, embedding_model_id, document_count, chunking_profile, embedding_profile, version, created_at, updated_at]
+      required: [id, tenant_id, owner_account_id, name, description, sharing_policy, status, agent_ids, current_index_revision, pending_index_revision, embedding_model_id, current_lexicon_revision, document_count, chunking_profile, embedding_profile, version, created_at, updated_at]
       properties:
         id: {$ref: '#/components/schemas/Uuid'}
         tenant_id: {$ref: '#/components/schemas/Uuid'}
@@ -3600,6 +3622,7 @@ components:
         current_index_revision: {oneOf: [{$ref: '#/components/schemas/KnowledgeIndexRevision'}, {type: 'null'}]}
         pending_index_revision: {oneOf: [{$ref: '#/components/schemas/KnowledgeIndexRevision'}, {type: 'null'}]}
         embedding_model_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        current_lexicon_revision: {$ref: '#/components/schemas/KnowledgeLexiconRevision'}
         document_count: {type: integer, minimum: 0}
         chunking_profile: {$ref: '#/components/schemas/JsonObject'}
         embedding_profile: {$ref: '#/components/schemas/JsonObject'}
@@ -3649,6 +3672,34 @@ components:
       required: [agent_ids]
       properties:
         agent_ids: {type: array, maxItems: 100, uniqueItems: true, items: {$ref: '#/components/schemas/Uuid'}}
+    KnowledgeLexiconTerm:
+      type: object
+      additionalProperties: false
+      required: [canonical_name, term_type, description, aliases]
+      properties:
+        id: {$ref: '#/components/schemas/Sha256'}
+        canonical_name: {type: string, minLength: 1, maxLength: 200}
+        term_type: {type: string, enum: [concept, entity, code, product, agent, other]}
+        description: {type: string, maxLength: 2000}
+        aliases: {type: array, maxItems: 100, uniqueItems: true, items: {type: string, minLength: 1, maxLength: 200}}
+    KnowledgeLexiconReplace:
+      type: object
+      additionalProperties: false
+      required: [terms]
+      properties:
+        terms: {type: array, maxItems: 10000, items: {$ref: '#/components/schemas/KnowledgeLexiconTerm'}}
+    KnowledgeLexiconRevision:
+      type: object
+      additionalProperties: true
+      required: [id, revision_no, content_hash, terms, created_at]
+      properties:
+        id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        revision_no: {type: integer, format: int64, minimum: 0}
+        content_hash: {$ref: '#/components/schemas/Sha256'}
+        terms: {type: array, items: {$ref: '#/components/schemas/KnowledgeLexiconTerm'}}
+        created_at: {oneOf: [{$ref: '#/components/schemas/Timestamp'}, {type: 'null'}]}
+        index_revision: {oneOf: [{$ref: '#/components/schemas/KnowledgeIndexRevision'}, {type: 'null'}]}
+        idempotent_replay: {type: boolean}
     KnowledgeReconcileRequest:
       type: object
       additionalProperties: false
@@ -3730,7 +3781,7 @@ components:
     KnowledgeSearchResult:
       type: object
       additionalProperties: false
-      required: [knowledge_base_id, knowledge_base_name, index_revision_id, document_id, source_id, chunk_id, filename, page_number, section, source_checksum, chunk_checksum, score, lexical_score, semantic_score, retrieval_kind, excerpt, citation]
+      required: [knowledge_base_id, knowledge_base_name, index_revision_id, document_id, source_id, chunk_id, filename, page_number, section, source_checksum, chunk_checksum, score, rrf_score, lexical_score, semantic_score, retrieval_kind, route_evidence, matched_lexicon_terms, excerpt, citation]
       properties:
         knowledge_base_id: {$ref: '#/components/schemas/Uuid'}
         knowledge_base_name: {type: string}
@@ -3744,20 +3795,25 @@ components:
         source_checksum: {$ref: '#/components/schemas/Sha256'}
         chunk_checksum: {$ref: '#/components/schemas/Sha256'}
         score: {type: number, minimum: 0}
+        rrf_score: {type: number, minimum: 0}
         lexical_score: {type: number, minimum: 0}
         semantic_score: {type: number, minimum: 0}
-        retrieval_kind: {type: string, enum: [semantic, local_feature_hash]}
+        retrieval_kind: {type: string, enum: [hybrid_rrf, semantic_legacy, local_feature_hash]}
+        route_evidence: {$ref: '#/components/schemas/JsonObject'}
+        matched_lexicon_terms: {type: array, items: {$ref: '#/components/schemas/JsonObject'}}
         excerpt: {type: string, maxLength: 1600}
         citation: {$ref: '#/components/schemas/JsonObject'}
     KnowledgeSearchResponse:
       type: object
       additionalProperties: false
-      required: [query, count, results, revision_manifest, retrieval_profile]
+      required: [query, count, results, revision_manifest, degraded_routes, skipped_routes, retrieval_profile]
       properties:
         query: {type: string}
         count: {type: integer, minimum: 0, maximum: 20}
         results: {type: array, maxItems: 20, items: {$ref: '#/components/schemas/KnowledgeSearchResult'}}
         revision_manifest: {type: array, items: {$ref: '#/components/schemas/JsonObject'}}
+        degraded_routes: {type: array, items: {$ref: '#/components/schemas/JsonObject'}}
+        skipped_routes: {type: array, items: {$ref: '#/components/schemas/JsonObject'}}
         retrieval_profile: {$ref: '#/components/schemas/JsonObject'}
 
     ExecutionEvent:

@@ -65,7 +65,13 @@ class KnowledgeBase(Base, TimestampMixin, VersionMixin):
     embedding_model_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("model.id"),
     )
+    current_lexicon_revision_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("knowledge_lexicon_revision.id"),
+    )
     next_revision_no: Mapped[int] = mapped_column(BigInteger, default=1, nullable=False)
+    next_lexicon_revision_no: Mapped[int] = mapped_column(
+        BigInteger, default=1, nullable=False,
+    )
     chunking_profile: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     embedding_profile: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
 
@@ -177,6 +183,44 @@ class KnowledgeSource(Base):
     )
 
 
+class KnowledgeLexiconRevision(Base):
+    """Immutable tenant-owned domain vocabulary consumed by one or more indexes."""
+
+    __tablename__ = "knowledge_lexicon_revision"
+    __table_args__ = (
+        UniqueConstraint(
+            "knowledge_base_id", "revision_no",
+            name="uq_knowledge_lexicon_revision_no",
+        ),
+        UniqueConstraint(
+            "knowledge_base_id", "content_hash",
+            name="uq_knowledge_lexicon_content_hash",
+        ),
+        UniqueConstraint("id", "tenant_id", name="uq_knowledge_lexicon_id_tenant"),
+        Index(
+            "ix_knowledge_lexicon_tenant_base_revision",
+            "tenant_id", "knowledge_base_id", "revision_no",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
+    tenant_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("tenant.id"), nullable=False,
+    )
+    knowledge_base_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("knowledge_base.id"), nullable=False,
+    )
+    revision_no: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    terms: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_by_account_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("platform_account.id"), nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), default=utcnow, nullable=False,
+    )
+
+
 class KnowledgeIndexRevision(Base):
     __tablename__ = "knowledge_index_revision"
     __table_args__ = (
@@ -214,6 +258,10 @@ class KnowledgeIndexRevision(Base):
     embedding_model_version_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("model_version.id"),
     )
+    lexicon_revision_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("knowledge_lexicon_revision.id"),
+    )
+    retrieval_profile: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     vector_backend: Mapped[str] = mapped_column(
         String(32), default="mysql_json", nullable=False,
     )
@@ -269,6 +317,7 @@ class KnowledgeChunk(Base):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     term_frequencies: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    lexicon_term_ids: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
     vector: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     embedding_checksum: Mapped[str | None] = mapped_column(String(64))
     token_count: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -304,6 +353,8 @@ class KnowledgeRetrievalSnapshot(Base):
     revision_manifest: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
     revision_manifest_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     result_snapshot: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    retrieval_profile: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    degraded_routes: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=False), default=utcnow, nullable=False,
