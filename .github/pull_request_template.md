@@ -15,7 +15,7 @@ Describe the user-visible behavior and the reason for the change.
 - [ ] Compose configuration validates
 - [ ] Repository secret check passes
 - [ ] Regression test added or not applicable
-- [ ] Real-model/UAT evidence attached when Agent behavior changed
+- [ ] Sanitized acceptance summary or protected artifact link included when Agent behavior changed
 
 ## Documentation
 

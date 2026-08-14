@@ -50,6 +50,7 @@ redis_data/
 test/results/
 test/test-results/
 test/playwright-results/
+docs/acceptance/
 
 # Generated local state
 .env.tmp.*

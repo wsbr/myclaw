@@ -1,6 +1,6 @@
 # MyClaw 技术设计总览
 
-> 本文描述目标架构，不表示当前代码完成度。产品语义以[权威模块](docs/README.md)为准；第一阶段实现契约见[第一阶段 Agent-native 交付技术方案](docs/technical/phase-one-agent-native-delivery.md)。
+> 本文描述目标架构，不表示当前代码完成度。产品语义以[核心模块](docs/README.md#core-concepts)为准，数据、状态和接口细节以[技术契约](docs/technical/README.md)为准。
 
 ## 架构目标
 
@@ -309,32 +309,17 @@ Session Workspace 物理上可共享，但 File Tool 强制区分每个 Agent �
 
 生产默认 SLO 为 API 99.90%，MySQL RPO ≤5 分钟/RTO ≤60 分钟；其余性能、Workspace/Artifact 恢复目标、网络、安全、发布和演练合同见[企业生产参考架构](docs/technical/production-reference-architecture.md)与[生产就绪要求](docs/operations/production-readiness.md)。接口实现必须符合 [OpenAPI 3.1](docs/technical/openapi-v1.yaml)。这些文档定义落地方式；当前实现是否已满足仍只由绑定 clean SHA 的测试和演练证据决定。
 
-实现优先级是删除错误 Harness 主链，再增加最少新能力：
-
-1. 删除 `finalize_response`、`required_tool_keys` 和 Tool 类型消费；
-2. 统一 Provider Turn：普通消息 + native Tool Call + stop reason；
-3. 在三个模式共用的 Loop 上实现 Capability、等待和恢复；
-4. 增加任意模式可用的 WorkingPlan；
-5. 把 Plan 改为 permission mode；
-6. 让 Group 从 Agent Network 直接选人并使用 Membership；
-7. 用确定性 UAT Gate 验证九例和 Artifact；
-8. 完成自然语言稳定性、故障注入和恢复测试。
-
-详细实施见[第一阶段 Agent-native 交付技术方案](docs/technical/phase-one-agent-native-delivery.md)。
-
 ## 文档导航
 
 - [设计哲学](docs/DESIGN_PHILOSOPHY.md)
 - [产品总览](PRODUCT.md)
-- [Agent-native Harness 调研](docs/technical/agent-native-harness-research.md)
 - [Enterprise Agent Network](docs/modules/enterprise-agent-network.md)
-- [第一阶段交付边界](docs/modules/phase-one-scope.md)
 - [Agent 装配](docs/modules/agent-assembly.md)
 - [Agent 协作](docs/modules/agent-collaboration.md)
 - [Plan 模式](docs/modules/plan-mode.md)
 - [Group 模式](docs/modules/group-mode.md)
 - [Runtime 执行](docs/modules/runtime-execution.md)
-- [第一阶段 Agent-native 交付技术方案](docs/technical/phase-one-agent-native-delivery.md)
+- [验证说明](docs/VALIDATION.md)
 - [数据库契约](docs/technical/database-schema.md)
 - [状态机](docs/technical/state-machines.md)
 - [API 与 SSE](docs/technical/api-sse.md)

@@ -2,6 +2,12 @@
 
 All notable changes to MyClaw are documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases use semantic versioning.
 
+## [Unreleased]
+
+### Changed
+
+- Streamlined the public documentation, removed environment-specific acceptance artifacts and superseded internal plans, and added validation, release, link, and metadata hygiene gates.
+
 ## [0.1.0] - 2026-08-14
 
 ### Added

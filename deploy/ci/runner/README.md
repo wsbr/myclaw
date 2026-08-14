@@ -1,6 +1,6 @@
 # 自建 CI Runner 基线
 
-第一阶段的空库 MySQL、双 Runtime Worker、Worker 重启和 Chromium 验收需要 Docker Compose。本目录提供厂商无关的 Linux Runner 镜像；后续可由自建 Jenkins、GitLab Runner、Woodpecker 或其他编排器调用，不依赖 GitHub Actions 或 Gitee Go。
+空库 MySQL、双 Runtime Worker、Worker 重启和 Chromium 全栈验收需要 Docker Compose。本目录提供厂商无关的 Linux Runner 镜像，可由 Jenkins、GitLab Runner、Woodpecker 或其他编排器调用。
 
 构建 Runner：
 
@@ -39,8 +39,8 @@ test/scripts/run_ci_gates.sh standard
 
 ```bash
 export MYCLAW_LLM_MODE=real
-export MYCLAW_REAL_LLM_ENDPOINT='https://dashscope.aliyuncs.com/compatible-mode/v1'
-export MYCLAW_REAL_LLM_MODEL='qwen3.5-plus'
+export MYCLAW_REAL_LLM_ENDPOINT='https://provider.example/v1'
+export MYCLAW_REAL_LLM_MODEL='real-model-id'
 test/scripts/run_ci_gates.sh real
 ```
 

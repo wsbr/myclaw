@@ -15,6 +15,21 @@ fi
 allowed_sensitive_paths='^(\.env\.example|deploy/uat/\.env\.example|deploy/uat_single_node/\.env\.example|test/\.env\.test|test/\.env\.test\.example)$'
 sensitive_path_pattern='(^|/)(\.env($|\.)|[^/]*\.(pem|key|p12|pfx)$|id_rsa$|id_ed25519$|backups?/|[^/]*\.sql(\.gz)?$)'
 credential_pattern='-----BEGIN (RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----|(^|[^A-Za-z0-9])(sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{40,}|AKIA[0-9A-Z]{16})([^A-Za-z0-9]|$)'
+local_document_metadata_pattern='/Users/[^/[:space:]]+/|[A-Za-z0-9._-]+deMacBook(-Pro)?\.local'
+
+tracked_acceptance_evidence="$(git ls-files docs/acceptance)"
+if [ -n "$tracked_acceptance_evidence" ]; then
+  echo "Refusing release: raw acceptance material is tracked under docs/acceptance:" >&2
+  printf '%s\n' "$tracked_acceptance_evidence" >&2
+  exit 1
+fi
+
+local_document_metadata="$(git grep -I -l -E -- "$local_document_metadata_pattern" -- '*.md' '*.xml' 2>/dev/null || true)"
+if [ -n "$local_document_metadata" ]; then
+  echo "Refusing release: local machine metadata exists in public documentation:" >&2
+  printf '%s\n' "$local_document_metadata" >&2
+  exit 1
+fi
 
 tracked_sensitive="$({ git ls-files | grep -E "$sensitive_path_pattern" || true; } | grep -Ev "$allowed_sensitive_paths" || true)"
 if [ -n "$tracked_sensitive" ]; then

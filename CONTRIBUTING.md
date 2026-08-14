@@ -42,7 +42,7 @@ At minimum, changes must pass:
 - the frontend TypeScript production build;
 - Docker Compose configuration validation.
 
-Real-model or external-Provider changes should also include evidence from the applicable UAT suite. Never place real credentials in fixtures, logs, screenshots, traces, or issue text.
+Real-model or external-Provider changes should include a sanitized acceptance summary or a link to an access-controlled CI artifact. Do not commit raw screenshots, transcripts, traces, reports, environment metadata, or real credentials.
 
 ## Pull requests
 

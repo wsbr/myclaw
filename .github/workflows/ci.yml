@@ -24,6 +24,8 @@ jobs:
           fetch-depth: 0
       - name: Scan tracked files and Git history
         run: ./scripts/check_repository_secrets.sh --history
+      - name: Check public documentation
+        run: ./scripts/check_documentation.sh
       - name: Check patch whitespace
         run: git diff --check HEAD~1 HEAD || git diff --check
       - name: Validate Compose configuration

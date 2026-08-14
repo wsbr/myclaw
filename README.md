@@ -95,7 +95,7 @@ After signing in:
 4. Run Provider conformance and activate the passing version.
 5. Create and publish an AgentVersion using that model.
 
-For the persistent UAT environment on port `8181`, follow [`deploy/uat/README.md`](deploy/uat/README.md). UAT secrets and evidence remain outside Git.
+Release and acceptance rules are documented in [`docs/VALIDATION.md`](docs/VALIDATION.md). Raw UAT evidence, credentials, environment metadata, backups, and user workspaces remain outside Git.
 
 ### Useful commands
 
@@ -135,7 +135,7 @@ Then run deterministic tests:
 make test
 ```
 
-Real-model full-stack acceptance requires explicit Provider secrets and is documented in [`test/README.md`](test/README.md). CI never uses a surrogate model to claim Agent behavior passed.
+Real-model full-stack acceptance requires explicit Provider credentials and controlled evidence handling. See [`docs/VALIDATION.md`](docs/VALIDATION.md) and [`test/README.md`](test/README.md). CI never uses a surrogate model to claim Agent behavior passed.
 
 ## Project maturity
 

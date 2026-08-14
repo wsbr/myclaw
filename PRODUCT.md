@@ -169,17 +169,11 @@ Tool 在授权期间持续可见，不因成功一次被消费。是否重复执
 
 用户不需要手工调度每个步骤，也不需要知道内部 Tool key。
 
-## 第一阶段产品验证
+## 验证与成熟度
 
-第一阶段固定五个 UAT Agent 和“Sprint 容量风险计算器”场景：
+确定性测试用于验证持久状态、权限、调度、恢复和接口契约；真实模型验收用于验证 Chat、Plan、Tool use 和涌现式 Group 行为。两者不能互相替代，模型输出也不能替代真实 Tool、Artifact 或业务状态。
 
-- 个人工作助手验证 Chat；
-- 项目经理验证显式 Plan 的“只读规划 → 用户批准 → 动态实施”；
-- 产品、开发、测试验证正常 Chat 中语义选员、Chat 后涌现、单 Run 冻结快照的对等 Group 协作。
-
-验收重点是同一 Agent Loop、自然语言、稳定 Tool Calling、动态计划、持久等待、恢复、真实九例和 Artifact，而不是 Proposal JSON、冻结 DAG、Group 模板或 LLM 完成合同。
-
-详细范围见[第一阶段交付边界](docs/modules/phase-one-scope.md)，实现方案见[第一阶段 Agent-native 交付技术方案](docs/technical/phase-one-agent-native-delivery.md)。目标用户、替代方案、价值指标、成本和多 Agent 对照实验见[产品价值验证](docs/modules/product-validation.md)；当前仍是待验证假设，不宣称已证明商业价值。
+当前实现范围和限制以 [README 成熟度表](README.md#project-maturity)为准，验证与证据边界见[验证说明](docs/VALIDATION.md)。目标用户、替代方案、价值指标、成本和多 Agent 对照实验见[产品价值验证](docs/modules/product-validation.md)；这些仍是待验证假设，不宣称已证明商业价值。
 
 企业生产不是把第一阶段 Compose 直接换一个部署名称。正式产品 Profile 必须使用受验证的 OIDC/OBO 身份、强隔离 Sandbox、HA 数据与存储、明确 SLO/RPO/RTO 和绑定 release 的演练证据；具体落地合同见[企业生产参考架构](docs/technical/production-reference-architecture.md)与[生产就绪要求](docs/operations/production-readiness.md)。
 
@@ -192,7 +186,7 @@ Tool 在授权期间持续可见，不因成功一次被消费。是否重复执
 - 不因一次成功调用删除整个 Tool 能力；
 - 不把 WorkingPlan 当作平台可执行 DAG；
 - 不为 Group 强制角色模板、固定拓扑或永久 Supervisor；
-- 不把第一阶段固定成员写成终局产品限制；
+- 不把验收 fixture 的固定成员写成终局产品限制；
 - 不共享 Agent 私有 Prompt、Memory、凭证和 Chain-of-Thought；
 - 不让文字声称代替真实 Tool、测试、Artifact 和业务状态。
 
@@ -200,12 +194,12 @@ Tool 在授权期间持续可见，不因成功一次被消费。是否重复执
 
 - [设计哲学与产品原则](docs/DESIGN_PHILOSOPHY.md)
 - [Enterprise Agent Network](docs/modules/enterprise-agent-network.md)
-- [第一阶段交付边界](docs/modules/phase-one-scope.md)
 - [Agent 装配](docs/modules/agent-assembly.md)
 - [Agent 协作](docs/modules/agent-collaboration.md)
 - [Plan 模式](docs/modules/plan-mode.md)
 - [Group 模式](docs/modules/group-mode.md)
 - [Runtime 执行](docs/modules/runtime-execution.md)
+- [验证说明](docs/VALIDATION.md)
 - [技术设计总览](TECH.md)
 - [企业生产参考架构](docs/technical/production-reference-architecture.md)
 - [OpenAPI 3.1](docs/technical/openapi-v1.yaml)
