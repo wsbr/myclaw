@@ -19,6 +19,7 @@ from app.services.model_registry_service import (
     ModelActivationRejected,
     ModelRegistryConflict,
     activate_model_version,
+    conformance_suite_version,
     create_logical_model,
     create_model_version,
     latest_terminal_conformance,
@@ -195,7 +196,7 @@ async def run_conformance(
     existing = await db.scalar(select(ConformanceRun).where(
         ConformanceRun.subject_type == "model_version",
         ConformanceRun.subject_id == model_version_id,
-        ConformanceRun.suite_version == settings.provider_conformance_suite_version,
+        ConformanceRun.suite_version == conformance_suite_version(version),
         ConformanceRun.idempotency_key == idempotency_key,
     ))
     run = existing or await execute_conformance_run(

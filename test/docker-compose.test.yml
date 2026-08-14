@@ -47,6 +47,18 @@ services:
       timeout: 3s
       retries: 10
 
+  qdrant-test:
+    image: qdrant/qdrant:v1.18.2
+    ports:
+      - "6337:6333"
+    tmpfs:
+      - /qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333'"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   otel-collector-test:
     image: otel/opentelemetry-collector-contrib:0.153.0
     command: ["--config=/etc/otelcol-contrib/config.yaml"]
@@ -92,6 +104,7 @@ services:
       INIT_ADMIN_PASSWORD: testpassword123
       OTEL_SERVICE_NAME: myclaw-api-test
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector-test:4318
+      KNOWLEDGE_QDRANT_URL: http://qdrant-test:6333
     depends_on:
       mysql-test:
         condition: service_healthy
@@ -128,6 +141,34 @@ services:
       OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector-test:4318
     depends_on:
       api-test:
+        condition: service_healthy
+    profiles:
+      - fullstack
+    volumes:
+      - myclaw-test-data:/var/lib/myclaw
+
+  knowledge-worker-test:
+    <<: *backend-security
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+      labels:
+        org.opencontainers.image.revision: ${MYCLAW_ACCEPTANCE_COMMIT_SHA:-unbound}
+    command: python -m app.workers.knowledge_index_worker
+    env_file: .env.test
+    environment:
+      DATABASE_URL: mysql+aiomysql://myclaw:mypassword@mysql-test:3306/myclaw_test
+      REDIS_URL: redis://:redispassword@redis-test:6379/0
+      KNOWLEDGE_QDRANT_URL: http://qdrant-test:6333
+      KNOWLEDGE_WORKER_POLL_SECONDS: "0.1"
+      KNOWLEDGE_INDEX_CLAIM_LEASE_SECONDS: "30"
+      KNOWLEDGE_INDEX_HEARTBEAT_SECONDS: "5"
+      OTEL_SERVICE_NAME: myclaw-knowledge-worker-test
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector-test:4318
+    depends_on:
+      api-test:
+        condition: service_healthy
+      qdrant-test:
         condition: service_healthy
     profiles:
       - fullstack

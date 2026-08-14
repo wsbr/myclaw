@@ -11,7 +11,7 @@ This roadmap records the dependency-ordered capability delivery from `v0.1.1` th
 | Usage and cost ledger | Core delivered | `v0.2.0` |
 | Agent evaluation and version gates | Core delivered | `v0.2.0` |
 | Minimum Tenant boundary | Core delivered | `v0.3.0` |
-| Local knowledge base | Core delivered | `v0.3.0` + `v0.3.1` hardening |
+| Managed knowledge base | Core delivered | `v0.3.0` + `v0.3.1` hardening |
 
 The milestones remain intentionally bounded. The ledger is not customer billing, an Eval gate does not prove general model quality, the local Tenant boundary is not a production SaaS identity plane, and Memory is not a document knowledge base.
 
@@ -30,7 +30,7 @@ Group diagnostic facts ──> Runtime console
 
 Usage ledger ────────────> cost budgets + Eval cost gates + console rollups
 
-Minimum Tenant boundary ─> local knowledge ownership and retrieval isolation
+Minimum Tenant boundary ─> managed knowledge ownership and retrieval isolation
 ```
 
 ## v0.1.2 — Group safety and Runtime visibility
@@ -184,6 +184,42 @@ Verification gate:
 - deletion prevents future retrieval without rewriting historical Runner evidence;
 - cross-account, cross-Agent private and cross-Tenant retrieval tests fail closed;
 - the first release works entirely on the local Compose profile without mandatory cloud storage or embedding services.
+
+## v0.4.0 — Semantic Embedding and vector retrieval
+
+This milestone advances Knowledge from the compatibility feature-hash profile
+to a real semantic retrieval path without turning the platform into a local
+directory crawler.
+
+Core delivered:
+
+- register Chat and Embedding as distinct immutable ModelVersions while
+  allowing the same Provider credential to be stored for both;
+- validate and execute an OpenAI-compatible Embedding Conformance suite, with
+  a Bailian `text-embedding-v4` / 1024-dimensional operator preset;
+- add Qdrant as a dedicated persistent vector projection with Tenant and exact
+  index-revision payload filters;
+- enqueue semantic indexing through the transactional Outbox and execute it in
+  a bounded `knowledge-worker` pool with leases, heartbeats, fencing,
+  deterministic point IDs and retry/backoff;
+- keep Provider and Qdrant calls outside long database transactions and switch
+  the current revision only after the complete projection is acknowledged;
+- provide hybrid semantic/lexical retrieval, exact citations and Runner
+  snapshots while keeping legacy revisions readable;
+- expose model selection, current/pending revision state, vector point counts
+  and failure evidence in the Knowledge console;
+- accept only explicit UI/API uploads; no filesystem watcher, local directory
+  scan or scheduled directory synchronization is introduced.
+
+Verification gate:
+
+- schema, adapter and durable worker tests cover dimensions, Provider wire
+  shape, Tenant filters, idempotent indexing and publish-after-vector ordering;
+- clean MySQL migration reaches `0041`, all Compose profiles parse, and the
+  frontend builds;
+- local UAT uses the configured real Bailian credential to pass Embedding
+  Conformance, index a document into Qdrant and retrieve a semantically related
+  query with revision/checksum citations.
 
 ## Common definition of done
 

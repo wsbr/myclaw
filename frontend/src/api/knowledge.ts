@@ -3,12 +3,30 @@ import client from './client'
 export interface KnowledgeIndexRevision {
   id: string
   revision_no: number
-  status: 'ready' | 'failed'
+  status: 'queued' | 'running' | 'ready' | 'failed'
   source_manifest_hash: string
   document_count: number
   chunk_count: number
   content_hash: string
   built_at: string
+  embedding_model_version_id: string | null
+  vector_backend: 'mysql_json' | 'qdrant'
+  vector_collection: string | null
+  vector_point_count: number
+  started_at: string | null
+  completed_at: string | null
+  error_code: string | null
+  error_detail: string | null
+}
+
+export interface KnowledgeEmbeddingModel {
+  id: string
+  key: string
+  name: string
+  model_version_id: string
+  provider: string
+  model_name: string
+  dimensions: number
 }
 
 export interface KnowledgeBase {
@@ -21,6 +39,8 @@ export interface KnowledgeBase {
   status: 'active' | 'deleted'
   agent_ids: string[]
   current_index_revision: KnowledgeIndexRevision | null
+  pending_index_revision: KnowledgeIndexRevision | null
+  embedding_model_id: string | null
   document_count: number
   chunking_profile: Record<string, unknown>
   embedding_profile: Record<string, unknown>
@@ -68,6 +88,9 @@ export interface KnowledgeSearchResult {
   source_checksum: string
   chunk_checksum: string
   score: number
+  lexical_score: number
+  semantic_score: number
+  retrieval_kind: 'semantic' | 'local_feature_hash'
   excerpt: string
   citation: Record<string, unknown>
 }
@@ -87,8 +110,15 @@ export interface KnowledgeStorageReconciliation {
 
 export const knowledgeApi = {
   list: () => client.get<{ items: KnowledgeBase[] }>('/knowledge-bases').then(r => r.data.items),
-  create: (data: { name: string; description: string; agent_ids: string[] }) =>
+  create: (data: { name: string; description: string; agent_ids: string[]; embedding_model_id?: string }) =>
     client.post<KnowledgeBase>('/knowledge-bases', data).then(r => r.data),
+  listEmbeddingModels: () => client.get<{ items: KnowledgeEmbeddingModel[] }>(
+    '/knowledge-bases/embedding-models/available',
+  ).then(r => r.data.items),
+  updateEmbeddingModel: (id: string, embeddingModelId: string) =>
+    client.patch<KnowledgeBase>(`/knowledge-bases/${id}/embedding-model`, {
+      embedding_model_id: embeddingModelId,
+    }).then(r => r.data),
   updateAccess: (id: string, agentIds: string[]) =>
     client.patch<KnowledgeBase>(`/knowledge-bases/${id}/access`, { agent_ids: agentIds }).then(r => r.data),
   listDocuments: (id: string) =>

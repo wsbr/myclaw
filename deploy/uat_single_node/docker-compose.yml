@@ -39,6 +39,15 @@ x-app-environment: &app-environment
   SKILL_SYNC_WORKER_POLL_SECONDS: ${SKILL_SYNC_WORKER_POLL_SECONDS:-1}
   SKILL_SYNC_CLAIM_LEASE_SECONDS: ${SKILL_SYNC_CLAIM_LEASE_SECONDS:-30}
   SKILL_SYNC_RECONCILE_SECONDS: ${SKILL_SYNC_RECONCILE_SECONDS:-3600}
+  KNOWLEDGE_VECTOR_BACKEND: qdrant
+  KNOWLEDGE_QDRANT_URL: http://qdrant:6333
+  KNOWLEDGE_QDRANT_API_KEY: ${KNOWLEDGE_QDRANT_API_KEY:-}
+  KNOWLEDGE_QDRANT_COLLECTION_PREFIX: ${KNOWLEDGE_QDRANT_COLLECTION_PREFIX:-myclaw_knowledge}
+  KNOWLEDGE_WORKER_POLL_SECONDS: ${KNOWLEDGE_WORKER_POLL_SECONDS:-0.5}
+  KNOWLEDGE_WORKER_CONCURRENCY: ${KNOWLEDGE_WORKER_CONCURRENCY:-2}
+  KNOWLEDGE_INDEX_CLAIM_LEASE_SECONDS: ${KNOWLEDGE_INDEX_CLAIM_LEASE_SECONDS:-300}
+  KNOWLEDGE_INDEX_HEARTBEAT_SECONDS: ${KNOWLEDGE_INDEX_HEARTBEAT_SECONDS:-30}
+  KNOWLEDGE_EMBEDDING_TIMEOUT_SECONDS: ${KNOWLEDGE_EMBEDDING_TIMEOUT_SECONDS:-60}
   MAINTENANCE_POLL_SECONDS: ${MAINTENANCE_POLL_SECONDS:-3600}
   MAINTENANCE_COMMAND_POLL_SECONDS: ${MAINTENANCE_COMMAND_POLL_SECONDS:-1}
   MAINTENANCE_COMMAND_CLAIM_LEASE_SECONDS: ${MAINTENANCE_COMMAND_CLAIM_LEASE_SECONDS:-300}
@@ -151,6 +160,16 @@ services:
     depends_on:
       api: {condition: service_healthy}
 
+  knowledge-worker:
+    <<: *backend-common
+    command: python -m app.workers.knowledge_index_worker
+    environment:
+      <<: *app-environment
+      OTEL_SERVICE_NAME: myclaw-uat-single-node-knowledge-worker
+    depends_on:
+      api: {condition: service_healthy}
+      qdrant: {condition: service_healthy}
+
   maintenance-worker:
     <<: *backend-common
     command: python -m app.workers.maintenance_worker
@@ -196,6 +215,19 @@ services:
       retries: 20
     restart: unless-stopped
 
+  qdrant:
+    image: qdrant/qdrant:v1.18.2
+    ports:
+      - "127.0.0.1:${UAT_QDRANT_PORT:-6345}:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c ':> /dev/tcp/127.0.0.1/6333'"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
   otel-volume-init:
     image: alpine:3.20
     user: "10001:10001"
@@ -230,3 +262,6 @@ volumes:
   myclaw_data:
     external: true
     name: myclaw-uat-single-node-app-data
+  qdrant_data:
+    external: true
+    name: myclaw-uat-single-node-qdrant-data

@@ -391,7 +391,10 @@ async def check_publish_capabilities(
     if model is None or not model.enabled or model.status != "active" or model_version is None:
         issues.append("model is unavailable or has no immutable current version")
     else:
-        latest_conformance = await db.scalar(
+        embedding_model = (model_version.capabilities or {}).get("model_kind") == "embedding"
+        if embedding_model:
+            issues.append("embedding models cannot be selected as an Agent chat model")
+        latest_conformance = None if embedding_model else await db.scalar(
             select(ConformanceRun)
             .where(
                 ConformanceRun.subject_type == "model_version",
@@ -402,7 +405,9 @@ async def check_publish_capabilities(
             .order_by(ConformanceRun.ended_at.desc(), ConformanceRun.created_at.desc())
             .limit(1)
         )
-        if latest_conformance is None or latest_conformance.status != "passed":
+        if not embedding_model and (
+            latest_conformance is None or latest_conformance.status != "passed"
+        ):
             issues.append(
                 f"model version has not passed {settings.provider_conformance_suite_version}"
             )

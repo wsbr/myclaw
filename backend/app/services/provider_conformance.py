@@ -11,11 +11,19 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
-from app.core.platform_secrets import resolve_secret_reference
 from app.core.model_hub.base import BaseLLM, LLMChunk, LLMResponse
 from app.core.model_hub.registry import ModelHub
 from app.models.common import utcnow, uuid7
 from app.models.registry import ConformanceRun, ModelVersion
+from app.services.embedding_service import (
+    OpenAICompatibleEmbeddingClient,
+    embedding_spec,
+    is_embedding_model,
+)
+from app.services.provider_credentials import (
+    resolve_credential,
+    resolve_provider_credential,
+)
 from app.runtime.model_adapter import ModelAdapter
 from app.runtime.context_assembler import ContextAssembler
 from app.runtime.coordination_tools import RUNTIME_COORDINATION_DEFINITIONS
@@ -131,17 +139,6 @@ def _base_probe_parameters(version: ModelVersion) -> dict[str, Any]:
         # probe cap can suppress the visible continuation despite a valid call.
         "max_tokens": min(4096, int(defaults.get("max_tokens", 512))),
     }
-
-
-def resolve_credential(reference: str | None) -> str:
-    del reference
-    raise RuntimeError("model credentials must use the platform Secret store")
-
-
-async def resolve_provider_credential(db, reference: str | None) -> str:
-    if reference and reference.startswith("secret://"):
-        return await resolve_secret_reference(db, reference)
-    return resolve_credential(reference)
 
 
 class ProviderConformanceSuite:
@@ -501,27 +498,66 @@ async def execute_conformance_run(
     version: ModelVersion,
     idempotency_key: str,
     provider: BaseLLM | None = None,
+    embedding_client: OpenAICompatibleEmbeddingClient | None = None,
 ) -> ConformanceRun:
+    suite_version = (
+        settings.embedding_conformance_suite_version
+        if is_embedding_model(version)
+        else settings.provider_conformance_suite_version
+    )
     request = {
         "model_version_id": version.id,
-        "suite_version": settings.provider_conformance_suite_version,
+        "suite_version": suite_version,
     }
     run = ConformanceRun(
         id=uuid7(), subject_type="model_version", subject_id=version.id,
-        suite_version=settings.provider_conformance_suite_version,
+        suite_version=suite_version,
         idempotency_key=idempotency_key, request_hash=_hash(request),
         status="running", started_at=utcnow(),
     )
     db.add(run)
     await db.flush()
     try:
-        if provider is None:
-            provider = ModelHub.get(
-                {}, version.provider,
-                await resolve_provider_credential(db, version.credential_ref),
-                version.endpoint,
+        if is_embedding_model(version):
+            spec = embedding_spec(version)
+            owns_embedding_client = embedding_client is None
+            client = embedding_client or OpenAICompatibleEmbeddingClient(
+                timeout_seconds=settings.knowledge_embedding_timeout_seconds,
             )
-        report = await ProviderConformanceSuite(provider).run(version)
+            try:
+                batch = await client.embed(
+                    spec=spec,
+                    api_key=await resolve_provider_credential(db, version.credential_ref),
+                    texts=["MyClaw semantic probe", "MyClaw semantic probe"],
+                )
+            finally:
+                if owns_embedding_client:
+                    await client.close()
+            left, right = batch.vectors
+            denominator = (
+                sum(value * value for value in left) ** 0.5
+                * sum(value * value for value in right) ** 0.5
+            )
+            similarity = sum(a * b for a, b in zip(left, right)) / denominator
+            passed = similarity >= 0.999
+            report = ConformanceReport(passed=passed, probes=({
+                "name": "embedding_shape_determinism",
+                "passed": passed,
+                "details": {
+                    "dimensions": len(left),
+                    "declared_dimensions": spec.dimensions,
+                    "duplicate_similarity": round(similarity, 8),
+                    "input_tokens": batch.input_tokens,
+                },
+            },))
+        else:
+            if provider is None:
+                provider = ModelHub.get(
+                    {}, version.provider,
+                    await resolve_provider_credential(db, version.credential_ref),
+                    version.endpoint,
+                )
+            report = await ProviderConformanceSuite(provider).run(version)
         run.status = "passed" if report.passed else "failed"
         run.result_summary = report.as_dict()
     except Exception as error:

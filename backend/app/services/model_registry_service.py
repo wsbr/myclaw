@@ -13,6 +13,7 @@ from app.config import settings
 from app.core.platform_secrets import secret_reference, store_secret
 from app.models.common import utcnow, uuid7
 from app.models.registry import ConformanceRun, ModelVersion, RegisteredModel
+from app.services.embedding_service import is_embedding_model
 
 
 class ModelRegistryConflict(RuntimeError):
@@ -21,6 +22,14 @@ class ModelRegistryConflict(RuntimeError):
 
 class ModelActivationRejected(ValueError):
     pass
+
+
+def conformance_suite_version(version: ModelVersion) -> str:
+    return (
+        settings.embedding_conformance_suite_version
+        if is_embedding_model(version)
+        else settings.provider_conformance_suite_version
+    )
 
 
 def _hash(value: object) -> str:
@@ -77,7 +86,11 @@ async def create_model_version(
         "endpoint": values.get("endpoint"), "credential_ref": stored_credential,
         "default_parameters": values.get("default_parameters") or {},
         "capabilities": values.get("capabilities") or {},
-        "adapter_protocol": "agent_native.v2",
+        "adapter_protocol": (
+            "embedding.openai_compatible.v1"
+            if (values.get("capabilities") or {}).get("model_kind") == "embedding"
+            else "agent_native.v2"
+        ),
     }
     hash_payload = dict(payload)
     hash_payload["credential_ref"] = f"secret-fingerprint://{secret.fingerprint}"
@@ -105,12 +118,15 @@ async def create_model_version(
 async def latest_terminal_conformance(
     db: AsyncSession, model_version_id: str,
 ) -> ConformanceRun | None:
+    version = await db.get(ModelVersion, model_version_id)
+    if version is None:
+        return None
     return await db.scalar(
         select(ConformanceRun)
         .where(
             ConformanceRun.subject_type == "model_version",
             ConformanceRun.subject_id == model_version_id,
-            ConformanceRun.suite_version == settings.provider_conformance_suite_version,
+            ConformanceRun.suite_version == conformance_suite_version(version),
             ConformanceRun.status.in_(("passed", "failed")),
         )
         .order_by(ConformanceRun.ended_at.desc(), ConformanceRun.created_at.desc())
@@ -135,7 +151,7 @@ async def activate_model_version(
     evidence = await latest_terminal_conformance(db, version.id)
     if evidence is None or evidence.status != "passed":
         raise ModelActivationRejected(
-            f"latest {settings.provider_conformance_suite_version} conformance did not pass"
+            f"latest {conformance_suite_version(version)} conformance did not pass"
         )
     model.current_version_id = version.id
     model.status = "active"

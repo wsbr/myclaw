@@ -7,6 +7,23 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 def _validate_model_capabilities(value: dict | None) -> dict | None:
     if value is None:
         return None
+    model_kind = value.get("model_kind", "chat")
+    if model_kind not in {"chat", "embedding"}:
+        raise ValueError("model_kind must be chat or embedding")
+    if model_kind == "embedding":
+        dimensions = value.get("embedding_dimensions")
+        if (
+            isinstance(dimensions, bool) or not isinstance(dimensions, int)
+            or dimensions < 8 or dimensions > 4096
+        ):
+            raise ValueError("embedding_dimensions must be an integer between 8 and 4096")
+        batch_size = value.get("embedding_max_batch_size", 10)
+        if (
+            isinstance(batch_size, bool) or not isinstance(batch_size, int)
+            or batch_size < 1 or batch_size > 2048
+        ):
+            raise ValueError("embedding_max_batch_size must be between 1 and 2048")
+        return value
     structured_output = value.get("structured_output")
     if structured_output is not None and structured_output not in {"json_schema", "json_object", "none"}:
         raise ValueError("structured_output must be json_schema, json_object, or none")
@@ -67,6 +84,20 @@ def _validate_endpoint(value: str | None) -> str | None:
 
 
 def _validate_default_output(parameters: dict, capabilities: dict) -> None:
+    if capabilities.get("model_kind") == "embedding":
+        allowed = {"dimensions", "encoding_format"}
+        unexpected = sorted(set(parameters) - allowed)
+        if unexpected:
+            raise ValueError(
+                "embedding default_parameters only support dimensions and encoding_format"
+            )
+        configured = parameters.get("dimensions")
+        declared = capabilities.get("embedding_dimensions")
+        if configured is not None and configured != declared:
+            raise ValueError("embedding dimensions must equal embedding_dimensions capability")
+        if parameters.get("encoding_format", "float") != "float":
+            raise ValueError("embedding encoding_format must be float")
+        return
     raw = parameters.get(
         "max_output_tokens", parameters.get("max_tokens", 8192),
     )

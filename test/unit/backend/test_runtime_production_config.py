@@ -125,10 +125,11 @@ def test_uat_single_node_uses_isolated_persistent_volumes_and_sha_bound_operatio
     for volume_name in (
         "myclaw-uat-single-node-mysql-data",
         "myclaw-uat-single-node-redis-data",
-        "myclaw-uat-single-node-app-data",
+            "myclaw-uat-single-node-app-data",
+            "myclaw-uat-single-node-qdrant-data",
     ):
         assert f"name: {volume_name}" in compose
-    assert compose.count("external: true") == 3
+    assert compose.count("external: true") == 4
     # Runtime containers never receive model/Search credentials as ambient
     # environment. Administrators submit them through write-only APIs and the
     # platform resolves encrypted secret references only at the call boundary.

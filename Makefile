@@ -1,6 +1,6 @@
 SHELL := /usr/bin/env bash
 
-CORE_SERVICES := mysql redis api runtime-worker sandbox-worker skill-sync-worker maintenance-worker frontend
+CORE_SERVICES := mysql redis qdrant api runtime-worker knowledge-worker sandbox-worker skill-sync-worker maintenance-worker frontend
 ALL_SERVICES := $(CORE_SERVICES) connector-worker browser-worker
 PYTEST := test/.venv/bin/pytest
 PYTHON := test/.venv/bin/python
@@ -42,7 +42,7 @@ status:
 	docker compose ps
 
 logs:
-	docker compose logs --follow --tail=200 api runtime-worker sandbox-worker frontend
+	docker compose logs --follow --tail=200 api runtime-worker knowledge-worker sandbox-worker qdrant frontend
 
 test-env:
 	@test -d test/.venv || python3 -m venv test/.venv

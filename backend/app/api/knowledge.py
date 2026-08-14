@@ -1,4 +1,4 @@
-"""Owned local KnowledgeBase administration and retrieval APIs."""
+"""Tenant-owned managed KnowledgeBase administration and retrieval APIs."""
 
 from __future__ import annotations
 
@@ -16,11 +16,13 @@ from app.models.knowledge_v1 import (
     KnowledgeDocument,
     KnowledgeSource,
 )
+from app.models.registry import ModelVersion, RegisteredModel
 from app.persistence.reliable_writes import PlatformAuditWriter
 from app.services.knowledge_service import (
     KnowledgeError,
     build_index_revision,
     create_knowledge_base,
+    configure_knowledge_embedding,
     delete_document,
     document_view,
     index_revision_view,
@@ -29,7 +31,7 @@ from app.services.knowledge_service import (
     owned_knowledge_base,
     reconcile_knowledge_storage,
     replace_agent_access,
-    search_knowledge,
+    search_knowledge_detached,
     source_view,
 )
 
@@ -41,6 +43,7 @@ class KnowledgeBaseCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     description: str = Field(default="", max_length=5000)
     agent_ids: list[str] = Field(default_factory=list, max_length=100)
+    embedding_model_id: str | None = Field(default=None, max_length=36)
 
 
 class KnowledgeAccessPatch(BaseModel):
@@ -54,6 +57,10 @@ class KnowledgeSearchRequest(BaseModel):
 
 class KnowledgeReconcileRequest(BaseModel):
     repair: bool = True
+
+
+class KnowledgeEmbeddingPatch(BaseModel):
+    embedding_model_id: str = Field(min_length=1, max_length=36)
 
 
 def _raise(error: KnowledgeError):
@@ -87,6 +94,7 @@ async def add_knowledge_base(
             db, tenant_id=current.tenant_id, account_id=current.account.id,
             name=body.name, description=body.description,
             agent_ids=body.agent_ids,
+            embedding_model_id=body.embedding_model_id,
         )
     except KnowledgeError as error:
         _raise(error)
@@ -96,12 +104,37 @@ async def add_knowledge_base(
         actor_user_id=current.account.user_id,
         resource_type="knowledge_base", resource_id=item.id,
         resource_version=item.version, outcome="succeeded",
-        summary="Local knowledge base created",
+        summary="Managed knowledge base created",
         changes={"sharing_policy": item.sharing_policy},
         dedupe_key=f"audit:knowledge_base:create:{item.id}",
     )
     await db.commit()
     return await knowledge_base_view(db, item)
+
+
+@router.get("/embedding-models/available")
+async def list_available_embedding_models(
+    db: AsyncSession = Depends(get_db),
+    current: CurrentAccount = Depends(get_current_account),
+):
+    del current
+    rows = (await db.execute(select(RegisteredModel, ModelVersion).join(
+        ModelVersion, RegisteredModel.current_version_id == ModelVersion.id,
+    ).where(
+        RegisteredModel.status == "active",
+        RegisteredModel.enabled.is_(True),
+    ).order_by(RegisteredModel.key, RegisteredModel.id))).all()
+    return {"items": [{
+        "id": model.id,
+        "key": model.key,
+        "name": model.name,
+        "model_version_id": version.id,
+        "provider": version.provider,
+        "model_name": version.model_name,
+        "dimensions": int(version.capabilities["embedding_dimensions"]),
+    } for model, version in rows if (
+        version.capabilities or {}
+    ).get("model_kind") == "embedding"]}
 
 
 @router.get("/{knowledge_base_id}")
@@ -147,6 +180,41 @@ async def patch_knowledge_access(
         summary="Knowledge Agent access replaced",
         changes={"agent_ids": agent_ids},
         dedupe_key=f"audit:knowledge_base:access:{item.id}:v{item.version}",
+    )
+    await db.commit()
+    return await knowledge_base_view(db, item)
+
+
+@router.patch("/{knowledge_base_id}/embedding-model")
+async def patch_knowledge_embedding_model(
+    knowledge_base_id: str,
+    body: KnowledgeEmbeddingPatch,
+    db: AsyncSession = Depends(get_db),
+    current: CurrentAccount = Depends(get_current_account),
+):
+    try:
+        item = await owned_knowledge_base(
+            db, tenant_id=current.tenant_id, account_id=current.account.id,
+            knowledge_base_id=knowledge_base_id, lock=True,
+        )
+        revision = await configure_knowledge_embedding(
+            db, knowledge_base=item, account_id=current.account.id,
+            embedding_model_id=body.embedding_model_id,
+        )
+    except KnowledgeError as error:
+        _raise(error)
+    await PlatformAuditWriter(db).append(
+        category="knowledge", action="knowledge_base.embedding_model_changed",
+        actor_type="account", actor_id=current.account.id,
+        actor_user_id=current.account.user_id,
+        resource_type="knowledge_base", resource_id=item.id,
+        resource_version=item.version, outcome="succeeded",
+        summary="Knowledge Embedding model changed and semantic reindex queued",
+        changes={
+            "embedding_model_id": body.embedding_model_id,
+            "index_revision_id": revision.id,
+        },
+        dedupe_key=f"audit:knowledge_base:embedding:{item.id}:v{item.version}",
     )
     await db.commit()
     return await knowledge_base_view(db, item)
@@ -208,7 +276,7 @@ async def upload_knowledge_document(
         actor_user_id=current.account.user_id,
         resource_type="knowledge_source", resource_id=source.id,
         outcome="succeeded" if source.status == "indexed" else "failed",
-        summary="Local knowledge source ingested",
+        summary="Managed knowledge source ingested",
         changes={
             "knowledge_base_id": item.id,
             "checksum": source.checksum,
@@ -239,6 +307,7 @@ async def reindex_knowledge_base(
         )
         revision = await build_index_revision(
             db, knowledge_base=item, account_id=current.account.id,
+            force_semantic_rebuild=True,
         )
     except KnowledgeError as error:
         _raise(error)
@@ -270,7 +339,7 @@ async def reconcile_knowledge_base_storage(
         actor_user_id=current.account.user_id,
         resource_type="knowledge_base", resource_id=item.id,
         resource_version=item.version, outcome="succeeded",
-        summary="Local knowledge storage reconciled",
+        summary="Managed knowledge storage reconciled",
         changes={
             "repair": body.repair,
             "healthy": result["healthy"],
@@ -293,8 +362,8 @@ async def search_one_knowledge_base(
     current: CurrentAccount = Depends(get_current_account),
 ):
     try:
-        return await search_knowledge(
-            db, tenant_id=current.tenant_id, account_id=current.account.id,
+        return await search_knowledge_detached(
+            tenant_id=current.tenant_id, account_id=current.account.id,
             query=body.query, agent_id=None,
             knowledge_base_id=knowledge_base_id, limit=body.limit,
         )

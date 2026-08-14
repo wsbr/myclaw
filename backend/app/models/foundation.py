@@ -293,7 +293,7 @@ class OutboxCommand(Base, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("topic", "dedupe_key", name="uq_outbox_topic_dedupe"),
         CheckConstraint(
-            "topic IN ('runtime.control','runtime.runner','runtime.tool','runtime.sandbox','runtime.delivery','runtime.maintenance')",
+            "topic IN ('runtime.control','runtime.runner','runtime.tool','runtime.sandbox','runtime.delivery','runtime.maintenance','knowledge.index')",
             name="ck_outbox_topic",
         ),
         CheckConstraint(

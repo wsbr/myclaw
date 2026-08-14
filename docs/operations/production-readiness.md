@@ -90,6 +90,7 @@ SSE connections and egress
 | Workspace 可变文件 | `<= 15 分钟` | `<= 4 小时` | 多可用区存储 + 增量 snapshot | 路径权限、generation、checksum |
 | immutable Artifact body | `<= 5 分钟` | `<= 4 小时` | 对象版本 + 跨区域复制 | DB metadata 与 body checksum 对账 |
 | Registry 包与 SkillVersion | `<= 5 分钟` | `<= 4 小时` | 内容寻址对象存储 + 跨区域复制 | AgentVersion 依赖可重装配 |
+| Knowledge Qdrant projection | `<= 5 分钟` | `<= 4 小时` | 跨区副本 + snapshot；MySQL/source object 可重建 | Tenant/revision payload filter、point count 与抽样 checksum 对账 |
 | Event/Audit integrity seal | `<= 24 小时` | `<= 4 小时` | 对象锁定 seal + KMS key 跨区域恢复 | 链头、签名、scope 和 hash schema 重放验证 |
 | Secret/Key 配置 | `0（已提交版本）` | `<= 60 分钟` | 企业 Secret Manager/KMS 复制 | 轮换且不导出明文 |
 | Redis provisional 数据 | 可丢 | 重建 | MySQL/重连 | 不影响权威状态 |
@@ -108,6 +109,7 @@ SSE connections and egress
 - Outbox claim、Runner lease、execution epoch 和 fencing 在多副本/时钟偏差下验证；
 - Workspace 使用加密多可用区 POSIX 存储，Artifact 使用版本化对象存储；
 - Redis HA 或明确降级，且仍不成为业务权威；
+- Qdrant 跨区副本、snapshot/restore 与从 MySQL/source object 重建演练，且向量库不成为授权或正文权威；
 - IdP/JWKS、Secret Manager、模型 Provider 和外部 Tool 的超时、熔断、限流与降级；
 - 跨可用区拓扑、PDB、`maxUnavailable=0` 滚动升级、expand/contract Schema 窗口和应用回滚策略；
 - 单点清单为空，或每个保留单点都有业务批准的降级/RTO。

@@ -38,6 +38,7 @@ trap 'rm -f -- "${temporary_file}"' EXIT
     'UAT_API_PORT=8101' \
     'UAT_MYSQL_PORT=3310' \
     'UAT_REDIS_PORT=6390' \
+    'UAT_QDRANT_PORT=6335' \
     'UAT_OTLP_PORT=4320' \
     'UAT_OTEL_HEALTH_PORT=13135' \
     'UAT_API_PUBLIC_URL=http://localhost:8101' \
@@ -71,6 +72,13 @@ trap 'rm -f -- "${temporary_file}"' EXIT
     'SANDBOX_WORKER_POLL_SECONDS=0.5' \
     'SANDBOX_OUTBOX_CLAIM_LEASE_SECONDS=30' \
     'SANDBOX_ATTEMPT_STALE_SECONDS=60' \
+    'KNOWLEDGE_QDRANT_API_KEY=' \
+    'KNOWLEDGE_QDRANT_COLLECTION_PREFIX=myclaw_knowledge' \
+    'KNOWLEDGE_WORKER_POLL_SECONDS=0.5' \
+    'KNOWLEDGE_WORKER_CONCURRENCY=2' \
+    'KNOWLEDGE_INDEX_CLAIM_LEASE_SECONDS=300' \
+    'KNOWLEDGE_INDEX_HEARTBEAT_SECONDS=30' \
+    'KNOWLEDGE_EMBEDDING_TIMEOUT_SECONDS=60' \
     'MAINTENANCE_POLL_SECONDS=3600' \
     'MAINTENANCE_COMMAND_POLL_SECONDS=1' \
     'MAINTENANCE_COMMAND_CLAIM_LEASE_SECONDS=300' \
@@ -86,13 +94,15 @@ trap 'rm -f -- "${temporary_file}"' EXIT
     'MYCLAW_RELEASE=uat-local' \
     "MYCLAW_REAL_LLM_API_KEY=${model_api_key}" \
     'MYCLAW_REAL_LLM_ENDPOINT=https://dashscope.aliyuncs.com/compatible-mode/v1' \
-    'MYCLAW_REAL_LLM_MODEL=qwen3.5-plus'
+    'MYCLAW_REAL_LLM_MODEL=qwen3.5-plus' \
+    'MYCLAW_REAL_EMBEDDING_MODEL=text-embedding-v4' \
+    'MYCLAW_REAL_EMBEDDING_DIMENSIONS=1024'
 } > "${temporary_file}"
 chmod 600 "${temporary_file}"
 mv "${temporary_file}" "${env_file}"
 trap - EXIT
 
-for volume in myclaw-uat-mysql-data myclaw-uat-redis-data myclaw-uat-app-data; do
+for volume in myclaw-uat-mysql-data myclaw-uat-redis-data myclaw-uat-app-data myclaw-uat-qdrant-data; do
   docker volume inspect "${volume}" >/dev/null 2>&1 || docker volume create "${volume}" >/dev/null
 done
 mkdir -p "${script_dir}/backups"

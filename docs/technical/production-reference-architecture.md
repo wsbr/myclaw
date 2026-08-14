@@ -18,6 +18,7 @@
 | Sandbox | 独立 Sandbox 服务在专用节点池启动 Kata/microVM 隔离实例；普通容器和 Local Sandbox 不允许进入生产 Profile |
 | Workspace | 加密、多可用区 POSIX 存储；每 Session 一个逻辑根，File Tool/Sandbox Broker 强制 principal-aware 路径授权 |
 | Artifact | 版本化对象存储；平台生成不可变 key、SHA-256 和 provenance；发布后禁止覆盖 |
+| Knowledge vector | MySQL 保留授权/正文/revision 权威；Qdrant 集群只保存可重建 Embedding 投影，查询强制 Tenant + revision filter |
 | 审计完整性 | ExecutionEvent 按 Session、PlatformAuditEvent 按 Tenant 建立版本化 hash chain；至少每日验链，KMS 签名 head 并保存不可覆盖 seal |
 | 缓存/实时流 | Redis HA 只承载短 TTL、限流和 provisional token；可靠事件从 MySQL ExecutionEvent 读取 |
 | 可观测性 | OpenTelemetry Collector HA + 指标/日志/Trace 后端；观测数据不参与授权和恢复 |
@@ -33,10 +34,12 @@ WAF / Rate Limit / L7 Load Balancer
       ├── Web/API pods (>=3, across 3 AZ)
       │       ├── MySQL writer endpoint
       │       ├── Redis HA
+      │       ├── Qdrant cluster
       │       └── Object/Workspace services
       │
       ├── Runtime control pods (>=3)
       ├── Runtime runner pods (>=3, autoscaled)
+      ├── Knowledge index pods (>=2, autoscaled)
       ├── Tool/delivery pods (>=2 per enabled lane)
       └── Sandbox broker pods (>=3)
                   │ authenticated execution request
@@ -44,6 +47,7 @@ WAF / Rate Limit / L7 Load Balancer
 
 MySQL: one writer + cross-AZ failover replicas + PITR backups
 Storage: multi-AZ Workspace + versioned immutable Artifact bucket + object-locked ledger seal bucket
+Vectors: replicated Qdrant collection + scheduled snapshots; rebuild source remains MySQL + source objects
 Telemetry: HA collectors → metrics/log/trace backends
 DR: second-region infrastructure definition + replicated backups/artifacts
 ```
@@ -57,6 +61,7 @@ DR: second-region infrastructure definition + replicated backups/artifacts
 | Web/API | 3 | 无 | RPS、CPU、请求队列 | 重试只依赖 Idempotency-Key；不取消已创建 Run |
 | Runtime Control | 3 | 无 | Outbox oldest age、等待恢复延迟 | 重复命令由 dedupe/CAS 收敛 |
 | Runtime Runner | 3 | Runner lease | runnable 数、Provider 并发、Token 配额 | lease 过期后新 epoch 恢复；旧 Worker 被 fencing |
+| Knowledge Index Worker | 2 | knowledge.index lease | queued age、chunk backlog、Embedding/Qdrant latency | deterministic point upsert；完整投影后才推进 current revision |
 | Tool Worker | 每 lane 2 | ToolAttempt lease | lane backlog、外部并发限制 | outcome_unknown 禁止盲重试 |
 | Delivery Worker | 2 | DeliveryAttempt lease | delivery backlog | 投递失败不改 Run 结果 |
 | Sandbox Broker | 3 | 无 | provisioning latency、活跃实例 | 实例丢失按 Checkpoint/Attempt 恢复 |
@@ -90,6 +95,10 @@ Pod 使用跨区 anti-affinity、TopologySpreadConstraints 和 PodDisruptionBudg
 ### Redis
 
 Redis 使用跨区复制和自动 failover，但其全部内容都必须可重建。Redis 不保存 Run status、审批结果、Agent membership、可靠 Event cursor 或 Tool outcome。Redis 故障时停止 provisional delta，API/SSE 回退 MySQL，后台执行继续。
+
+### Qdrant
+
+Qdrant 使用跨可用区副本和定期 snapshot，但不成为 Knowledge 正文、授权或 revision 权威。Collection 按冻结的维度与 ModelVersion content hash 分区，point payload 至少携带 `tenant_id`、`knowledge_base_id` 和 `index_revision_id` 并建立 payload index。API 查询先从 MySQL 得到允许访问的 ready revision，再以 Tenant/revision filter 查询 Qdrant，最后回到 MySQL 复核 current pointer 与 source checksum。Qdrant 全失时停止 semantic 查询和新索引发布；恢复 snapshot 或从 MySQL/source object 重建投影，不能把 point 缺失的 revision 标为 ready。
 
 ## 5. 身份与授权
 
@@ -147,6 +156,7 @@ Sandbox 只能通过 Broker 获得与 ExecutionPrincipal 对应的受限挂载�
 ## 7. 网络与依赖治理
 
 - Namespace 默认 deny ingress/egress；按 API→DB/Redis/Storage、Worker→Provider/Tool、Broker→Sandbox 的最小路径放行；
+- Knowledge API/Worker 只通过私网访问 Qdrant；Qdrant 不开放租户公网入口；
 - Provider、Tool、IdP、JWKS、KMS 和存储均定义 connect/read/total timeout、并发上限和熔断；
 - Provider/Tool Credential 只由对应 Adapter 在调用时取得短期值，不进入 Prompt、CapabilitySnapshot JSON、Event 或 Trace；
 - 外部回调使用独立 Endpoint、签名、timestamp/nonce、重放窗口和 provider_event_id 唯一键；

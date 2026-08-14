@@ -9,7 +9,7 @@ deploy/uat/init-env.sh
 deploy/uat/up.sh
 ```
 
-初始化脚本会隐藏读取真实模型 API Key，生成权限为 `0600` 的 `deploy/uat/.env`，并创建三个外部卷。该文件和备份目录均被 Git 忽略。产品访问 `http://localhost:8181`；管理员邮箱为 `admin@uat.myclaw.local`，初始密码从本机 `deploy/uat/.env` 的 `INIT_ADMIN_PASSWORD` 获取。
+初始化脚本会隐藏读取真实模型 API Key，生成权限为 `0600` 的 `deploy/uat/.env`，并创建四个外部卷。该文件和备份目录均被 Git 忽略。产品访问 `http://localhost:8181`；管理员邮箱为 `admin@uat.myclaw.local`，初始密码从本机 `deploy/uat/.env` 的 `INIT_ADMIN_PASSWORD` 获取。
 
 首次进入“模型管理”时，保存以下配置；管理 API 接收完整 Key 后立即加密，之后由 UAT 数据库持续复用密文：
 
@@ -19,6 +19,8 @@ deploy/uat/up.sh
 - API Key：输入完整 `MYCLAW_REAL_LLM_API_KEY` 值（页面与查询 API 不回显）
 
 数据库不保存明文 Key。创建 ModelVersion 时通过管理页面或 API 一次性提交完整 Key，后续查询只返回已配置状态。
+
+语义知识验收使用独立的 Embedding ModelVersion：Provider 与 Endpoint 不变，模型名改为 `.env` 中的 `MYCLAW_REAL_EMBEDDING_MODEL`（默认 `text-embedding-v4`），维度使用 `MYCLAW_REAL_EMBEDDING_DIMENSIONS`（默认 1024）。百炼 Key 是供应商级通用凭据，因此直接复用同一 `MYCLAW_REAL_LLM_API_KEY`，不新增第二个明文配置项。
 
 ## 日常操作
 
@@ -43,9 +45,9 @@ OTLP Trace 同时写入平台数据库的 Runner Trace/Span 模型与外部应�
 Collector 文件按 32 MiB 轮转，保留 30 天、最多 10 个备份；容器重建不会删除该文件。
 Collector 健康端口默认为 `http://127.0.0.1:13135/`。
 
-不要把 CI 的 `test/docker-compose.test.yml` 用作产品验收环境。CI 的 MySQL 使用 `tmpfs`，停止容器后数据即消失。UAT 的 `myclaw-uat-mysql-data`、`myclaw-uat-redis-data` 和 `myclaw-uat-app-data` 是 Compose 外部卷，即使误执行 `down -v` 也不会由 Compose 删除。
+不要把 CI 的 `test/docker-compose.test.yml` 用作产品验收环境。CI 的 MySQL 和 Qdrant 使用 `tmpfs`，停止容器后数据即消失。UAT 的 `myclaw-uat-mysql-data`、`myclaw-uat-redis-data`、`myclaw-uat-app-data` 和 `myclaw-uat-qdrant-data` 是 Compose 外部卷，即使误执行 `down -v` 也不会由 Compose 删除。Qdrant 只保存可重建向量投影，但仍使用持久卷避免每次启动重新索引。
 
-需要清空验证数据时，只允许使用 `deploy/uat/destructive-reset.sh` 操作这三个精确卷。脚本会核对挂载容器、Compose project、working directory 和 config file，拒绝非本仓库资源；它不会创建备份，并要求显式确认。清空后脚本运行最新 Alembic migration、重建 bootstrap 管理员，外部连接密钥必须由管理员重新通过 write-only 字段提交。
+需要清空验证数据时，只允许使用 `deploy/uat/destructive-reset.sh` 操作这四个精确卷。脚本会核对挂载容器、Compose project、working directory 和 config file，拒绝非本仓库资源；它不会创建备份，并要求显式确认。清空后脚本运行最新 Alembic migration、重建 bootstrap 管理员，外部连接密钥必须由管理员重新通过 write-only 字段提交。
 
 重置完成后，对同一套 `myclaw-uat` 服务执行 `deploy/uat/run-acceptance.sh`。脚本拒绝脏工作树或不匹配的固定 Commit，并要求配置的真实模型、外部连接与隔离 Chromium 可用；原始证据写入被 Git 忽略的 `deploy/uat/evidence/<commit>/`。
 

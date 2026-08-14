@@ -1,4 +1,4 @@
-"""Tenant-scoped local document knowledge and immutable index evidence."""
+"""Tenant-scoped managed document knowledge and immutable index evidence."""
 
 from __future__ import annotations
 
@@ -58,6 +58,12 @@ class KnowledgeBase(Base, TimestampMixin, VersionMixin):
     status: Mapped[str] = mapped_column(String(20), default="active", nullable=False)
     current_index_revision_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("knowledge_index_revision.id"),
+    )
+    pending_index_revision_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("knowledge_index_revision.id"),
+    )
+    embedding_model_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("model.id"),
     )
     next_revision_no: Mapped[int] = mapped_column(BigInteger, default=1, nullable=False)
     chunking_profile: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
@@ -175,7 +181,8 @@ class KnowledgeIndexRevision(Base):
     __tablename__ = "knowledge_index_revision"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('ready','failed')", name="ck_knowledge_index_status",
+            "status IN ('queued','running','ready','failed')",
+            name="ck_knowledge_index_status",
         ),
         UniqueConstraint(
             "knowledge_base_id", "revision_no", name="uq_knowledge_index_revision_no",
@@ -204,6 +211,14 @@ class KnowledgeIndexRevision(Base):
     source_manifest_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     chunking_profile: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     embedding_profile: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    embedding_model_version_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("model_version.id"),
+    )
+    vector_backend: Mapped[str] = mapped_column(
+        String(32), default="mysql_json", nullable=False,
+    )
+    vector_collection: Mapped[str | None] = mapped_column(String(191))
+    vector_point_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     document_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     chunk_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -215,6 +230,8 @@ class KnowledgeIndexRevision(Base):
     built_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=False), default=utcnow, nullable=False,
     )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
 
 
 class KnowledgeChunk(Base):
@@ -253,6 +270,7 @@ class KnowledgeChunk(Base):
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     term_frequencies: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     vector: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    embedding_checksum: Mapped[str | None] = mapped_column(String(64))
     token_count: Mapped[int] = mapped_column(Integer, nullable=False)
 
 

@@ -37,6 +37,10 @@ type ModelVersion = {
 }
 
 const providers = ['openai', 'anthropic', 'openai_compatible', 'azure_openai', 'ollama'].map(value => ({ value, label: value }))
+const modelKinds = [
+  { value: 'chat', label: 'Chat / Agent' },
+  { value: 'embedding', label: 'Embedding / Knowledge' },
+]
 const commandHeaders = () => ({ 'Idempotency-Key': crypto.randomUUID() })
 
 function parseObject(value?: string) {
@@ -86,13 +90,16 @@ export default function ModelsTab() {
   })
 
   const createVersion = useMutation({
-    mutationFn: (values: any) => client.post(`/admin/models/${selected!.id}/versions`, {
-      ...values,
+    mutationFn: (values: any) => {
+      const { model_kind: _modelKind, ...wireValues } = values
+      return client.post(`/admin/models/${selected!.id}/versions`, {
+      ...wireValues,
       endpoint: values.endpoint,
       api_key: values.api_key,
       default_parameters: parseObject(values.default_parameters),
       capabilities: parseObject(values.capabilities),
-    }, { headers: { ...commandHeaders(), 'If-Match': `"${selected!.version}"` } }).then(response => response.data),
+      }, { headers: { ...commandHeaders(), 'If-Match': `"${selected!.version}"` } }).then(response => response.data)
+    },
     onSuccess: () => {
       setVersionOpen(false); versionForm.resetFields()
       setSelected(current => current ? { ...current, version: current.version + 1 } : current)
@@ -125,8 +132,8 @@ export default function ModelsTab() {
   })
 
   return <div className="space-y-4">
-    <Alert showIcon type="info" message="Agent-native v2 模型注册表"
-      description="逻辑模型可持续演进；运行与 Agent 发布只引用通过 Conformance 并激活的不可变 ModelVersion。" />
+    <Alert showIcon type="info" message="Chat 与 Embedding 统一模型注册表"
+      description="逻辑模型可持续演进；Agent 与知识库分别引用通过对应 Conformance 并激活的不可变 ModelVersion。凭据可使用同一个供应商 API Key。" />
     <div className="flex justify-end">
       <Button type="primary" icon={<PlusOutlined />} onClick={() => setLogicalOpen(true)}>新建逻辑模型</Button>
     </div>
@@ -146,6 +153,7 @@ export default function ModelsTab() {
         const current = versions.data?.find(version => version.id === selected.current_version_id)
         versionForm.setFieldsValue({
           provider: current?.provider,
+          model_kind: current?.capabilities?.model_kind === 'embedding' ? 'embedding' : 'chat',
           model_name: current?.model_name,
           endpoint: current?.endpoint,
           api_key: '',
@@ -167,6 +175,9 @@ export default function ModelsTab() {
           { title: '版本', dataIndex: 'version_no', render: (value: number) => `v${value}` },
           { title: 'Provider', dataIndex: 'provider', render: (value: string) => <Tag color="blue">{value}</Tag> },
           { title: '模型', dataIndex: 'model_name' },
+          { title: '类型', render: (_: unknown, version: ModelVersion) => <Tag color={version.capabilities.model_kind === 'embedding' ? 'purple' : 'blue'}>
+            {version.capabilities.model_kind === 'embedding' ? 'Embedding' : 'Chat'}
+          </Tag> },
           { title: 'Conformance', render: (_: unknown, version: ModelVersion) => version.latest_conformance
             ? <Tag color={version.latest_conformance.status === 'passed' ? 'success' : 'error'}>{version.latest_conformance.status}</Tag> : <Tag>未执行</Tag> },
           { title: '激活', render: (_: unknown, version: ModelVersion) => selected.current_version_id === version.id ? <Tag color="success">当前</Tag> : '—' },
@@ -188,8 +199,26 @@ export default function ModelsTab() {
     <Modal title={`追加 ${selected?.name ?? ''} 的不可变版本`} open={versionOpen} onCancel={() => setVersionOpen(false)} onOk={() => versionForm.submit()} confirmLoading={createVersion.isPending} width={720}>
       <Form form={versionForm} layout="vertical" onFinish={values => createVersion.mutate(values)}>
         <Space style={{ display: 'flex' }} align="start">
+          <Form.Item name="model_kind" label="模型类型" rules={[{ required: true }]}>
+            <Select options={modelKinds} style={{ width: 190 }} onChange={kind => {
+              if (kind === 'embedding') {
+                versionForm.setFieldsValue({
+                  provider: 'openai_compatible',
+                  model_name: 'text-embedding-v4',
+                  endpoint: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+                  default_parameters: JSON.stringify({ dimensions: 1024, encoding_format: 'float' }, null, 2),
+                  capabilities: JSON.stringify({ model_kind: 'embedding', embedding_dimensions: 1024, embedding_max_batch_size: 10 }, null, 2),
+                })
+              } else {
+                versionForm.setFieldsValue({
+                  default_parameters: JSON.stringify({ max_tokens: 2048 }, null, 2),
+                  capabilities: JSON.stringify({ model_kind: 'chat', streaming: true, native_tool_calling: true, tool_result_continuation: true, stop_reason: true }, null, 2),
+                })
+              }
+            }} />
+          </Form.Item>
           <Form.Item name="provider" label="Provider" rules={[{ required: true }]}><Select options={providers} style={{ width: 190 }} /></Form.Item>
-          <Form.Item name="model_name" label="Provider 模型名" rules={[{ required: true }]}><Input style={{ width: 260 }} /></Form.Item>
+          <Form.Item name="model_name" label="Provider 模型名" rules={[{ required: true }]}><Input style={{ width: 220 }} /></Form.Item>
         </Space>
         <Form.Item name="endpoint" label="API 地址（Endpoint）" rules={[{ required: true, message: '请输入模型 API 地址' }]}>
           <Input placeholder="https://api.example.com/v1" />

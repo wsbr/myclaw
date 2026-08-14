@@ -10,6 +10,7 @@ TARGET_VOLUMES=(
   "myclaw-uat-mysql-data"
   "myclaw-uat-redis-data"
   "myclaw-uat-app-data"
+  "myclaw-uat-qdrant-data"
 )
 
 if [ "$CONFIRMATION" != "$EXPECTED_CONFIRMATION" ]; then
@@ -29,7 +30,7 @@ cleanup_files() {
 }
 trap cleanup_files EXIT
 
-# Resolve destructive targets only from the three exact external volume
+# Resolve destructive targets only from the exact external volume
 # names. Every attached container must prove it came from this repository's
 # deploy directory and from a MyClaw Compose project.
 for volume in "${TARGET_VOLUMES[@]}"; do
@@ -87,7 +88,7 @@ for volume in "${TARGET_VOLUMES[@]}"; do
   docker volume create \
     --label com.myclaw.project=myclaw \
     --label com.myclaw.scope=uat \
-    --label com.myclaw.schema=0030 \
+    --label com.myclaw.schema=0041 \
     "$volume" >/dev/null
 done
 

@@ -277,15 +277,16 @@ VerificationResult 只引用真实 ToolAttempt、Artifact、文件 checksum 或�
 
 普通 API 不允许把 `account_id`、source Session/Message、policy version 或 agent scope owner 写入 body；这些从既有 Memory 与 AuthContext 派生。修改创建新 MemoryVersion，不覆盖历史；删除后立即停止召回，历史 Runner 的 Capability/Context snapshot 不变化。`scope=agent` 在 v1 不向普通用户开放写入。
 
-## 13. Local KnowledgeBase
+## 13. Semantic KnowledgeBase
 
 - `GET/POST /knowledge-bases`：列出当前 Tenant/account 的 active 知识库或创建一个 owner-only/selected-Agents 知识库；
+- `GET /knowledge-bases/embedding-models/available`、`PATCH /knowledge-bases/{id}/embedding-model`：选择已经通过 Embedding Conformance 并激活的独立 ModelVersion，提交 durable semantic reindex；
 - `GET /knowledge-bases/{id}`、`PATCH /knowledge-bases/{id}/access`：读取安全投影或原子替换显式 Agent grants；
 - `GET/POST /knowledge-bases/{id}/documents`：列出当前文档或上传一个有界的 UTF-8 TXT、Markdown、PDF 源；
-- `POST /knowledge-bases/{id}/reindex`、`POST /knowledge-bases/{id}/search`：核对不可变当前索引或执行 owner 直接检索；
+- `POST /knowledge-bases/{id}/reindex`、`POST /knowledge-bases/{id}/search`：提交/核对不可变索引或执行 owner 直接 hybrid semantic 检索；
 - `DELETE /knowledge-bases/{id}/documents/{document_id}`、`DELETE /knowledge-bases/{id}`：写 tombstone 并停止未来检索，不删除历史 revision、chunk 和 Runner 引用。
 
-Tenant/account 来自 AuthContext，不接受 body/header 覆盖。Agent Runtime 只能通过已装配的 `knowledge_search` Tool 检索，并同时满足当前账号所有权和显式 Agent grant。上传采用 multipart `file`，文件、PDF 页数、chunk 数和查询/返回数都有配置硬界限。检索结果固定包含 source/index/chunk identity、checksum、页码或章节、分数和有界 excerpt；Runner Tool 调用另写不含正文的 RetrievalSnapshot。
+Tenant/account 来自 AuthContext，不接受 body/header 覆盖。Agent Runtime 只能通过已装配的 `knowledge_search` Tool 检索，并同时满足当前账号所有权和显式 Agent grant。上传采用 multipart `file`，不会扫描用户本地目录；文件、PDF 页数、chunk 数和查询/返回数都有配置硬界限。Embedding/Qdrant 调用不持有数据库事务，Worker 只在完整投影完成后推进 current revision。检索结果固定包含 source/index/chunk identity、checksum、页码或章节、semantic/lexical 分数和有界 excerpt；Runner Tool 调用另写不含正文的 RetrievalSnapshot。
 
 ## 14. ExecutionEvent REST 与 SSE
 

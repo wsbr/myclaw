@@ -1,13 +1,13 @@
-"""Explicit local KnowledgeBase retrieval with immutable citations."""
+"""Explicit managed KnowledgeBase retrieval with immutable citations."""
 
 from app.core.tool_registry.base import BaseTool, RuntimeContext, ToolResult
-from app.services.knowledge_service import KnowledgeError, search_knowledge
+from app.services.knowledge_service import KnowledgeError, search_knowledge_detached
 
 
 class KnowledgeSearchTool(BaseTool):
     name = "knowledge_search"
     description = (
-        "WHEN: retrieve evidence from local document knowledge explicitly granted to this Agent. "
+        "WHEN: retrieve evidence from managed document knowledge explicitly granted to this Agent. "
         "WHEN NOT: do not use Knowledge as user Memory, do not assume missing evidence is false, "
         "and do not invent citations. RETURNS: bounded excerpts with exact source, page/section, "
         "checksum, chunk, and immutable index revision citations. RECOVERY: narrow or rephrase the "
@@ -35,8 +35,7 @@ class KnowledgeSearchTool(BaseTool):
                 "Knowledge retrieval requires an account authority",
                 status_code=403,
             )
-        data = await search_knowledge(
-            db,
+        data = await search_knowledge_detached(
             tenant_id=context.tenant_id,
             account_id=context.account_id,
             agent_id=context.agent_id,
@@ -47,7 +46,7 @@ class KnowledgeSearchTool(BaseTool):
         )
         return ToolResult(
             status="succeeded",
-            summary=f"Found {data['count']} local knowledge citations",
+            summary=f"Found {data['count']} managed knowledge citations",
             data=data,
             content_blocks=[{"type": "json", "value": data}],
             evidence=[item["citation"] for item in data["results"]],

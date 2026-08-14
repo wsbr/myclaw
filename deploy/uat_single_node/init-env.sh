@@ -22,6 +22,7 @@ uat_volumes=(
   myclaw-uat-single-node-mysql-data
   myclaw-uat-single-node-redis-data
   myclaw-uat-single-node-app-data
+  myclaw-uat-single-node-qdrant-data
 )
 for volume in "${uat_volumes[@]}"; do
   if docker volume inspect "${volume}" >/dev/null 2>&1; then
@@ -65,6 +66,7 @@ trap 'rm -f -- "${temporary_file}"' EXIT
     'UAT_API_PORT=8201' \
     'UAT_MYSQL_PORT=3320' \
     'UAT_REDIS_PORT=6400' \
+    'UAT_QDRANT_PORT=6345' \
     'UAT_OTLP_PORT=4330' \
     'UAT_OTEL_HEALTH_PORT=13145' \
     'UAT_API_PUBLIC_URL=http://localhost:8201' \
@@ -91,6 +93,13 @@ trap 'rm -f -- "${temporary_file}"' EXIT
     'SANDBOX_WORKER_POLL_SECONDS=0.5' \
     'SANDBOX_OUTBOX_CLAIM_LEASE_SECONDS=30' \
     'SANDBOX_ATTEMPT_STALE_SECONDS=60' \
+    'KNOWLEDGE_QDRANT_API_KEY=' \
+    'KNOWLEDGE_QDRANT_COLLECTION_PREFIX=myclaw_knowledge' \
+    'KNOWLEDGE_WORKER_POLL_SECONDS=0.5' \
+    'KNOWLEDGE_WORKER_CONCURRENCY=2' \
+    'KNOWLEDGE_INDEX_CLAIM_LEASE_SECONDS=300' \
+    'KNOWLEDGE_INDEX_HEARTBEAT_SECONDS=30' \
+    'KNOWLEDGE_EMBEDDING_TIMEOUT_SECONDS=60' \
     'MAINTENANCE_POLL_SECONDS=3600' \
     'MAINTENANCE_COMMAND_POLL_SECONDS=1' \
     'MAINTENANCE_COMMAND_CLAIM_LEASE_SECONDS=300' \
@@ -102,6 +111,8 @@ trap 'rm -f -- "${temporary_file}"' EXIT
     "MYCLAW_REAL_LLM_API_KEY=${model_api_key}" \
     "MYCLAW_REAL_LLM_ENDPOINT=${model_endpoint}" \
     "MYCLAW_REAL_LLM_MODEL=${model_name}" \
+    'MYCLAW_REAL_EMBEDDING_MODEL=text-embedding-v4' \
+    'MYCLAW_REAL_EMBEDDING_DIMENSIONS=1024' \
     'MYCLAW_COST_CURRENCY=CNY' \
     'MYCLAW_INPUT_PRICE_PER_MILLION=0.8' \
     'MYCLAW_OUTPUT_PRICE_PER_MILLION=4.8' \

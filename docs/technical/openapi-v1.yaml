@@ -1701,7 +1701,7 @@ paths:
       operationId: listKnowledgeBases
       parameters: [{$ref: '#/components/parameters/RawUserId'}]
       responses:
-        '200': {description: Current account active local knowledge bases., content: {application/json: {schema: {$ref: '#/components/schemas/KnowledgeBasePage'}}}}
+        '200': {description: Current account active knowledge bases., content: {application/json: {schema: {$ref: '#/components/schemas/KnowledgeBasePage'}}}}
         default: {$ref: '#/components/responses/Error'}
     post:
       tags: [Knowledge]
@@ -1745,6 +1745,29 @@ paths:
         '200': {description: Exact Agent grant set replaced., content: {application/json: {schema: {$ref: '#/components/schemas/KnowledgeBase'}}}}
         default: {$ref: '#/components/responses/Error'}
 
+  /knowledge-bases/embedding-models/available:
+    get:
+      tags: [Knowledge]
+      operationId: listAvailableKnowledgeEmbeddingModels
+      parameters: [{$ref: '#/components/parameters/RawUserId'}]
+      responses:
+        '200': {description: Activated Embedding models available to KnowledgeBase configuration., content: {application/json: {schema: {$ref: '#/components/schemas/KnowledgeEmbeddingModelPage'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /knowledge-bases/{knowledge_base_id}/embedding-model:
+    patch:
+      tags: [Knowledge]
+      operationId: configureKnowledgeEmbeddingModel
+      parameters:
+        - {$ref: '#/components/parameters/KnowledgeBaseId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/KnowledgeEmbeddingPatch'}}}
+      responses:
+        '200': {description: Embedding model selected and semantic reindex queued., content: {application/json: {schema: {$ref: '#/components/schemas/KnowledgeBase'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
   /knowledge-bases/{knowledge_base_id}/documents:
     get:
       tags: [Knowledge]
@@ -1771,7 +1794,7 @@ paths:
               required: [file]
               properties: {file: {type: string, format: binary}}
       responses:
-        '201': {description: Source stored and immutable current index reconciled., content: {application/json: {schema: {$ref: '#/components/schemas/KnowledgeIngestResult'}}}}
+        '201': {description: Source stored and an immutable local revision published or semantic revision queued., content: {application/json: {schema: {$ref: '#/components/schemas/KnowledgeIngestResult'}}}}
         default: {$ref: '#/components/responses/Error'}
 
   /knowledge-bases/{knowledge_base_id}/documents/{document_id}:
@@ -1822,7 +1845,7 @@ paths:
         required: true
         content: {application/json: {schema: {$ref: '#/components/schemas/KnowledgeSearchRequest'}}}
       responses:
-        '200': {description: Bounded local retrieval with exact citations., content: {application/json: {schema: {$ref: '#/components/schemas/KnowledgeSearchResponse'}}}}
+        '200': {description: Bounded hybrid semantic retrieval with exact citations., content: {application/json: {schema: {$ref: '#/components/schemas/KnowledgeSearchResponse'}}}}
         default: {$ref: '#/components/responses/Error'}
 
   /sessions/{session_id}/events:
@@ -3542,20 +3565,29 @@ components:
     KnowledgeIndexRevision:
       type: object
       additionalProperties: false
-      required: [id, revision_no, status, source_manifest_hash, document_count, chunk_count, content_hash, built_at]
+      required: [id, revision_no, status, source_manifest_hash, document_count, chunk_count, embedding_model_version_id, embedding_profile, vector_backend, vector_collection, vector_point_count, error_code, error_detail, content_hash, built_at, started_at, completed_at]
       properties:
         id: {$ref: '#/components/schemas/Uuid'}
         revision_no: {type: integer, format: int64, minimum: 1}
-        status: {type: string, enum: [ready, failed]}
+        status: {type: string, enum: [queued, running, ready, failed]}
         source_manifest_hash: {$ref: '#/components/schemas/Sha256'}
         document_count: {type: integer, minimum: 0}
         chunk_count: {type: integer, minimum: 0}
+        embedding_model_version_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        embedding_profile: {$ref: '#/components/schemas/JsonObject'}
+        vector_backend: {type: string, enum: [mysql_json, qdrant]}
+        vector_collection: {type: [string, 'null']}
+        vector_point_count: {type: integer, minimum: 0}
+        error_code: {type: [string, 'null']}
+        error_detail: {type: [string, 'null']}
         content_hash: {$ref: '#/components/schemas/Sha256'}
         built_at: {$ref: '#/components/schemas/Timestamp'}
+        started_at: {oneOf: [{$ref: '#/components/schemas/Timestamp'}, {type: 'null'}]}
+        completed_at: {oneOf: [{$ref: '#/components/schemas/Timestamp'}, {type: 'null'}]}
     KnowledgeBase:
       type: object
       additionalProperties: false
-      required: [id, tenant_id, owner_account_id, name, description, sharing_policy, status, agent_ids, current_index_revision, document_count, chunking_profile, embedding_profile, version, created_at, updated_at]
+      required: [id, tenant_id, owner_account_id, name, description, sharing_policy, status, agent_ids, current_index_revision, pending_index_revision, embedding_model_id, document_count, chunking_profile, embedding_profile, version, created_at, updated_at]
       properties:
         id: {$ref: '#/components/schemas/Uuid'}
         tenant_id: {$ref: '#/components/schemas/Uuid'}
@@ -3566,6 +3598,8 @@ components:
         status: {type: string, enum: [active, deleted]}
         agent_ids: {type: array, maxItems: 100, uniqueItems: true, items: {$ref: '#/components/schemas/Uuid'}}
         current_index_revision: {oneOf: [{$ref: '#/components/schemas/KnowledgeIndexRevision'}, {type: 'null'}]}
+        pending_index_revision: {oneOf: [{$ref: '#/components/schemas/KnowledgeIndexRevision'}, {type: 'null'}]}
+        embedding_model_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
         document_count: {type: integer, minimum: 0}
         chunking_profile: {$ref: '#/components/schemas/JsonObject'}
         embedding_profile: {$ref: '#/components/schemas/JsonObject'}
@@ -3585,6 +3619,30 @@ components:
         name: {type: string, minLength: 1, maxLength: 200}
         description: {type: string, maxLength: 5000, default: ''}
         agent_ids: {type: array, maxItems: 100, uniqueItems: true, items: {$ref: '#/components/schemas/Uuid'}, default: []}
+        embedding_model_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+    KnowledgeEmbeddingPatch:
+      type: object
+      additionalProperties: false
+      required: [embedding_model_id]
+      properties:
+        embedding_model_id: {$ref: '#/components/schemas/Uuid'}
+    KnowledgeEmbeddingModel:
+      type: object
+      additionalProperties: false
+      required: [id, key, name, model_version_id, provider, model_name, dimensions]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        key: {type: string}
+        name: {type: string}
+        model_version_id: {$ref: '#/components/schemas/Uuid'}
+        provider: {type: string}
+        model_name: {type: string}
+        dimensions: {type: integer, minimum: 8, maximum: 4096}
+    KnowledgeEmbeddingModelPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/KnowledgeEmbeddingModel'}}}
     KnowledgeAccessPatch:
       type: object
       additionalProperties: false
@@ -3672,7 +3730,7 @@ components:
     KnowledgeSearchResult:
       type: object
       additionalProperties: false
-      required: [knowledge_base_id, knowledge_base_name, index_revision_id, document_id, source_id, chunk_id, filename, page_number, section, source_checksum, chunk_checksum, score, lexical_score, local_vector_score, excerpt, citation]
+      required: [knowledge_base_id, knowledge_base_name, index_revision_id, document_id, source_id, chunk_id, filename, page_number, section, source_checksum, chunk_checksum, score, lexical_score, semantic_score, retrieval_kind, excerpt, citation]
       properties:
         knowledge_base_id: {$ref: '#/components/schemas/Uuid'}
         knowledge_base_name: {type: string}
@@ -3687,7 +3745,8 @@ components:
         chunk_checksum: {$ref: '#/components/schemas/Sha256'}
         score: {type: number, minimum: 0}
         lexical_score: {type: number, minimum: 0}
-        local_vector_score: {type: number, minimum: 0}
+        semantic_score: {type: number, minimum: 0}
+        retrieval_kind: {type: string, enum: [semantic, local_feature_hash]}
         excerpt: {type: string, maxLength: 1600}
         citation: {$ref: '#/components/schemas/JsonObject'}
     KnowledgeSearchResponse:

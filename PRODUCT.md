@@ -154,7 +154,7 @@ Tool 在授权期间持续可见，不因成功一次被消费。是否重复执
 
 文件先存在于 Session Workspace 的当前 Agent 私有根或 Group shared 根；物理共享目录不代表所有成员可读。需要正式交付时，平台把源字节复制成不可变 Artifact 快照并记录来源、checksum、版本和下载信息。Local Sandbox 是第一阶段验证环境，不宣传为生产级不可信代码强隔离。
 
-Knowledge 是另一条明确边界：用户导入的 TXT、Markdown 或 PDF 是可引用的文档证据，不是 Memory，也不会自动塞进任何 Agent 的上下文。知识库归属当前 Tenant 和账号；用户必须显式授权 Agent，并在该 AgentVersion 中选择 `knowledge_search` Tool。检索返回文件、页码或章节、checksum、chunk 和不可变索引 revision，Runner 保存实际引用快照，方便复现和评测。
+Knowledge 是另一条明确边界：用户通过 UI/API 明确导入的 TXT、Markdown 或 PDF 是可引用的文档证据，不是 Memory，也不会自动塞进任何 Agent 的上下文。平台不会扫描用户本地目录。知识库归属当前 Tenant 和账号；用户必须显式授权 Agent，并在该 AgentVersion 中选择 `knowledge_search` Tool。独立的 Embedding ModelVersion 通过 Conformance 后为 Qdrant 生成可重建向量投影，MySQL 仍保留权威正文、revision 和授权。检索返回文件、页码或章节、checksum、chunk 和不可变索引 revision，Runner 保存实际引用快照，方便复现和评测。
 
 ## 用户如何驾驭 Agent
 

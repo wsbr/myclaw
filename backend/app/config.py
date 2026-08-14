@@ -1,4 +1,6 @@
 import ipaddress
+import re
+from urllib.parse import urlsplit
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -55,6 +57,17 @@ class Settings(BaseSettings):
     knowledge_max_chunks_per_base: int = Field(default=10_000, gt=0, le=100_000)
     knowledge_chunk_chars: int = Field(default=1200, ge=256, le=8000)
     knowledge_chunk_overlap_chars: int = Field(default=150, ge=0, le=2000)
+    knowledge_vector_backend: str = "qdrant"
+    knowledge_qdrant_url: str = "http://qdrant:6333"
+    knowledge_qdrant_api_key: str | None = None
+    knowledge_qdrant_collection_prefix: str = "myclaw_knowledge"
+    knowledge_qdrant_timeout_seconds: float = Field(default=15.0, gt=0, le=120)
+    knowledge_worker_poll_seconds: float = Field(default=0.5, gt=0)
+    knowledge_worker_concurrency: int = Field(default=2, ge=1, le=32)
+    knowledge_index_claim_lease_seconds: int = Field(default=300, gt=0)
+    knowledge_index_heartbeat_seconds: int = Field(default=30, gt=0)
+    knowledge_embedding_timeout_seconds: float = Field(default=60.0, gt=0, le=600)
+    knowledge_vector_candidate_multiplier: int = Field(default=8, ge=2, le=50)
     skill_package_root: str = "/var/lib/myclaw/skill-packages"
     shared_skill_root: str = "/var/lib/myclaw/shared-skills"
     skill_storage_backend: str = "local"
@@ -98,6 +111,7 @@ class Settings(BaseSettings):
     sandbox_tool_max_attempts: int = Field(default=3, gt=0, le=10)
     outbox_max_delivery_attempts: int = Field(default=12, gt=0, le=100)
     provider_conformance_suite_version: str = "agent-native-v2.2"
+    embedding_conformance_suite_version: str = "embedding-openai-compatible.v1"
     runtime_release_id: str = "agent-native-v2"
     provider_adapter_version: str = "2"
     context_policy_version: str = "context.v2"
@@ -130,6 +144,24 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_production_safety(self):
+        self.knowledge_vector_backend = self.knowledge_vector_backend.casefold()
+        if self.knowledge_vector_backend != "qdrant":
+            raise ValueError("KNOWLEDGE_VECTOR_BACKEND must be qdrant")
+        qdrant_url = urlsplit(self.knowledge_qdrant_url)
+        if (
+            qdrant_url.scheme not in {"http", "https"}
+            or not qdrant_url.hostname
+            or qdrant_url.username
+            or qdrant_url.password
+            or qdrant_url.query
+            or qdrant_url.fragment
+        ):
+            raise ValueError("KNOWLEDGE_QDRANT_URL must be a credential-free HTTP(S) URL")
+        self.knowledge_qdrant_url = self.knowledge_qdrant_url.rstrip("/")
+        if not re.fullmatch(r"[a-z][a-z0-9_]{0,39}", self.knowledge_qdrant_collection_prefix):
+            raise ValueError(
+                "KNOWLEDGE_QDRANT_COLLECTION_PREFIX must be lowercase letters, digits, and underscores"
+            )
         storage_backend = self.skill_storage_backend.casefold()
         if storage_backend not in {"local", "s3"}:
             raise ValueError("SKILL_STORAGE_BACKEND must be local or s3")
@@ -159,6 +191,10 @@ class Settings(BaseSettings):
             raise ValueError("RUNTIME_RUNNER_HEARTBEAT_SECONDS must be below RUNTIME_RUNNER_LEASE_SECONDS")
         if self.worker_heartbeat_seconds >= self.worker_heartbeat_stale_seconds:
             raise ValueError("WORKER_HEARTBEAT_SECONDS must be below WORKER_HEARTBEAT_STALE_SECONDS")
+        if self.knowledge_index_heartbeat_seconds >= self.knowledge_index_claim_lease_seconds:
+            raise ValueError(
+                "KNOWLEDGE_INDEX_HEARTBEAT_SECONDS must be below KNOWLEDGE_INDEX_CLAIM_LEASE_SECONDS"
+            )
         if self.knowledge_chunk_overlap_chars >= self.knowledge_chunk_chars:
             raise ValueError(
                 "KNOWLEDGE_CHUNK_OVERLAP_CHARS must be below KNOWLEDGE_CHUNK_CHARS"

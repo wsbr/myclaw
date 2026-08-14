@@ -5,7 +5,7 @@ Start with the repository [README](../README.md). It contains the supported loca
 ## Product and architecture
 
 - [Product overview](../PRODUCT.md): user experience and product semantics.
-- [Roadmap](../ROADMAP.md): dependency-ordered delivery record through `v0.3.1`.
+- [Roadmap](../ROADMAP.md): dependency-ordered delivery record through `v0.4.0`.
 - [Design philosophy](DESIGN_PHILOSOPHY.md): principles that constrain every module.
 - [Technical overview](../TECH.md): runtime architecture and deployment boundaries.
 - [Validation](VALIDATION.md): CI, local release gates, real-model acceptance, and evidence policy.
@@ -28,7 +28,7 @@ Start with the repository [README](../README.md). It contains the supported loca
 | Workspace, Sandbox, and Artifact | [Sandbox and Artifact](modules/sandbox-artifact.md) |
 | Identity and Agent API | [Identity API](modules/identity-api.md) |
 | Persisted local Tenant authority and isolation | [Minimum Tenant boundary](modules/tenant-boundary.md) |
-| Local document ingestion, retrieval, and citations | [Local knowledge base](modules/local-knowledge-base.md) |
+| Semantic document ingestion, Qdrant retrieval, and citations | [Semantic knowledge base](modules/local-knowledge-base.md) |
 | Channels and notifications | [Channel system](modules/channel-system.md) |
 | Events, checkpoints, and telemetry | [Observability](modules/observability.md) |
 

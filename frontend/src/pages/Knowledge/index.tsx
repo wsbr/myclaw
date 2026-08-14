@@ -16,7 +16,12 @@ import {
 } from '@/api/knowledge'
 
 
-type CreateValues = { name: string; description?: string; agent_ids: string[] }
+type CreateValues = {
+  name: string
+  description?: string
+  agent_ids: string[]
+  embedding_model_id?: string
+}
 
 
 function citationLabel(item: KnowledgeSearchResult) {
@@ -33,13 +38,20 @@ export default function KnowledgePage() {
   const [createOpen, setCreateOpen] = useState(false)
   const [createForm] = Form.useForm<CreateValues>()
   const [agentIds, setAgentIds] = useState<string[]>([])
+  const [embeddingModelId, setEmbeddingModelId] = useState<string>()
   const [file, setFile] = useState<File | null>(null)
   const [searchText, setSearchText] = useState('')
   const [searchResults, setSearchResults] = useState<KnowledgeSearchResult[]>([])
   const [reconciliation, setReconciliation] = useState<KnowledgeStorageReconciliation | null>(null)
 
-  const bases = useQuery({ queryKey: ['knowledge-bases'], queryFn: knowledgeApi.list })
+  const bases = useQuery({
+    queryKey: ['knowledge-bases'], queryFn: knowledgeApi.list,
+    refetchInterval: query => query.state.data?.some(item => item.pending_index_revision) ? 1500 : false,
+  })
   const agents = useQuery({ queryKey: ['agents'], queryFn: agentsApi.list })
+  const embeddingModels = useQuery({
+    queryKey: ['knowledge-embedding-models'], queryFn: knowledgeApi.listEmbeddingModels,
+  })
   const selected = useMemo(
     () => bases.data?.find(item => item.id === selectedId) ?? null,
     [bases.data, selectedId],
@@ -59,11 +71,12 @@ export default function KnowledgePage() {
 
   useEffect(() => {
     setAgentIds(selected?.agent_ids ?? [])
+    setEmbeddingModelId(selected?.embedding_model_id ?? undefined)
     setSearchResults([])
     setSearchText('')
     setFile(null)
     setReconciliation(null)
-  }, [selected?.id, selected?.agent_ids])
+  }, [selected?.id, selected?.agent_ids, selected?.embedding_model_id])
 
   const refresh = async () => {
     await Promise.all([
@@ -76,6 +89,7 @@ export default function KnowledgePage() {
     mutationFn: (values: CreateValues) => knowledgeApi.create({
       name: values.name.trim(), description: values.description?.trim() ?? '',
       agent_ids: values.agent_ids ?? [],
+      embedding_model_id: values.embedding_model_id,
     }),
     onSuccess: async (item) => {
       message.success('知识库已创建')
@@ -93,6 +107,15 @@ export default function KnowledgePage() {
     onError: () => message.error('访问范围更新失败'),
   })
 
+  const updateEmbedding = useMutation({
+    mutationFn: () => knowledgeApi.updateEmbeddingModel(selected!.id, embeddingModelId!),
+    onSuccess: async () => {
+      message.success('语义模型已更新，后台正在重建向量索引')
+      await refresh()
+    },
+    onError: () => message.error('语义模型更新失败'),
+  })
+
   const upload = useMutation({
     mutationFn: () => knowledgeApi.upload(selected!.id, file!),
     onSuccess: async (result) => {
@@ -102,7 +125,7 @@ export default function KnowledgePage() {
       } else if (result.idempotent_replay) {
         message.info('相同 checksum 已存在，未重复建立索引')
       } else {
-        message.success('文档已在本机完成索引')
+        message.success(selected?.embedding_model_id ? '文档已接收，后台正在生成语义向量' : '文档索引已完成')
       }
       await refresh()
     },
@@ -117,7 +140,10 @@ export default function KnowledgePage() {
 
   const reindex = useMutation({
     mutationFn: () => knowledgeApi.reindex(selected!.id),
-    onSuccess: async () => { message.success('索引已核对'); await refresh() },
+    onSuccess: async result => {
+      message.success(result.status === 'ready' ? '索引已核对' : '后台重建任务已排队')
+      await refresh()
+    },
     onError: () => message.error('重建索引失败'),
   })
 
@@ -159,16 +185,16 @@ export default function KnowledgePage() {
   return <div className="space-y-4">
     <div className="flex items-start justify-between gap-4">
       <div>
-        <Typography.Title level={2} style={{ margin: 0 }}>本地知识库</Typography.Title>
+        <Typography.Title level={2} style={{ margin: 0 }}>知识库</Typography.Title>
         <Typography.Text type="secondary">
-          导入可引用的文档证据；Knowledge 与记录用户事实的 Memory 相互独立。
+          导入可引用的文档证据，通过真实 Embedding 与向量检索为 Agent 提供语义召回。
         </Typography.Text>
       </div>
       <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>新建知识库</Button>
     </div>
 
     <Alert showIcon type="info" message="默认不向任何 Agent 开放"
-      description="源文件、特征向量和索引都保存在当前 MyClaw 节点；必须显式选择 Agent 并在 AgentVersion 中启用 knowledge_search Tool，模型才能检索。" />
+      description="必须显式选择 Agent，并在 AgentVersion 中启用 knowledge_search Tool。Embedding 模型使用独立 ModelVersion；凭据仍由平台 Secret 加密管理。" />
 
     <div className="grid gap-4 xl:grid-cols-[300px_minmax(0,1fr)]">
       <Card title="知识库" styles={{ body: { padding: 8 } }}>
@@ -181,6 +207,8 @@ export default function KnowledgePage() {
               <Space size={4} wrap>
                 <Tag>{item.document_count} 文档</Tag>
                 <Tag color={item.agent_ids.length ? 'blue' : 'default'}>{item.agent_ids.length} Agent</Tag>
+                <Tag color={item.embedding_model_id ? 'purple' : 'default'}>{item.embedding_model_id ? 'Semantic' : 'Legacy'}</Tag>
+                {item.pending_index_revision && <Tag color="processing">索引中</Tag>}
               </Space>
             } />
           </List.Item>}
@@ -200,7 +228,15 @@ export default function KnowledgePage() {
           <Descriptions size="small" column={{ xs: 1, md: 2 }}>
             <Descriptions.Item label="索引版本">{selected.current_index_revision?.revision_no ?? '尚未索引'}</Descriptions.Item>
             <Descriptions.Item label="片段数">{selected.current_index_revision?.chunk_count ?? 0}</Descriptions.Item>
-            <Descriptions.Item label="检索配置"><Tag color="green">纯本地 Hybrid</Tag></Descriptions.Item>
+            <Descriptions.Item label="检索配置"><Tag color={selected.current_index_revision?.vector_backend === 'qdrant' ? 'purple' : 'default'}>
+              {selected.current_index_revision?.vector_backend === 'qdrant' ? 'Semantic Hybrid · Qdrant' : 'Legacy Hybrid'}
+            </Tag></Descriptions.Item>
+            <Descriptions.Item label="向量点数">{selected.current_index_revision?.vector_point_count ?? 0}</Descriptions.Item>
+            <Descriptions.Item label="后台索引">
+              {selected.pending_index_revision
+                ? <Tag color={selected.pending_index_revision.status === 'failed' ? 'error' : 'processing'}>{selected.pending_index_revision.status}</Tag>
+                : '空闲'}
+            </Descriptions.Item>
             <Descriptions.Item label="Revision hash">
               <Typography.Text code copyable>{selected.current_index_revision?.content_hash.slice(0, 16) ?? '—'}</Typography.Text>
             </Descriptions.Item>
@@ -209,6 +245,22 @@ export default function KnowledgePage() {
             type={reconciliation.healthy ? 'success' : 'warning'}
             message={reconciliation.healthy ? '最近一次存储对账正常' : '最近一次存储对账发现异常'}
             description={`检查 ${reconciliation.checked_source_count} 个 source；缺失 ${reconciliation.missing_sources.length}，损坏 ${reconciliation.corrupt_sources.length}，无引用文件 ${reconciliation.orphaned_bodies.length}；状态修复 ${reconciliation.changed_source_ids.length}。无引用文件仅报告，不自动删除。`} />}
+        </Card>
+
+        <Card title="语义检索模型">
+          <Space.Compact className="w-full">
+            <Select className="w-full" value={embeddingModelId} onChange={setEmbeddingModelId}
+              placeholder="选择已通过 Conformance 并激活的 Embedding 模型"
+              options={(embeddingModels.data ?? []).map(model => ({
+                value: model.id,
+                label: `${model.name} · ${model.model_name} · ${model.dimensions}d`,
+              }))} />
+            <Button type="primary" disabled={!embeddingModelId || embeddingModelId === selected.embedding_model_id}
+              loading={updateEmbedding.isPending} onClick={() => updateEmbedding.mutate()}>应用并重建</Button>
+          </Space.Compact>
+          {!embeddingModels.isLoading && !embeddingModels.data?.length && <Alert className="mt-3" showIcon type="warning"
+            message="尚无可用 Embedding 模型"
+            description="请先在管理后台创建独立逻辑模型，追加 text-embedding-v4 版本，运行 Embedding Conformance 并激活。" />}
         </Card>
 
         <Card title="Agent 访问范围">
@@ -254,6 +306,7 @@ export default function KnowledgePage() {
             <List.Item.Meta title={<Space wrap>
               <Typography.Text strong>{citationLabel(item)}</Typography.Text>
               <Tag color="blue">score {item.score.toFixed(3)}</Tag>
+              <Tag color={item.retrieval_kind === 'semantic' ? 'purple' : 'default'}>{item.retrieval_kind}</Tag>
               <Tag>revision {item.index_revision_id.slice(0, 8)}</Tag>
             </Space>} description={<>
               <Typography.Paragraph className="mt-2 whitespace-pre-wrap">{item.excerpt}</Typography.Paragraph>
@@ -264,13 +317,18 @@ export default function KnowledgePage() {
       </div>}
     </div>
 
-    <Modal title="新建本地知识库" open={createOpen} onCancel={() => setCreateOpen(false)}
+    <Modal title="新建知识库" open={createOpen} onCancel={() => setCreateOpen(false)}
       onOk={() => createForm.submit()} confirmLoading={create.isPending}>
       <Form form={createForm} layout="vertical" onFinish={values => create.mutate(values)} initialValues={{ agent_ids: [] }}>
         <Form.Item name="name" label="名称" rules={[{ required: true }, { max: 200 }]}><Input /></Form.Item>
         <Form.Item name="description" label="说明"><Input.TextArea rows={3} maxLength={5000} /></Form.Item>
         <Form.Item name="agent_ids" label="允许检索的 Agent">
           <Select mode="multiple" options={(agents.data ?? []).map(agent => ({ value: agent.id, label: agent.name }))} />
+        </Form.Item>
+        <Form.Item name="embedding_model_id" label="Embedding 模型" extra="可稍后配置；未配置时使用兼容旧索引。">
+          <Select allowClear options={(embeddingModels.data ?? []).map(model => ({
+            value: model.id, label: `${model.name} · ${model.model_name} · ${model.dimensions}d`,
+          }))} />
         </Form.Item>
       </Form>
     </Modal>

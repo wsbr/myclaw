@@ -14,7 +14,7 @@ if [[ "$(stat -f '%Lp' "${env_file}" 2>/dev/null || stat -c '%a' "${env_file}")"
   exit 2
 fi
 
-for volume in myclaw-uat-mysql-data myclaw-uat-redis-data myclaw-uat-app-data; do
+for volume in myclaw-uat-mysql-data myclaw-uat-redis-data myclaw-uat-app-data myclaw-uat-qdrant-data; do
   docker volume inspect "${volume}" >/dev/null 2>&1 || docker volume create "${volume}" >/dev/null
 done
 

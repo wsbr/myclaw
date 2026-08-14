@@ -1,4 +1,4 @@
-"""Local document ingestion, immutable indexing, retrieval, and citations."""
+"""Managed document ingestion, immutable indexing, retrieval, and citations."""
 
 from __future__ import annotations
 
@@ -18,6 +18,7 @@ from pypdf import PdfReader
 from sqlalchemy import delete, or_, select
 
 from app.config import settings
+from app.database import AsyncSessionLocal
 from app.models.agent_v1 import AgentBlueprint
 from app.models.common import utcnow, uuid7
 from app.models.knowledge_v1 import (
@@ -30,6 +31,18 @@ from app.models.knowledge_v1 import (
     KnowledgeSource,
 )
 from app.models.runtime_v1 import DurableRunner
+from app.models.registry import ModelVersion, RegisteredModel
+from app.persistence.reliable_writes import OutboxWriter
+from app.services.embedding_service import (
+    EmbeddingProviderError,
+    EmbeddingSpec,
+    OpenAICompatibleEmbeddingClient,
+    embedding_spec,
+    is_embedding_model,
+)
+from app.services.model_registry_service import latest_terminal_conformance
+from app.services.provider_credentials import resolve_provider_credential
+from app.services.vector_store_service import QdrantVectorStore, VectorStoreError
 
 
 DEFAULT_CHUNKING_PROFILE = {
@@ -267,7 +280,7 @@ def store_source_bytes(
         if _digest(target.read_bytes()) != checksum:
             raise KnowledgeError(
                 "knowledge_storage_checksum_conflict",
-                "Existing local source body has an invalid checksum",
+                "Existing managed source body has an invalid checksum",
                 status_code=500,
             )
         return storage_key
@@ -321,7 +334,7 @@ async def owned_knowledge_base(
 
 async def create_knowledge_base(
     db, *, tenant_id: str, account_id: str, name: str, description: str,
-    agent_ids: list[str],
+    agent_ids: list[str], embedding_model_id: str | None = None,
 ) -> KnowledgeBase:
     name = unicodedata.normalize("NFKC", name).strip()
     if not name or len(name) > 200:
@@ -335,6 +348,12 @@ async def create_knowledge_base(
         if existing.status == "active":
             return existing
         raise KnowledgeError("knowledge_base_name_conflict", "A deleted base retains this name", status_code=409)
+    embedding_model = None
+    embedding_version = None
+    if embedding_model_id:
+        embedding_model, embedding_version = await resolve_knowledge_embedding_model(
+            db, embedding_model_id=embedding_model_id,
+        )
     item = KnowledgeBase(
         id=uuid7(), tenant_id=tenant_id, owner_account_id=account_id,
         name=name, description=description.strip(),
@@ -345,7 +364,17 @@ async def create_knowledge_base(
             "chunk_chars": settings.knowledge_chunk_chars,
             "overlap_chars": settings.knowledge_chunk_overlap_chars,
         },
-        embedding_profile=dict(DEFAULT_EMBEDDING_PROFILE),
+        embedding_model_id=embedding_model.id if embedding_model else None,
+        embedding_profile=(
+            {
+                "profile": "semantic.openai_compatible.v1",
+                "model_id": embedding_model.id,
+                "dimensions": embedding_spec(embedding_version).dimensions,
+                "vector_backend": settings.knowledge_vector_backend,
+            }
+            if embedding_model and embedding_version
+            else dict(DEFAULT_EMBEDDING_PROFILE)
+        ),
     )
     db.add(item)
     await db.flush()
@@ -354,6 +383,56 @@ async def create_knowledge_base(
         bump_version=False,
     )
     return item
+
+
+async def resolve_knowledge_embedding_model(
+    db, *, embedding_model_id: str,
+) -> tuple[RegisteredModel, ModelVersion]:
+    model = await db.get(RegisteredModel, embedding_model_id)
+    version = (
+        await db.get(ModelVersion, model.current_version_id)
+        if model is not None and model.current_version_id else None
+    )
+    if (
+        model is None or model.status != "active" or not model.enabled
+        or version is None or not is_embedding_model(version)
+    ):
+        raise KnowledgeError(
+            "knowledge_embedding_model_unavailable",
+            "Embedding model is unavailable or not activated",
+            status_code=409,
+        )
+    conformance = await latest_terminal_conformance(db, version.id)
+    if conformance is None or conformance.status != "passed":
+        raise KnowledgeError(
+            "knowledge_embedding_model_unverified",
+            "Embedding model has not passed its conformance suite",
+            status_code=409,
+        )
+    embedding_spec(version)
+    return model, version
+
+
+async def configure_knowledge_embedding(
+    db, *, knowledge_base: KnowledgeBase, account_id: str,
+    embedding_model_id: str,
+) -> KnowledgeIndexRevision:
+    model, version = await resolve_knowledge_embedding_model(
+        db, embedding_model_id=embedding_model_id,
+    )
+    spec = embedding_spec(version)
+    knowledge_base.embedding_model_id = model.id
+    knowledge_base.embedding_profile = {
+        "profile": "semantic.openai_compatible.v1",
+        "model_id": model.id,
+        "dimensions": spec.dimensions,
+        "vector_backend": settings.knowledge_vector_backend,
+    }
+    knowledge_base.version += 1
+    await db.flush()
+    return await schedule_semantic_index_revision(
+        db, knowledge_base=knowledge_base, account_id=account_id,
+    )
 
 
 async def replace_agent_access(
@@ -503,9 +582,120 @@ async def ingest_source(
     return document, source, revision, False
 
 
+async def schedule_semantic_index_revision(
+    db, *, knowledge_base: KnowledgeBase, account_id: str,
+    force_projection_rebuild: bool = False,
+) -> KnowledgeIndexRevision:
+    if not knowledge_base.embedding_model_id:
+        raise KnowledgeError(
+            "knowledge_embedding_model_missing", "Knowledge base has no Embedding model",
+            status_code=409,
+        )
+    _, version = await resolve_knowledge_embedding_model(
+        db, embedding_model_id=knowledge_base.embedding_model_id,
+    )
+    spec = embedding_spec(version)
+    documents = list(await db.scalars(select(KnowledgeDocument).where(
+        KnowledgeDocument.tenant_id == knowledge_base.tenant_id,
+        KnowledgeDocument.knowledge_base_id == knowledge_base.id,
+        KnowledgeDocument.status == "active",
+        KnowledgeDocument.current_source_id.is_not(None),
+    ).order_by(KnowledgeDocument.id).with_for_update()))
+    source_ids = [item.current_source_id for item in documents]
+    sources = list(await db.scalars(select(KnowledgeSource).where(
+        KnowledgeSource.tenant_id == knowledge_base.tenant_id,
+        KnowledgeSource.id.in_(source_ids),
+        KnowledgeSource.status == "indexed",
+    ))) if source_ids else []
+    source_by_id = {item.id: item for item in sources}
+    manifest = [{
+        "document_id": item.id,
+        "source_id": item.current_source_id,
+        "checksum": source_by_id[item.current_source_id].checksum,
+        "filename": source_by_id[item.current_source_id].filename,
+    } for item in documents if item.current_source_id in source_by_id]
+    profile = spec.snapshot()
+    manifest_hash = _digest({
+        "sources": manifest,
+        "chunking_profile": knowledge_base.chunking_profile,
+        "embedding_profile": profile,
+        "vector_backend": settings.knowledge_vector_backend,
+    })
+    content_hash = _digest({
+        "knowledge_base_id": knowledge_base.id,
+        "source_manifest_hash": manifest_hash,
+        # A manual rebuild deliberately creates a new immutable revision even
+        # when logical source/model inputs are unchanged. This is the recovery
+        # path after a vector-store restore or projection integrity incident.
+        "projection_rebuild_generation": uuid7() if force_projection_rebuild else None,
+    })
+    existing = await db.scalar(select(KnowledgeIndexRevision).where(
+        KnowledgeIndexRevision.knowledge_base_id == knowledge_base.id,
+        KnowledgeIndexRevision.content_hash == content_hash,
+    ).with_for_update())
+    if existing is not None:
+        if existing.status == "ready":
+            knowledge_base.current_index_revision_id = existing.id
+            knowledge_base.pending_index_revision_id = None
+            knowledge_base.version += 1
+            return existing
+        if existing.status in {"queued", "running"}:
+            knowledge_base.pending_index_revision_id = existing.id
+            return existing
+        existing.status = "queued"
+        existing.error_code = None
+        existing.error_detail = None
+        existing.started_at = None
+        existing.completed_at = None
+        revision = existing
+        replay_generation = uuid7()
+    else:
+        revision = KnowledgeIndexRevision(
+            id=uuid7(), tenant_id=knowledge_base.tenant_id,
+            knowledge_base_id=knowledge_base.id,
+            revision_no=knowledge_base.next_revision_no,
+            status="queued", source_manifest=manifest,
+            source_manifest_hash=manifest_hash,
+            chunking_profile=dict(knowledge_base.chunking_profile),
+            embedding_profile=profile,
+            embedding_model_version_id=version.id,
+            vector_backend=settings.knowledge_vector_backend,
+            vector_collection=None, vector_point_count=0,
+            document_count=len(manifest), chunk_count=0,
+            content_hash=content_hash,
+            created_by_account_id=account_id,
+        )
+        db.add(revision)
+        knowledge_base.next_revision_no += 1
+        replay_generation = "initial"
+    knowledge_base.pending_index_revision_id = revision.id
+    knowledge_base.version += 1
+    await db.flush()
+    await OutboxWriter(db).enqueue(
+        topic="knowledge.index", action="build_semantic_index",
+        aggregate_type="knowledge_index_revision", aggregate_id=revision.id,
+        partition_key=knowledge_base.id,
+        dedupe_key=f"semantic-index:{revision.id}:{replay_generation}",
+        tenant_id=knowledge_base.tenant_id, account_id=account_id,
+        payload_ref={
+            "knowledge_base_id": knowledge_base.id,
+            "index_revision_id": revision.id,
+            "embedding_model_version_id": version.id,
+        },
+        priority=80,
+    )
+    return revision
+
+
 async def build_index_revision(
     db, *, knowledge_base: KnowledgeBase, account_id: str,
+    force_semantic_rebuild: bool = False,
 ) -> KnowledgeIndexRevision:
+    if knowledge_base.embedding_model_id:
+        return await schedule_semantic_index_revision(
+            db, knowledge_base=knowledge_base, account_id=account_id,
+            force_projection_rebuild=force_semantic_rebuild,
+        )
     documents = list(await db.scalars(select(KnowledgeDocument).where(
         KnowledgeDocument.tenant_id == knowledge_base.tenant_id,
         KnowledgeDocument.knowledge_base_id == knowledge_base.id,
@@ -580,6 +770,9 @@ async def build_index_revision(
         source_manifest=manifest, source_manifest_hash=manifest_hash,
         chunking_profile=dict(knowledge_base.chunking_profile),
         embedding_profile=dict(knowledge_base.embedding_profile),
+        embedding_model_version_id=None,
+        vector_backend="mysql_json", vector_collection=None,
+        vector_point_count=len(drafts),
         document_count=len(manifest), chunk_count=len(drafts),
         content_hash=content_hash, created_by_account_id=account_id,
     )
@@ -598,6 +791,7 @@ async def build_index_revision(
         for index, (document, source, draft) in enumerate(drafts, 1)
     ])
     knowledge_base.current_index_revision_id = revision.id
+    knowledge_base.pending_index_revision_id = None
     knowledge_base.next_revision_no += 1
     knowledge_base.version += 1
     await db.flush()
@@ -720,6 +914,349 @@ def _lexical(query_terms: dict[str, int], document_terms: dict[str, int]) -> flo
     return matched / max(1.0, math.sqrt(
         sum(query_terms.values()) * sum(int(value) for value in document_terms.values())
     ))
+
+
+@dataclass(frozen=True)
+class SemanticSearchGroup:
+    spec: EmbeddingSpec
+    credential: str
+    collection: str
+    revision_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class DetachedSearchPlan:
+    tenant_id: str
+    account_id: str
+    agent_id: str | None
+    runner_id: str | None
+    query: str
+    query_terms: dict[str, int]
+    limit: int
+    bases: tuple[dict, ...]
+    local_candidates: tuple[tuple[str, float, float], ...]
+    semantic_groups: tuple[SemanticSearchGroup, ...]
+
+
+_retrieval_embedding_client: OpenAICompatibleEmbeddingClient | None = None
+_retrieval_vector_store: QdrantVectorStore | None = None
+
+
+def _shared_retrieval_clients() -> tuple[
+    OpenAICompatibleEmbeddingClient, QdrantVectorStore,
+]:
+    global _retrieval_embedding_client, _retrieval_vector_store
+    if _retrieval_embedding_client is None:
+        _retrieval_embedding_client = OpenAICompatibleEmbeddingClient(
+            timeout_seconds=settings.knowledge_embedding_timeout_seconds,
+        )
+    if _retrieval_vector_store is None:
+        _retrieval_vector_store = QdrantVectorStore()
+    return _retrieval_embedding_client, _retrieval_vector_store
+
+
+async def close_knowledge_retrieval_clients() -> None:
+    """Close process-wide HTTP pools during the application lifespan shutdown."""
+
+    global _retrieval_embedding_client, _retrieval_vector_store
+    clients = tuple(item for item in (
+        _retrieval_embedding_client, _retrieval_vector_store,
+    ) if item is not None)
+    _retrieval_embedding_client = None
+    _retrieval_vector_store = None
+    if clients:
+        await asyncio.gather(
+            *(item.close() for item in clients), return_exceptions=True,
+        )
+
+
+async def _accessible_bases(
+    db, *, tenant_id: str, account_id: str, agent_id: str | None,
+    knowledge_base_id: str | None,
+) -> list[KnowledgeBase]:
+    statement = select(KnowledgeBase).where(
+        KnowledgeBase.tenant_id == tenant_id,
+        KnowledgeBase.owner_account_id == account_id,
+        KnowledgeBase.status == "active",
+        KnowledgeBase.current_index_revision_id.is_not(None),
+    )
+    if knowledge_base_id:
+        statement = statement.where(KnowledgeBase.id == knowledge_base_id)
+    if agent_id is not None:
+        statement = statement.join(
+            KnowledgeBaseAgentAccess,
+            KnowledgeBaseAgentAccess.knowledge_base_id == KnowledgeBase.id,
+        ).where(
+            KnowledgeBase.sharing_policy == "selected_agents",
+            KnowledgeBaseAgentAccess.tenant_id == tenant_id,
+            KnowledgeBaseAgentAccess.agent_id == agent_id,
+        )
+    bases = list(await db.scalars(statement.order_by(KnowledgeBase.id)))
+    if knowledge_base_id and not bases:
+        raise KnowledgeError(
+            "knowledge_base_not_found", "Knowledge base not found", status_code=404,
+        )
+    return bases
+
+
+async def prepare_detached_search(
+    *, tenant_id: str, account_id: str, query: str,
+    agent_id: str | None, knowledge_base_id: str | None,
+    limit: int, runner_id: str | None,
+) -> DetachedSearchPlan:
+    query = unicodedata.normalize("NFKC", query).strip()
+    if not query or len(query) > 1000:
+        raise KnowledgeError("knowledge_query_invalid", "A bounded search query is required")
+    limit = max(1, min(int(limit), 20))
+    query_terms = dict(Counter(tokenize(query)))
+    query_vector = feature_vector(query_terms)
+    async with AsyncSessionLocal() as db:
+        bases = await _accessible_bases(
+            db, tenant_id=tenant_id, account_id=account_id,
+            agent_id=agent_id, knowledge_base_id=knowledge_base_id,
+        )
+        revisions = {
+            item.id: item for item in await db.scalars(select(KnowledgeIndexRevision).where(
+                KnowledgeIndexRevision.id.in_([
+                    item.current_index_revision_id for item in bases
+                ]),
+                KnowledgeIndexRevision.status == "ready",
+            ))
+        } if bases else {}
+        base_snapshots = tuple({
+            "id": item.id,
+            "name": item.name,
+            "index_revision_id": item.current_index_revision_id,
+        } for item in bases if item.current_index_revision_id in revisions)
+        local_revision_ids = [
+            revision.id for revision in revisions.values()
+            if revision.vector_backend != "qdrant"
+        ]
+        local_candidates: list[tuple[str, float, float]] = []
+        if local_revision_ids:
+            chunks = list(await db.scalars(select(KnowledgeChunk).where(
+                KnowledgeChunk.tenant_id == tenant_id,
+                KnowledgeChunk.index_revision_id.in_(local_revision_ids),
+            )))
+            for chunk in chunks:
+                lexical = _lexical(query_terms, chunk.term_frequencies or {})
+                local_vector = max(0.0, _cosine(query_vector, chunk.vector or {}))
+                score = 0.55 * lexical + 0.45 * local_vector
+                if score > 0:
+                    local_candidates.append((chunk.id, score, local_vector))
+            local_candidates.sort(key=lambda item: (-item[1], item[0]))
+            local_candidates = local_candidates[
+                :limit * settings.knowledge_vector_candidate_multiplier
+            ]
+        semantic_revision_groups: dict[tuple[str, str], list[str]] = {}
+        for revision in revisions.values():
+            if (
+                revision.vector_backend == "qdrant"
+                and revision.vector_collection
+                and revision.embedding_model_version_id
+            ):
+                semantic_revision_groups.setdefault(
+                    (revision.embedding_model_version_id, revision.vector_collection), [],
+                ).append(revision.id)
+        semantic_groups: list[SemanticSearchGroup] = []
+        for (model_version_id, collection), revision_ids in semantic_revision_groups.items():
+            version = await db.get(ModelVersion, model_version_id)
+            if version is None:
+                raise KnowledgeError(
+                    "knowledge_embedding_model_version_missing",
+                    "Indexed Embedding model evidence is unavailable",
+                    status_code=503,
+                )
+            semantic_groups.append(SemanticSearchGroup(
+                spec=embedding_spec(version),
+                credential=await resolve_provider_credential(db, version.credential_ref),
+                collection=collection,
+                revision_ids=tuple(sorted(revision_ids)),
+            ))
+        return DetachedSearchPlan(
+            tenant_id=tenant_id, account_id=account_id,
+            agent_id=agent_id, runner_id=runner_id,
+            query=query, query_terms=query_terms, limit=limit,
+            bases=base_snapshots,
+            local_candidates=tuple(local_candidates),
+            semantic_groups=tuple(semantic_groups),
+        )
+
+
+async def execute_detached_search(plan: DetachedSearchPlan) -> dict:
+    semantic_scores: dict[str, float] = {}
+    embedding_client, vector_store = _shared_retrieval_clients()
+    try:
+        for group in plan.semantic_groups:
+            embedded = await embedding_client.embed(
+                spec=group.spec, api_key=group.credential, texts=[plan.query],
+            )
+            matches = await vector_store.query(
+                collection=group.collection,
+                vector=embedded.vectors[0],
+                tenant_id=plan.tenant_id,
+                revision_ids=list(group.revision_ids),
+                limit=plan.limit * settings.knowledge_vector_candidate_multiplier,
+            )
+            semantic_scores.update({item.id: max(0.0, item.score) for item in matches})
+    except (EmbeddingProviderError, VectorStoreError) as error:
+        raise KnowledgeError(
+            error.code,
+            "Semantic Knowledge retrieval is temporarily unavailable"
+            if error.retryable else "Semantic Knowledge retrieval configuration is invalid",
+            status_code=503,
+        ) from error
+
+    local_by_id = {
+        chunk_id: (score, local_vector)
+        for chunk_id, score, local_vector in plan.local_candidates
+    }
+    candidate_ids = set(local_by_id) | set(semantic_scores)
+    planned_revision_ids = {item["index_revision_id"] for item in plan.bases}
+    planned_base_by_id = {item["id"]: item for item in plan.bases}
+    async with AsyncSessionLocal.begin() as db:
+        current_bases = await _accessible_bases(
+            db, tenant_id=plan.tenant_id, account_id=plan.account_id,
+            agent_id=plan.agent_id, knowledge_base_id=None,
+        )
+        valid_base_ids = {
+            item.id for item in current_bases
+            if planned_base_by_id.get(item.id, {}).get("index_revision_id")
+            == item.current_index_revision_id
+        }
+        chunks = list(await db.scalars(select(KnowledgeChunk).where(
+            KnowledgeChunk.id.in_(candidate_ids),
+            KnowledgeChunk.tenant_id == plan.tenant_id,
+            KnowledgeChunk.index_revision_id.in_(planned_revision_ids),
+            KnowledgeChunk.knowledge_base_id.in_(valid_base_ids),
+        ))) if candidate_ids and valid_base_ids else []
+        sources = {
+            item.id: item for item in await db.scalars(select(KnowledgeSource).where(
+                KnowledgeSource.tenant_id == plan.tenant_id,
+                KnowledgeSource.id.in_({chunk.source_id for chunk in chunks}),
+            ))
+        } if chunks else {}
+        scored = []
+        availability: dict[str, bool] = {}
+        for chunk in chunks:
+            source = sources.get(chunk.source_id)
+            base = planned_base_by_id.get(chunk.knowledge_base_id)
+            if source is None or base is None or source.status == "deleted":
+                continue
+            if source.id not in availability:
+                try:
+                    await asyncio.to_thread(load_source_bytes, source)
+                    availability[source.id] = True
+                except KnowledgeError:
+                    availability[source.id] = False
+            if not availability[source.id]:
+                continue
+            lexical = _lexical(plan.query_terms, chunk.term_frequencies or {})
+            if chunk.id in semantic_scores:
+                semantic = semantic_scores[chunk.id]
+                score = 0.25 * lexical + 0.75 * semantic
+                profile = "semantic"
+            else:
+                score, semantic = local_by_id[chunk.id]
+                profile = "local_feature_hash"
+            if score > 0:
+                scored.append((score, chunk, source, base, lexical, semantic, profile))
+        scored.sort(key=lambda item: (-item[0], item[1].id))
+        results = []
+        for score, chunk, source, base, lexical, semantic, profile in scored[:plan.limit]:
+            results.append({
+                "knowledge_base_id": base["id"],
+                "knowledge_base_name": base["name"],
+                "index_revision_id": chunk.index_revision_id,
+                "document_id": chunk.document_id,
+                "source_id": source.id,
+                "chunk_id": chunk.id,
+                "filename": source.filename,
+                "page_number": chunk.page_number,
+                "section": chunk.section,
+                "source_checksum": source.checksum,
+                "chunk_checksum": chunk.content_hash,
+                "score": round(score, 6),
+                "lexical_score": round(lexical, 6),
+                "semantic_score": round(semantic, 6),
+                "retrieval_kind": profile,
+                "excerpt": chunk.content[:1600],
+                "citation": {
+                    "source_id": source.id,
+                    "index_revision_id": chunk.index_revision_id,
+                    "chunk_id": chunk.id,
+                    "filename": source.filename,
+                    "page_number": chunk.page_number,
+                    "section": chunk.section,
+                    "checksum": source.checksum,
+                },
+            })
+        manifest = [{
+            "knowledge_base_id": item["id"],
+            "index_revision_id": item["index_revision_id"],
+        } for item in plan.bases if item["id"] in valid_base_ids]
+        manifest_hash = _digest(manifest)
+        query_hash = _digest(plan.query.encode("utf-8"))
+        if plan.runner_id is not None:
+            runner = await db.scalar(select(DurableRunner).where(
+                DurableRunner.id == plan.runner_id,
+                DurableRunner.tenant_id == plan.tenant_id,
+                DurableRunner.agent_id == plan.agent_id,
+            ))
+            if runner is None:
+                raise KnowledgeError(
+                    "knowledge_runner_authority_invalid",
+                    "Knowledge retrieval Runner authority is invalid",
+                    status_code=403,
+                )
+            existing = await db.scalar(select(KnowledgeRetrievalSnapshot).where(
+                KnowledgeRetrievalSnapshot.runner_id == plan.runner_id,
+                KnowledgeRetrievalSnapshot.query_hash == query_hash,
+                KnowledgeRetrievalSnapshot.revision_manifest_hash == manifest_hash,
+            ))
+            if existing is None:
+                snapshot_results = [{
+                    key: value for key, value in item.items()
+                    if key not in {"excerpt", "lexical_score", "semantic_score"}
+                } for item in results]
+                db.add(KnowledgeRetrievalSnapshot(
+                    id=uuid7(), tenant_id=plan.tenant_id,
+                    account_id=plan.account_id, runner_id=plan.runner_id,
+                    agent_id=plan.agent_id, query_hash=query_hash,
+                    revision_manifest=manifest,
+                    revision_manifest_hash=manifest_hash,
+                    result_snapshot=snapshot_results,
+                    content_hash=_digest({
+                        "query_hash": query_hash,
+                        "revision_manifest": manifest,
+                        "results": snapshot_results,
+                    }),
+                ))
+        return {
+            "query": plan.query,
+            "count": len(results),
+            "results": results,
+            "revision_manifest": manifest,
+            "retrieval_profile": {
+                "hybrid": "semantic.embedding.v1+local.term_frequency.v1",
+                "vector_backend": "qdrant" if plan.semantic_groups else "mysql_json",
+                "external_embedding": bool(plan.semantic_groups),
+            },
+        }
+
+
+async def search_knowledge_detached(
+    *, tenant_id: str, account_id: str, query: str,
+    agent_id: str | None, knowledge_base_id: str | None = None,
+    limit: int = 8, runner_id: str | None = None,
+) -> dict:
+    plan = await prepare_detached_search(
+        tenant_id=tenant_id, account_id=account_id,
+        query=query, agent_id=agent_id,
+        knowledge_base_id=knowledge_base_id,
+        limit=limit, runner_id=runner_id,
+    )
+    return await execute_detached_search(plan)
 
 
 async def search_knowledge(
@@ -897,6 +1434,10 @@ async def knowledge_base_view(db, item: KnowledgeBase) -> dict:
         await db.get(KnowledgeIndexRevision, item.current_index_revision_id)
         if item.current_index_revision_id else None
     )
+    pending_revision = (
+        await db.get(KnowledgeIndexRevision, item.pending_index_revision_id)
+        if item.pending_index_revision_id else None
+    )
     document_count = len(list(await db.scalars(select(KnowledgeDocument.id).where(
         KnowledgeDocument.tenant_id == item.tenant_id,
         KnowledgeDocument.knowledge_base_id == item.id,
@@ -912,9 +1453,13 @@ async def knowledge_base_view(db, item: KnowledgeBase) -> dict:
         "status": item.status,
         "agent_ids": await agent_access_ids(db, item.id, item.tenant_id),
         "current_index_revision": index_revision_view(revision) if revision else None,
+        "pending_index_revision": (
+            index_revision_view(pending_revision) if pending_revision else None
+        ),
         "document_count": document_count,
         "chunking_profile": dict(item.chunking_profile or {}),
         "embedding_profile": dict(item.embedding_profile or {}),
+        "embedding_model_id": item.embedding_model_id,
         "version": item.version,
         "created_at": item.created_at.isoformat() if item.created_at else None,
         "updated_at": item.updated_at.isoformat() if item.updated_at else None,
@@ -929,8 +1474,17 @@ def index_revision_view(item: KnowledgeIndexRevision) -> dict:
         "source_manifest_hash": item.source_manifest_hash,
         "document_count": item.document_count,
         "chunk_count": item.chunk_count,
+        "embedding_model_version_id": item.embedding_model_version_id,
+        "embedding_profile": dict(item.embedding_profile or {}),
+        "vector_backend": item.vector_backend,
+        "vector_collection": item.vector_collection,
+        "vector_point_count": item.vector_point_count,
+        "error_code": item.error_code,
+        "error_detail": item.error_detail,
         "content_hash": item.content_hash,
         "built_at": item.built_at.isoformat() if item.built_at else None,
+        "started_at": item.started_at.isoformat() if item.started_at else None,
+        "completed_at": item.completed_at.isoformat() if item.completed_at else None,
     }
 
 

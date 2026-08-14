@@ -4,6 +4,35 @@ All notable changes to MyClaw are documented in this file. The format follows [K
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-15
+
+### Added
+
+- Added first-class Embedding ModelVersions with a separate OpenAI-compatible
+  Conformance suite, frozen dimensions and explicit rejection from Agent chat
+  assemblies.
+- Added Qdrant-backed semantic vector projection, Tenant/revision payload
+  filters and hybrid semantic/lexical retrieval with exact citations.
+- Added a durable bounded Knowledge indexing worker with transactional Outbox
+  dispatch, leases, heartbeats, fencing, deterministic idempotent point IDs,
+  bounded Provider batches and retry/terminal failure evidence.
+- Added Knowledge UI controls for Embedding model selection, current/pending
+  index state, Qdrant point counts and semantic result evidence.
+
+### Changed
+
+- Moved Knowledge Embedding and vector operations outside database
+  transactions; the previous ready revision remains current until the complete
+  replacement projection is committed.
+- Retained legacy feature-hash revisions for compatibility while making the
+  semantic profile available per KnowledgeBase.
+
+### Release scope
+
+- Explicit UI/API ingestion only; MyClaw does not scan or synchronize local
+  user directories. OCR and production multi-region Qdrant operation remain
+  outside this release.
+
 ## [0.3.1] - 2026-08-14
 
 ### Added
