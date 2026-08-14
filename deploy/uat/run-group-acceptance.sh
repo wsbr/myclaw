@@ -60,6 +60,7 @@ set +e
   cd "${root}/test"
   "${pytest_bin}" \
     e2e/fullstack/test_platform_tool_v3_real.py::test_group_real_model_emergence_async_handoff_and_restart \
+    e2e/fullstack/test_platform_tool_v3_real.py::test_group_real_model_pathological_handoff_is_safely_bounded \
     -m fullstack -v --tb=short \
     --junitxml="${evidence_dir}/real-model-emergent-group.xml"
 )

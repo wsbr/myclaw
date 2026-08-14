@@ -348,6 +348,70 @@ def emergent_group_world(phase_api: MyClawAPI, real_llm_world: dict):
 
 
 @pytest.fixture(scope="session")
+def pathological_group_world(phase_api: MyClawAPI, real_llm_world: dict):
+    """A real-model Group whose bounded dependency attempts to re-enter its caller."""
+
+    api = phase_api
+    suffix = uuid.uuid4().hex[:10]
+    common = {
+        "model_id": real_llm_world["model"]["id"],
+        "sandbox_profile_id": real_llm_world["sandbox"]["id"],
+        "context_policy_id": real_llm_world["policies"]["context.standard"],
+        "history_policy_id": real_llm_world["policies"]["history.summary_recent"],
+        "memory_write_policy_id": real_llm_world["policies"]["memory_write.user_facts"],
+        "memory_recall_policy_id": real_llm_world["policies"]["memory_recall.user_combined"],
+    }
+    tool_ids = [
+        item["id"] for item in real_llm_world["tools"]
+        if item["enabled"] and item["tool_key"] != "web_search"
+    ]
+
+    def create_agent(name: str, description: str, instructions: str) -> dict:
+        created = api.request("POST", "/api/v1/agents", json={
+            "visibility": "enterprise",
+            "draft": {
+                **common,
+                "name": f"{name} {suffix}",
+                "description": description,
+                "instructions": instructions,
+                "group_enabled": True,
+                "tool_ids": tool_ids,
+                "skill_ids": [],
+                "bound_agent_ids": [],
+                "discovery_config": {"domain_tags": [name.casefold()]},
+                "collaboration_config": {"accepts_delegation": True},
+            },
+        }).json()
+        published = api.request(
+            "POST", f"/api/v1/agents/{created['agent']['id']}/publish", idem=True,
+            json={"expected_draft_revision": created["draft"]["draft_revision"]},
+        ).json()["published_version"]
+        return {"id": created["agent"]["id"], "published": published}
+
+    anchor = create_agent(
+        "LoopAnchor",
+        "Conversation anchor and requirements authority that routes a dependency-chain audit to its primary dependency reviewer.",
+        "For a dependency-chain audit, hand the main task to the Group member whose description owns dependency review. After any directed result arrives, integrate it and finish once.",
+    )
+    reviewer = create_agent(
+        "LoopReviewer",
+        "Primary owner for dependency-chain audits that consults the originating requirements authority before issuing a conclusion.",
+        "Own the dependency audit. Before concluding, use invoke_agent to ask the current Group requirements authority to reconfirm the original acceptance rule. If Runtime blocks that request, treat the guard result as authoritative, state that the dependency was safely bounded, and return the best conclusion from existing facts.",
+    )
+    observer = create_agent(
+        "LoopObserver",
+        "Independent observer for runtime safety evidence; not the primary dependency reviewer or requirements authority.",
+        "Only analyze a bounded runtime-safety question when explicitly handed one. Never manufacture work or broadcast duplicate results.",
+    )
+    return {
+        "suffix": suffix,
+        "anchor": anchor,
+        "reviewer": reviewer,
+        "observer": observer,
+    }
+
+
+@pytest.fixture(scope="session")
 def assembled_world(phase_api: MyClawAPI):
     api = phase_api
     env = _required_environment()

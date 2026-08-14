@@ -655,3 +655,78 @@ def test_group_real_model_emergence_async_handoff_and_restart(
             f"no-duplicate-delivery,restart-recovery,tool-approvals={len(approvals)}"
         ),
     )
+
+
+@pytest.mark.timeout(1800)
+def test_group_real_model_pathological_handoff_is_safely_bounded(
+    phase_api: MyClawAPI, pathological_group_world: dict,
+    record_testsuite_property,
+):
+    api = phase_api
+    anchor_id = pathological_group_world["anchor"]["id"]
+    reviewer_id = pathological_group_world["reviewer"]["id"]
+    observer_id = pathological_group_world["observer"]["id"]
+    session = api.create_session(anchor_id)
+    group = api.request(
+        "POST", f"/api/v1/sessions/{session['id']}/groups", idem=True,
+        json={
+            "member_agent_ids": [anchor_id, reviewer_id, observer_id],
+            "reporter_agent_id": anchor_id,
+            "goal": (
+                "Audit this dependency chain using only the stated facts: the acceptance rule "
+                "belongs to the requirements authority, while the primary dependency reviewer "
+                "must validate it before the final conclusion. Exercise the normal asynchronous "
+                "Group handoff protocol and finish with the Runtime guard outcome if a dependency "
+                "would re-enter the causal delegation chain."
+            ),
+            "shared_context_refs": [],
+        },
+    ).json()
+    group_run = api.request(
+        "GET", f"/api/v1/groups/{group['id']}/runs",
+    ).json()["items"][0]
+    run, approvals = _settle_with_tool_approvals(
+        api, session["id"], group_run["run"]["id"], timeout=900,
+    )
+    assert run["status"] == "completed", run
+
+    invocations = api.request(
+        "GET", f"/api/v1/runs/{run['id']}/agent-invocations",
+    ).json()["items"]
+    assert any(
+        item["status"] == "succeeded"
+        and item["caller_agent_id"] == anchor_id
+        and item["target_agent_id"] == reviewer_id
+        for item in invocations
+    ), invocations
+    rejected_cycles = [
+        item for item in invocations
+        if item["status"] == "rejected"
+        and item["caller_agent_id"] == reviewer_id
+        and item["target_agent_id"] == anchor_id
+        and item["error_code"] == "group_invocation_cycle"
+    ]
+    assert len(rejected_cycles) == 1, invocations
+
+    diagnostics = api.request(
+        "GET", f"/api/v1/group-runs/{group_run['id']}/diagnostics",
+    ).json()["items"]
+    matching = [
+        item for item in diagnostics
+        if item["diagnostic_code"] == "group_invocation_cycle"
+    ]
+    assert len(matching) == 1, diagnostics
+    diagnostic = matching[0]
+    assert diagnostic["disposition"] == "blocked"
+    assert diagnostic["causal_chain"] == [anchor_id, reviewer_id, anchor_id]
+    assert diagnostic["source_entity_id"] == rejected_cycles[0]["id"]
+    assert "request_fingerprint" in diagnostic["safe_details"]
+    assert "task" not in diagnostic["safe_details"]
+    assert run["terminal_reason"] == "completed", run
+    record_testsuite_property(
+        "group_pathological_gate",
+        (
+            "real-model-causal-reentry,one-durable-diagnostic,safely-bounded,"
+            f"completed-without-false-business-error,tool-approvals={len(approvals)}"
+        ),
+    )

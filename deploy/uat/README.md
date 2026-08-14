@@ -49,6 +49,6 @@ Collector 健康端口默认为 `http://127.0.0.1:13135/`。
 
 重置完成后，对同一套 `myclaw-uat` 服务执行 `deploy/uat/run-acceptance.sh`。脚本拒绝脏工作树或不匹配的固定 Commit，并要求配置的真实模型、外部连接与隔离 Chromium 可用；原始证据写入被 Git 忽略的 `deploy/uat/evidence/<commit>/`。
 
-仅复验涌现式 Group 契约时，可执行 `deploy/uat/run-group-acceptance.sh`。它仍要求与干净 Commit 绑定的标准门禁和真实主模型，但不要求与 Group 场景无关的外部连接；验收会校验语义选组、全异步定向 handoff、无重复交付与 Worker 重启恢复。
+仅复验涌现式 Group 契约时，可执行 `deploy/uat/run-group-acceptance.sh`。它仍要求与干净 Commit 绑定的标准门禁和真实主模型，但不要求与 Group 场景无关的外部连接；验收同时运行健康协作与病理协作，校验语义选组、全异步定向 handoff、无重复交付、Worker 重启恢复，以及因果回入被唯一持久诊断安全收敛。
 
 默认只绑定本机回环地址。如需让同一局域网的另一台设备访问，必须同时调整 `UAT_BIND_HOST`、`UAT_API_PUBLIC_URL` 与 `CORS_ORIGINS`，然后重建 Frontend，不能只开放端口。
