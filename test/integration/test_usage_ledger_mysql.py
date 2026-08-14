@@ -28,6 +28,7 @@ async def test_mysql_usage_ledger_schema_and_immutability_triggers():
     factory = async_sessionmaker(engine, expire_on_commit=False)
     price_id = uuid7()
     entry_id = uuid7()
+    tenant_id = uuid7()
 
     async with factory.begin() as db:
         tables = set((await db.execute(text(
@@ -70,16 +71,17 @@ async def test_mysql_usage_ledger_schema_and_immutability_triggers():
         })
         await db.execute(text(
             "INSERT INTO usage_ledger_entry ("
-            "id,account_id,session_id,run_id,source_type,source_id,"
+            "id,tenant_id,account_id,session_id,run_id,source_type,source_id,"
             "source_operation_key,metric,unit,quantity,measurement_status,"
             "price_snapshot_id,currency,unit_price_snapshot,cost_amount,"
             "cost_status,safe_metadata,created_at"
             ") VALUES ("
-            ":id,:account,:session,:run,'adjustment',:source,:operation,"
+            ":id,:tenant,:account,:session,:run,'adjustment',:source,:operation,"
             "'requests','request',-1.000000000,'measured',:price,'USD',"
             "1.000000000000,-1.000000000000,'contracted',JSON_OBJECT(),NOW())"
         ), {
             "id": entry_id,
+            "tenant": tenant_id,
             "account": uuid7(),
             "session": uuid7(),
             "run": uuid7(),
