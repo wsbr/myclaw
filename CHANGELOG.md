@@ -4,9 +4,20 @@ All notable changes to MyClaw are documented in this file. The format follows [K
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-08-14
+
+### Added
+
+- Added a 30-second sanitized replay of a completed real-model emergent Group UAT run, preserving the actual Agent roles, message order, and interaction edges without publishing operational identifiers or evidence details.
+
 ### Changed
 
+- Reworked the README first screen around the user value, real Group flow, and a three-command local start path.
 - Streamlined the public documentation, removed environment-specific acceptance artifacts and superseded internal plans, and added validation, release, link, and metadata hygiene gates.
+
+### Release scope
+
+- This patch release tightens public onboarding and release evidence. It does not change the stated single-machine/UAT trust boundary or claim production HA, strong untrusted-code isolation, or enterprise identity features.
 
 ## [0.1.0] - 2026-08-14
 
@@ -30,5 +41,5 @@ All notable changes to MyClaw are documented in this file. The format follows [K
 
 - The default Compose deployment is a single-machine development profile.
 - Local Sandbox is not a production-grade untrusted-code boundary.
-- Enterprise multi-tenancy, production OIDC/OBO, multi-AZ infrastructure, and committed SLO/RPO/RTO remain target architecture rather than v0.1.0 implementation claims.
+- Enterprise multi-tenancy, production OIDC/OBO, multi-AZ infrastructure, and committed SLO/RPO/RTO remain target architecture rather than implemented release claims.
 - Real Agent behavior depends on the configured model and must be validated with the real-model UAT suite.

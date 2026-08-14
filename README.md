@@ -1,10 +1,30 @@
 # MyClaw
 
-MyClaw is an Agent-native platform for durable chat, plan-first execution, Tool use, and emergent multi-Agent collaboration.
+[![CI](https://github.com/wsbr/myclaw/actions/workflows/ci.yml/badge.svg)](https://github.com/wsbr/myclaw/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/wsbr/myclaw)](https://github.com/wsbr/myclaw/releases)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-它不是固定工作流编排器，也不为每个 Agent 启动常驻服务。Agent 是可版本化的逻辑工作主体；任务到达后，Runtime Worker 才按需领取持久化 Runner，并通过统一 Agent Loop 推进工作。
+**从一次正常聊天，涌现出一个可恢复、可审计、会异步交付的 Agent 团队。**
 
-> **Release status:** `v0.1.0` is a single-machine/UAT release for development and architectural evaluation. The repository contains a production reference architecture, but the local Compose profile is not a production security or HA profile.
+MyClaw is an Agent-native runtime for durable Chat, plan-first execution, governed Tool use, and emergent multi-Agent collaboration. 用户先与一个 Agent 正常对话；开启 Group 后，模型从受治理的 Agent `name/description` 目录中选择最小必要成员，成员再根据任务语义异步 `@请求`、`@交付`，而不是预先拉出一张固定协作图。
+
+![MyClaw emergent Group: sanitized replay of a completed real-model UAT run](docs/assets/emergent-group-demo.gif)
+
+> **30-second product replay:** 来自一次已完成真实模型 UAT 的脱敏回放。它保留实际的 3 个 Agent、8 条持久化消息和真实交互边，移除了账号、Session/Run/Agent 标识及原始审计细节。回放源文件是 [`docs/assets/emergent-group-demo.html`](docs/assets/emergent-group-demo.html)。
+
+这次流转从 Recovery 的正常 Chat 开始；Recovery 只建立最小项目组并立即向用户返回，Evidence 完成自己的审查后按语义把安全核查交给 Security。定向消息只唤醒接收者，Group 留痕只保存收紧后的进度、分歧和结果。
+
+> **Release status:** `v0.1.1` is a single-machine/UAT release for development and architectural evaluation. The repository contains a production reference architecture, but the local Compose profile is not a production security or HA profile.
+
+## Run it locally
+
+```bash
+git clone https://github.com/wsbr/myclaw.git
+cd myclaw
+make up
+```
+
+首次启动会生成仅供本机使用的随机凭据并拉起核心服务：Web UI 位于 <http://localhost:8080>，OpenAPI 位于 <http://localhost:8000/docs>。登录后配置真实模型并发布一个 AgentVersion，即可开始 Chat；完整要求和 Provider 配置见[快速上手](#quick-start)。
 
 ## Why MyClaw
 
@@ -139,7 +159,7 @@ Real-model full-stack acceptance requires explicit Provider credentials and cont
 
 ## Project maturity
 
-| Area | v0.1.0 status |
+| Area | v0.1.1 status |
 | --- | --- |
 | Durable Runtime, Outbox, lease/fencing | Implemented and unit tested |
 | Chat / Plan / Group unified loop | Implemented; real-model behavior requires UAT |

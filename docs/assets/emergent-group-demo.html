@@ -1,0 +1,477 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MyClaw Emergent Group — Sanitized UAT Replay</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #13251f;
+      --muted: #66736e;
+      --paper: #f4f1e9;
+      --card: #fffdf7;
+      --line: #d9ded8;
+      --green: #0e7056;
+      --green-soft: #dcefe6;
+      --amber: #b56428;
+      --amber-soft: #f7e8d6;
+      --blue: #356a83;
+      --blue-soft: #deedf3;
+      --shadow: 0 18px 50px rgba(20, 41, 34, .10);
+    }
+
+    * { box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+    body {
+      background:
+        radial-gradient(circle at 8% 0%, rgba(14, 112, 86, .09), transparent 30%),
+        radial-gradient(circle at 100% 100%, rgba(181, 100, 40, .10), transparent 34%),
+        var(--paper);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    .shell {
+      width: 1280px;
+      height: 720px;
+      padding: 28px;
+      display: grid;
+      grid-template-columns: 230px 1fr;
+      gap: 22px;
+    }
+
+    .rail, .workspace {
+      border: 1px solid rgba(19, 37, 31, .10);
+      background: rgba(255, 253, 247, .92);
+      box-shadow: var(--shadow);
+    }
+
+    .rail {
+      border-radius: 28px;
+      padding: 26px 22px;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .brand {
+      font-family: Georgia, "Times New Roman", serif;
+      font-size: 34px;
+      letter-spacing: -.8px;
+    }
+
+    .eyebrow {
+      margin-top: 8px;
+      color: var(--green);
+      font-size: 11px;
+      font-weight: 800;
+      letter-spacing: 1.7px;
+      text-transform: uppercase;
+    }
+
+    .rail h1 {
+      margin: 52px 0 12px;
+      font-size: 28px;
+      line-height: 1.08;
+      letter-spacing: -.7px;
+    }
+
+    .rail p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.6;
+    }
+
+    .facts {
+      margin-top: 26px;
+      display: grid;
+      gap: 10px;
+    }
+
+    .fact {
+      padding: 12px 13px;
+      border-radius: 15px;
+      background: #f0eee6;
+      border: 1px solid rgba(19, 37, 31, .07);
+    }
+
+    .fact b { display: block; font-size: 13px; }
+    .fact span { color: var(--muted); font-size: 11px; }
+
+    .verified {
+      margin-top: auto;
+      padding: 12px 13px;
+      border-radius: 15px;
+      color: var(--green);
+      background: var(--green-soft);
+      font-size: 11px;
+      font-weight: 750;
+      line-height: 1.45;
+    }
+
+    .workspace {
+      min-width: 0;
+      border-radius: 30px;
+      padding: 22px 24px 20px;
+      display: grid;
+      grid-template-rows: 64px 1fr 88px;
+      gap: 14px;
+    }
+
+    .topbar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 14px;
+    }
+
+    .request {
+      max-width: 700px;
+      font-size: 15px;
+      font-weight: 650;
+      line-height: 1.45;
+    }
+
+    .request span {
+      display: block;
+      margin-bottom: 3px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: .9px;
+      text-transform: uppercase;
+    }
+
+    .run-state {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 9px 12px;
+      border-radius: 999px;
+      background: var(--green-soft);
+      color: var(--green);
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .pulse {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: currentColor;
+      box-shadow: 0 0 0 5px rgba(14, 112, 86, .12);
+    }
+
+    .content {
+      min-height: 0;
+      display: grid;
+      grid-template-columns: 1.06fr .94fr;
+      gap: 16px;
+    }
+
+    .graph, .history {
+      min-height: 0;
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      background: rgba(255, 255, 255, .58);
+      overflow: hidden;
+    }
+
+    .panel-title {
+      height: 48px;
+      padding: 15px 17px 12px;
+      border-bottom: 1px solid var(--line);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    .panel-title small {
+      color: var(--muted);
+      font-size: 10px;
+      font-weight: 650;
+    }
+
+    .graph-stage {
+      position: relative;
+      height: calc(100% - 48px);
+      padding: 20px;
+    }
+
+    .node {
+      position: absolute;
+      width: 152px;
+      min-height: 72px;
+      padding: 13px 14px;
+      border: 1px solid var(--line);
+      border-radius: 17px;
+      background: var(--card);
+      box-shadow: 0 8px 22px rgba(20, 41, 34, .08);
+      z-index: 2;
+      transition: .25s ease;
+    }
+
+    .node::before {
+      content: "";
+      display: block;
+      width: 8px;
+      height: 8px;
+      margin-bottom: 8px;
+      border-radius: 50%;
+      background: #aab3ae;
+    }
+
+    .node b { display: block; font-size: 16px; }
+    .node span { color: var(--muted); font-size: 11px; }
+    .node.recovery { left: 34px; top: 126px; }
+    .node.evidence { left: 210px; top: 36px; }
+    .node.security { left: 210px; top: 216px; }
+    .node.user { left: 390px; top: 126px; width: 110px; text-align: center; }
+
+    .node.active {
+      border-color: rgba(14, 112, 86, .45);
+      box-shadow: 0 9px 26px rgba(14, 112, 86, .14);
+      transform: translateY(-2px);
+    }
+    .node.active::before { background: var(--green); }
+
+    svg.edges {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 1;
+      overflow: visible;
+    }
+
+    .edge {
+      fill: none;
+      stroke: #c5ccc8;
+      stroke-width: 2.2;
+      stroke-dasharray: 6 6;
+      transition: .25s ease;
+    }
+    .edge.active { stroke: var(--green); stroke-width: 3; stroke-dasharray: none; }
+    .edge.delivery.active { stroke: var(--blue); }
+
+    .edge-label {
+      position: absolute;
+      z-index: 3;
+      padding: 4px 7px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: var(--card);
+      color: var(--muted);
+      font-size: 9px;
+      font-weight: 800;
+      opacity: .38;
+    }
+    .edge-label.active { opacity: 1; color: var(--green); border-color: rgba(14, 112, 86, .30); }
+    .edge-label.delivery.active { color: var(--blue); border-color: rgba(53, 106, 131, .32); }
+    .l-re { left: 169px; top: 90px; }
+    .l-es { left: 275px; top: 165px; }
+    .l-se { left: 350px; top: 232px; }
+    .l-er { left: 116px; top: 224px; }
+    .l-ru { left: 332px; top: 143px; }
+
+    .history-list {
+      height: calc(100% - 48px);
+      padding: 12px;
+      display: grid;
+      grid-template-rows: repeat(8, 1fr);
+      gap: 5px;
+    }
+
+    .event {
+      min-height: 0;
+      padding: 5px 9px;
+      border: 1px solid var(--line);
+      border-radius: 11px;
+      background: var(--card);
+      opacity: .18;
+      filter: grayscale(1);
+      transition: .25s ease;
+      overflow: hidden;
+    }
+
+    .event.visible { opacity: 1; filter: none; }
+    .event .route {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--green);
+      font-size: 10px;
+      font-weight: 850;
+    }
+    .event.delivery .route { color: var(--blue); }
+    .event.group-note .route { color: var(--amber); }
+    .event p {
+      margin: 2px 0 0;
+      color: #33453f;
+      font-size: 10.5px;
+      line-height: 1.32;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .bottom {
+      display: grid;
+      grid-template-columns: 1fr 230px;
+      gap: 14px;
+    }
+
+    .status-copy, .semantics {
+      border-radius: 18px;
+      padding: 14px 16px;
+    }
+
+    .status-copy {
+      color: #fff;
+      background: var(--ink);
+      display: flex;
+      align-items: center;
+      gap: 13px;
+    }
+
+    .step-no {
+      flex: 0 0 auto;
+      width: 42px;
+      height: 42px;
+      border-radius: 13px;
+      display: grid;
+      place-items: center;
+      background: rgba(255, 255, 255, .12);
+      font-family: Georgia, serif;
+      font-size: 22px;
+    }
+
+    .status-copy b { display: block; font-size: 14px; }
+    .status-copy span { display: block; margin-top: 3px; color: #c9d2ce; font-size: 11px; }
+
+    .semantics {
+      background: var(--amber-soft);
+      color: var(--amber);
+      font-size: 10.5px;
+      font-weight: 750;
+      line-height: 1.42;
+      display: flex;
+      align-items: center;
+    }
+
+    .frame-tag {
+      position: fixed;
+      right: 36px;
+      bottom: 11px;
+      color: rgba(19, 37, 31, .46);
+      font-size: 9px;
+      letter-spacing: .7px;
+      text-transform: uppercase;
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <aside class="rail">
+      <div class="brand">MyClaw</div>
+      <div class="eyebrow">Agent-native runtime</div>
+      <h1>One chat.<br>A real team emerges.</h1>
+      <p>模型按用户诉求，从受治理的 Agent 名称与描述中选择最小必要成员。</p>
+      <div class="facts">
+        <div class="fact"><b>3 Agents</b><span>Recovery · Evidence · Security</span></div>
+        <div class="fact"><b>8 persisted messages</b><span>direct request · delivery · group note</span></div>
+        <div class="fact"><b>Fully asynchronous</b><span>handoff 后上游立即面向用户返回</span></div>
+      </div>
+      <div class="verified">✓ Sanitized replay from a completed real-model UAT run</div>
+    </aside>
+
+    <section class="workspace">
+      <header class="topbar">
+        <div class="request"><span>User → Recovery · normal chat</span>审查恢复方案：先核验证据；把安全风险作为需要专业复核的子问题。</div>
+        <div class="run-state"><i class="pulse"></i><span id="runState">Group emerging</span></div>
+      </header>
+
+      <div class="content">
+        <section class="graph">
+          <div class="panel-title">Persisted interaction graph <small>only real message facts</small></div>
+          <div class="graph-stage">
+            <svg class="edges" viewBox="0 0 520 330" aria-hidden="true">
+              <path class="edge e-re" d="M 184 165 C 215 118, 225 105, 246 93" />
+              <path class="edge e-es" d="M 286 108 C 276 150, 276 185, 286 222" />
+              <path class="edge delivery e-se" d="M 340 246 C 420 230, 420 105, 340 88" />
+              <path class="edge delivery e-er" d="M 250 245 C 192 246, 148 224, 120 194" />
+              <path class="edge delivery e-ru" d="M 184 165 C 255 165, 334 165, 390 165" />
+            </svg>
+
+            <div class="node recovery active"><b>Recovery</b><span>Chat anchor · Reporter</span></div>
+            <div class="node evidence"><b>Evidence</b><span>Primary owner · Integrator</span></div>
+            <div class="node security"><b>Security</b><span>Bounded specialist</span></div>
+            <div class="node user active"><b>User</b><span>human-visible</span></div>
+
+            <div class="edge-label l-re">request</div>
+            <div class="edge-label l-es">request</div>
+            <div class="edge-label delivery l-se">delivery</div>
+            <div class="edge-label delivery l-er">delivery</div>
+            <div class="edge-label delivery l-ru">summary</div>
+          </div>
+        </section>
+
+        <section class="history">
+          <div class="panel-title">Human-visible Group history <small id="messageCount">1 / 8</small></div>
+          <div class="history-list">
+            <article class="event visible" data-step="1"><div class="route">User → @Recovery</div><p>完成证据主导的恢复方案审查；缺失内容列为未解决风险。</p></article>
+            <article class="event" data-step="2"><div class="route">Recovery → User</div><p>已找到 Evidence 与 Security 成立项目组，并将主审交给 Evidence。</p></article>
+            <article class="event" data-step="2"><div class="route">Recovery → @Evidence</div><p>请主审恢复证据；如需安全专长，由你按审查语义继续委托。</p></article>
+            <article class="event" data-step="3"><div class="route">Evidence → @Security</div><p>请核查快照可信度、密钥隔离、最小权限与审计完整性。</p></article>
+            <article class="event group-note" data-step="3"><div class="route">Evidence → Group 留痕</div><p>证据矩阵已建立；该进度不会自动通知其他成员。</p></article>
+            <article class="event delivery" data-step="4"><div class="route">Security → @Evidence · delivery</div><p>5 项安全风险成立；已给出有界验证结论与缓解建议。</p></article>
+            <article class="event delivery" data-step="5"><div class="route">Evidence → @Recovery · delivery</div><p>证据与安全结论已整合；建议暂缓全量恢复并补齐四项门槛。</p></article>
+            <article class="event delivery" data-step="6"><div class="route">Recovery → User</div><p>最终结论已返回：校验、日志、灰度和回滚门槛均可审计。</p></article>
+          </div>
+        </section>
+      </div>
+
+      <footer class="bottom">
+        <div class="status-copy"><div class="step-no" id="stepNo">01</div><div><b id="stepTitle">Normal chat anchors the request</b><span id="stepDetail">Recovery sees the governed Agent catalog; no fixed collaboration graph is prebuilt.</span></div></div>
+        <div class="semantics">定向 @请求/@交付会唤醒唯一接收者；Group 留痕只保存收紧的进度、分歧与结果。</div>
+      </footer>
+    </section>
+  </main>
+
+  <div class="frame-tag">MyClaw v0.1.1 · sanitized UAT replay</div>
+
+  <script>
+    const step = Math.min(6, Math.max(1, Number(new URLSearchParams(location.search).get('step')) || 1));
+    const copy = [
+      ['Normal chat anchors the request', 'Recovery sees the governed Agent catalog; no fixed collaboration graph is prebuilt.'],
+      ['The smallest useful Group emerges', 'Recovery selects Evidence as owner and Security as bounded specialist, then hands off asynchronously.'],
+      ['Evidence delegates by meaning', 'After its own review, Evidence asks Security to verify the security-specific conclusions.'],
+      ['Security delivers to the caller', 'The directed delivery wakes Evidence; the full process remains human-visible in Group history.'],
+      ['Evidence integrates, Recovery prepares', 'Evidence returns one tightened result; Recovery now owns the final user-facing summary.'],
+      ['One durable, auditable outcome', 'The run completes with persisted messages, real interaction edges, evidence gaps and a clear decision.']
+    ];
+    const counts = ['1 / 8', '3 / 8', '5 / 8', '6 / 8', '7 / 8', '8 / 8'];
+    const states = ['Chat completed', 'Group emerged', 'Handoff running', 'Delivery received', 'Reporter summarizing', 'Run completed'];
+
+    document.querySelectorAll('.event').forEach((event) => {
+      if (Number(event.dataset.step) <= step) event.classList.add('visible');
+    });
+    document.querySelector('.node.evidence').classList.toggle('active', step >= 2);
+    document.querySelector('.node.security').classList.toggle('active', step >= 3);
+    document.querySelectorAll('.e-re, .l-re').forEach((el) => el.classList.toggle('active', step >= 2));
+    document.querySelectorAll('.e-es, .l-es').forEach((el) => el.classList.toggle('active', step >= 3));
+    document.querySelectorAll('.e-se, .l-se').forEach((el) => el.classList.toggle('active', step >= 4));
+    document.querySelectorAll('.e-er, .l-er').forEach((el) => el.classList.toggle('active', step >= 5));
+    document.querySelectorAll('.e-ru, .l-ru').forEach((el) => el.classList.toggle('active', step >= 6));
+    document.getElementById('stepNo').textContent = String(step).padStart(2, '0');
+    document.getElementById('stepTitle').textContent = copy[step - 1][0];
+    document.getElementById('stepDetail').textContent = copy[step - 1][1];
+    document.getElementById('messageCount').textContent = counts[step - 1];
+    document.getElementById('runState').textContent = states[step - 1];
+  </script>
+</body>
+</html>
