@@ -41,7 +41,7 @@ from app.models.runtime_v1 import (
 )
 from app.models.group_v1 import (
     GroupSession, GroupRun, GroupRunReference, GroupMembership, GroupRunMember,
-    GroupSummaryRequest, SharedTask,
+    GroupSummaryRequest, GroupDiagnostic, SharedTask,
 )
 from app.models.artifact_v1 import Artifact, MessageArtifact, GroupArtifact
 from app.models.memory_v1 import (
@@ -77,7 +77,7 @@ __all__ = [
     "ToolInvocation", "ToolAttempt", "ToolConfirmation", "AgentInvocation",
     "RunnerSkillSnapshot", "RunnerToolSnapshot", "RunnerPolicySnapshot",
     "GroupSession", "GroupRun", "GroupRunReference", "GroupMembership",
-    "GroupRunMember", "GroupSummaryRequest", "SharedTask",
+    "GroupRunMember", "GroupSummaryRequest", "GroupDiagnostic", "SharedTask",
     "Artifact", "MessageArtifact", "GroupArtifact",
     "MemoryHead", "MemoryRecord", "MemorySourceMessage", "RunnerMemorySnapshot",
     "MemoryWriteCandidate", "MemoryCandidateSourceMessage",

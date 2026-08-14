@@ -196,6 +196,52 @@ paths:
           content: {application/json: {schema: {$ref: '#/components/schemas/Account'}}}
         default: {$ref: '#/components/responses/Error'}
 
+  /admin/runtime/summary:
+    get:
+      tags: [Operations]
+      operationId: getRuntimeConsoleSummary
+      description: Administrator-only redacted projection of global Runtime, queue and active-lease health.
+      responses:
+        '200': {description: Runtime health snapshot., content: {application/json: {schema: {$ref: '#/components/schemas/RuntimeConsoleSummary'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /admin/runtime/runs:
+    get:
+      tags: [Operations]
+      operationId: listRuntimeConsoleRuns
+      parameters:
+        - {name: status, in: query, schema: {type: string}}
+        - {name: mode, in: query, schema: {type: string, enum: [chat, plan, group]}}
+        - {name: account_id, in: query, schema: {$ref: '#/components/schemas/Uuid'}}
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/Cursor'}
+      responses:
+        '200': {description: Redacted global Run page., content: {application/json: {schema: {$ref: '#/components/schemas/RuntimeRunPage'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /admin/runtime/runs/{run_id}:
+    get:
+      tags: [Operations]
+      operationId: getRuntimeConsoleRun
+      parameters:
+        - {$ref: '#/components/parameters/RunId'}
+      responses:
+        '200': {description: Redacted operational Run detail., content: {application/json: {schema: {$ref: '#/components/schemas/RuntimeRunDetail'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /admin/runtime/outbox:
+    get:
+      tags: [Operations]
+      operationId: listRuntimeConsoleOutbox
+      parameters:
+        - {name: topic, in: query, schema: {type: string}}
+        - {name: status, in: query, schema: {type: string, enum: [pending, claimed, retry_wait, completed, dead]}}
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/Cursor'}
+      responses:
+        '200': {description: Redacted Outbox command page without payload or raw errors., content: {application/json: {schema: {$ref: '#/components/schemas/RuntimeOutboxPage'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
   /admin/accounts/{account_id}/external-identities:
     get:
       tags: [Accounts, Identity]
@@ -1146,6 +1192,18 @@ paths:
         - {$ref: '#/components/parameters/RawUserId'}
       responses:
         '200': {description: Immutable member snapshot page., content: {application/json: {schema: {$ref: '#/components/schemas/GroupRunMemberPage'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /group-runs/{group_run_id}/diagnostics:
+    get:
+      tags: [Groups]
+      operationId: listGroupRunDiagnostics
+      parameters:
+        - {$ref: '#/components/parameters/GroupRunId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+        - {name: limit, in: query, schema: {type: integer, minimum: 1, maximum: 100, default: 100}}
+      responses:
+        '200': {description: Reverse-chronological append-only Runtime diagnostics for this GroupRun., content: {application/json: {schema: {$ref: '#/components/schemas/GroupDiagnosticPage'}}}}
         default: {$ref: '#/components/responses/Error'}
 
   /group-runs/{group_run_id}/interaction-graph:
@@ -2666,6 +2724,97 @@ components:
       additionalProperties: false
       required: [items, next_cursor]
       properties: {items: {type: array, items: {$ref: '#/components/schemas/GroupRunMember'}}, next_cursor: {type: [string, 'null']}}
+    GroupDiagnostic:
+      type: object
+      additionalProperties: false
+      required: [id, session_id, run_id, group_session_id, group_run_id, diagnostic_code, category, severity, disposition, source_entity_type, source_entity_id, source_event_id, caller_agent_id, target_agent_id, causal_fingerprint, causal_chain, limit_snapshot, safe_details, summary, created_at]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        session_id: {$ref: '#/components/schemas/Uuid'}
+        run_id: {$ref: '#/components/schemas/Uuid'}
+        group_session_id: {$ref: '#/components/schemas/Uuid'}
+        group_run_id: {$ref: '#/components/schemas/Uuid'}
+        diagnostic_code: {type: string}
+        category: {type: string, enum: [delegation_guard, progress_guard, quiescence, delivery]}
+        severity: {type: string, enum: [info, warning, error]}
+        disposition: {type: string, enum: [observed, warned, blocked, recovered]}
+        source_entity_type: {type: string}
+        source_entity_id: {$ref: '#/components/schemas/Uuid'}
+        source_event_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        caller_agent_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        target_agent_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        causal_fingerprint: {type: string, pattern: '^[0-9a-f]{64}$'}
+        causal_chain: {type: array, items: {$ref: '#/components/schemas/Uuid'}}
+        limit_snapshot: {type: object, additionalProperties: true}
+        safe_details: {type: object, additionalProperties: true}
+        summary: {type: string}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+    GroupDiagnosticPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/GroupDiagnostic'}}, next_cursor: {type: [string, 'null']}}
+    RuntimeConsoleSummary:
+      type: object
+      additionalProperties: false
+      required: [generated_at, runs, runners, tool_invocations, agent_invocations, outbox, observed_workers, outcome_unknown, diagnostic_count]
+      properties:
+        generated_at: {$ref: '#/components/schemas/Timestamp'}
+        runs: {type: object, additionalProperties: {type: integer, minimum: 0}}
+        runners: {type: object, additionalProperties: {type: integer, minimum: 0}}
+        tool_invocations: {type: object, additionalProperties: {type: integer, minimum: 0}}
+        agent_invocations: {type: object, additionalProperties: {type: integer, minimum: 0}}
+        outbox: {type: array, items: {type: object, additionalProperties: true}}
+        observed_workers: {type: array, description: Workers inferred only from current Runner/Tool/Outbox leases; this is not an idle-worker registry., items: {type: object, additionalProperties: true}}
+        outcome_unknown: {type: object, additionalProperties: false, required: [provider_attempts, tool_attempts], properties: {provider_attempts: {type: integer, minimum: 0}, tool_attempts: {type: integer, minimum: 0}}}
+        diagnostic_count: {type: integer, minimum: 0}
+    RuntimeRunProjection:
+      type: object
+      additionalProperties: false
+      required: [id, session_id, account_id, mode, status, wait_reason, terminal_reason, root_work_item_id, permission_mode, created_at, updated_at, completed_at, deadline_at, age_seconds, counts, budget, last_progress]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        session_id: {$ref: '#/components/schemas/Uuid'}
+        account_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        mode: {type: string, enum: [chat, plan, group]}
+        status: {type: string}
+        wait_reason: {type: [string, 'null']}
+        terminal_reason: {type: [string, 'null']}
+        root_work_item_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        permission_mode: {type: string}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        updated_at: {$ref: '#/components/schemas/Timestamp'}
+        completed_at: {oneOf: [{$ref: '#/components/schemas/Timestamp'}, {type: 'null'}]}
+        deadline_at: {oneOf: [{$ref: '#/components/schemas/Timestamp'}, {type: 'null'}]}
+        age_seconds: {type: integer, minimum: 0}
+        counts: {type: object, additionalProperties: true}
+        budget: {type: object, additionalProperties: true}
+        last_progress: {type: [object, 'null'], additionalProperties: true}
+    RuntimeRunPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/RuntimeRunProjection'}}, next_cursor: {type: [string, 'null']}}
+    RuntimeRunDetail:
+      type: object
+      description: RuntimeRunProjection fields plus the redacted child collections below.
+      additionalProperties: true
+      required: [id, work_items, runners, provider_attempts, tool_invocations, agent_invocations, diagnostics, timeline, outbox]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        work_items: {type: array, items: {type: object, additionalProperties: true}}
+        runners: {type: array, items: {type: object, additionalProperties: true}}
+        provider_attempts: {type: array, items: {type: object, additionalProperties: true}}
+        tool_invocations: {type: array, items: {type: object, additionalProperties: true}}
+        agent_invocations: {type: array, items: {type: object, additionalProperties: true}}
+        diagnostics: {type: array, items: {$ref: '#/components/schemas/GroupDiagnostic'}}
+        timeline: {type: array, items: {type: object, additionalProperties: true}}
+        outbox: {type: array, items: {type: object, additionalProperties: true}}
+    RuntimeOutboxPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties: {items: {type: array, items: {type: object, additionalProperties: true}}, next_cursor: {type: [string, 'null']}}
     GroupRun:
       type: object
       additionalProperties: false

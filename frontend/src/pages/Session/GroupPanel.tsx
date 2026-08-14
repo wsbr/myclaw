@@ -5,6 +5,7 @@ import 'reactflow/dist/style.css'
 import type { AgentCard } from '@/api/agents'
 import type {
   Artifact,
+  GroupDiagnostic,
   GroupMembership,
   GroupMessage,
   GroupRun,
@@ -23,6 +24,7 @@ interface Props {
   runs: GroupRun[]
   messages: GroupMessage[]
   graph?: InteractionGraph
+  diagnostics: GroupDiagnostic[]
   plans: WorkingPlan[]
   artifacts: Artifact[]
   requiredActions: RequiredAction[]
@@ -36,7 +38,7 @@ interface Props {
 const short = (value?: string | null) => value ? value.slice(0, 10) : '—'
 
 export default function GroupPanel({
-  group, activeRun, cards, members, runs, messages, graph, plans, artifacts,
+  group, activeRun, cards, members, runs, messages, graph, diagnostics, plans, artifacts,
   requiredActions, sharedTasks, busy, onSelectRun, onReplaceReporter, onDownload,
 }: Props) {
   const cardByAgent = new Map(cards.map(card => [card.agent_id, card]))
@@ -147,6 +149,47 @@ export default function GroupPanel({
         message="本 GroupRun 已完成，但存在失败事实"
         description="图、消息与摘要均限定在当前选中的 Run；失败不会再被旧 Run 内容覆盖。"
       />}
+
+      <Card size="small" title="Runtime 诊断与循环护栏" extra={<Tag color={diagnostics.length ? 'orange' : 'green'}>{diagnostics.length} 条</Tag>}>
+        {diagnostics.length ? <Table
+          size="small"
+          pagination={false}
+          rowKey="id"
+          dataSource={diagnostics}
+          columns={[
+            {
+              title: '时间', dataIndex: 'created_at', width: 150,
+              render: (value: string) => new Date(value).toLocaleString(),
+            },
+            {
+              title: '决策', dataIndex: 'diagnostic_code',
+              render: (value: string, item: GroupDiagnostic) => <Space direction="vertical" size={0}>
+                <Typography.Text code>{value}</Typography.Text>
+                <Typography.Text type="secondary" className="text-xs">{item.summary}</Typography.Text>
+              </Space>,
+            },
+            {
+              title: '调用链',
+              render: (_: unknown, item: GroupDiagnostic) => item.caller_agent_id
+                ? `${name(item.caller_agent_id)} → ${name(item.target_agent_id)}` : 'Runtime',
+            },
+            {
+              title: '处置', dataIndex: 'disposition', width: 90,
+              render: (value: string) => <Tag color={value === 'blocked' ? 'orange' : 'blue'}>{value}</Tag>,
+            },
+          ]}
+          expandable={{
+            expandedRowRender: item => <Descriptions size="small" column={1}>
+              <Descriptions.Item label="因果链">{item.causal_chain.length ? item.causal_chain.map(name).join(' → ') : '—'}</Descriptions.Item>
+              <Descriptions.Item label="限制快照"><Typography.Text code>{JSON.stringify(item.limit_snapshot)}</Typography.Text></Descriptions.Item>
+              <Descriptions.Item label="诊断指纹"><Typography.Text copyable>{item.causal_fingerprint}</Typography.Text></Descriptions.Item>
+            </Descriptions>,
+          }}
+        /> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="本次 GroupRun 未触发循环或调度护栏" />}
+        <Typography.Paragraph type="secondary" className="!mb-0 !mt-2 text-xs">
+          护栏拦截会保留不可变诊断事实；被成功收敛的重复或循环委托不会单独污染最终业务结果。
+        </Typography.Paragraph>
+      </Card>
 
       <Card size="small" title={`固定的 GroupRun 成员快照 · ${short(activeRun?.id)}`}>
         <Table size="small" pagination={false} rowKey="membership_id" dataSource={activeRun?.members || []}

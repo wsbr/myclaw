@@ -16,7 +16,7 @@ import os
 from dataclasses import dataclass, replace
 from datetime import timedelta
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.exc import DBAPIError
 
 from app.config import settings
@@ -82,6 +82,7 @@ from app.services.group_collaboration_service import (
     build_group_emergence_candidate_snapshot,
     emerge_group_after_chat,
 )
+from app.services.group_diagnostic_service import CONTAINED_GROUP_GUARD_REJECTIONS
 from app.services.skill_catalog_service import build_skill_catalog_sections
 
 
@@ -1684,9 +1685,18 @@ class RuntimeWorker:
         ).limit(1))
         failed_invocation_id = await db.scalar(select(AgentInvocation.id).where(
             AgentInvocation.group_run_id == group_run.id,
-            AgentInvocation.status.in_((
-                "failed", "cancelled", "timed_out", "rejected",
-            )),
+            or_(
+                AgentInvocation.status.in_(("failed", "cancelled", "timed_out")),
+                and_(
+                    AgentInvocation.status == "rejected",
+                    or_(
+                        AgentInvocation.error_code.is_(None),
+                        AgentInvocation.error_code.notin_(
+                            CONTAINED_GROUP_GUARD_REJECTIONS
+                        ),
+                    ),
+                ),
+            ),
         ).limit(1))
         completed_with_errors = bool(failed_work_id or failed_invocation_id)
         run.status = "completed"

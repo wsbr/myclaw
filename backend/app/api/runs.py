@@ -324,7 +324,7 @@ async def create_agent_invocation_for_admin_test(
             invocation = await persist_rejected_agent_invocation(
                 db, caller_runner=caller_runner, caller_work=caller_work,
                 run=run, arguments=arguments, operation_key=body.operation_key,
-                reason=str(error),
+                reason=str(error), reason_code=error.code,
             )
         except AgentInvocationRejected as collision:
             raise HTTPException(

@@ -8,7 +8,7 @@ from app.deps import SessionActor, get_session_actor
 from app.models.common import utcnow, uuid7
 from app.models.foundation import ExecutionEvent
 from app.models.group_v1 import (
-    GroupRun, GroupSession, GroupMembership, GroupRunMember,
+    GroupDiagnostic, GroupRun, GroupSession, GroupMembership, GroupRunMember,
     GroupSummaryRequest, SharedTask,
 )
 from app.models.runtime_v1 import (
@@ -32,6 +32,7 @@ from app.services.group_collaboration_service import (
     membership_view,
     native_group_run_view,
 )
+from app.services.group_diagnostic_service import group_diagnostic_view
 
 router = APIRouter(tags=["groups"])
 NON_TERMINAL_WORK = {"queued", "running", "waiting_user", "waiting_agent", "waiting_tool", "waiting_resource"}
@@ -206,6 +207,30 @@ async def list_group_run_members(
         GroupRunMember.group_run_id == group_run.id
     ).order_by(GroupRunMember.agent_id)))
     return {"items": [group_run_member_view(item) for item in rows], "next_cursor": None}
+
+
+@router.get("/group-runs/{group_run_id}/diagnostics")
+async def list_group_run_diagnostics(
+    group_run_id: str,
+    limit: int = 100,
+    db: AsyncSession = Depends(get_db),
+    actor: SessionActor = Depends(get_session_actor),
+):
+    """Return append-only, user-safe Runtime decisions for one GroupRun."""
+
+    group_run = await db.get(GroupRun, group_run_id)
+    if group_run is None:
+        raise HTTPException(status_code=404, detail="GroupRun not found")
+    await owned_group(db, group_run.group_session_id, actor)
+    rows = list(await db.scalars(select(GroupDiagnostic).where(
+        GroupDiagnostic.group_run_id == group_run.id,
+    ).order_by(
+        GroupDiagnostic.created_at.desc(), GroupDiagnostic.id.desc(),
+    ).limit(max(1, min(limit, 100)))))
+    return {
+        "items": [group_diagnostic_view(item) for item in rows],
+        "next_cursor": None,
+    }
 
 
 @router.get("/group-runs/{group_run_id}/interaction-graph")

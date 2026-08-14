@@ -7,7 +7,9 @@ from types import SimpleNamespace
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from app.api.groups import create_group, get_group_interaction_graph
+from app.api.groups import (
+    create_group, get_group_interaction_graph, list_group_run_diagnostics,
+)
 from app.core.tool_registry.base import RuntimeContext
 from app.core.tool_registry.builtin.search_group_history import SearchGroupHistoryTool
 from app.runtime.coordination_tools import dispatch_coordination_tool
@@ -20,6 +22,7 @@ from app.models.foundation import (
 )
 from app.models.group_v1 import (
     GroupMembership,
+    GroupDiagnostic,
     GroupRun,
     GroupRunMember,
     GroupSession,
@@ -37,6 +40,10 @@ from app.services.group_collaboration_service import (
     send_agent_group_message,
 )
 from app.services.run_followup_service import enqueue_run_terminal_followups
+from app.services.runtime_console_service import (
+    runtime_console_summary,
+    runtime_run_detail,
+)
 from app.services.visible_events import VisibleEventProjection
 from app.workers.runtime_worker import (
     RuntimeWorker,
@@ -762,6 +769,151 @@ async def test_group_peers_message_invoke_audit_and_repeat_history():
         assert request_message.visibility == "direct"
         assert request_message.content == "Execute boundary tests and reverse-review the calculator"
         assert test_runner.input_snapshot["source_message_id"] == request_message.id
+
+        self_call_result, _, _ = await dispatch_coordination_tool(
+            "invoke_agent",
+            {"agent_id": development_id, "task": "Delegate this work to myself", "input": {}},
+            context=development_context,
+            db=db,
+            run_id=run.id,
+            work_item_id=development_work.id,
+            source_turn_id="development-self-call-turn",
+            provider_call_id="development-self-call-invocation",
+        )
+        assert not self_call_result.success
+        assert self_call_result.error.code == "agent_invocation_self_cycle"
+
+        # A second operation key must not allow the same caller WorkItem to
+        # dispatch the same exact task twice. The rejection is a durable,
+        # user-safe Group diagnostic rather than only an exception string.
+        duplicate_result, duplicate_wait, duplicate_reason = await dispatch_coordination_tool(
+            "invoke_agent",
+            {
+                "agent_id": test_id,
+                "task": "Execute boundary tests and reverse-review the calculator",
+                "input": {"acceptance": "capacity and utilization risk"},
+            },
+            context=development_context,
+            db=db,
+            run_id=run.id,
+            work_item_id=development_work.id,
+            source_turn_id="development-review-turn-duplicate",
+            provider_call_id="development-to-test-invocation-duplicate",
+        )
+        assert not duplicate_result.success
+        assert duplicate_wait is False and duplicate_reason is None
+        assert duplicate_result.error.code == "group_duplicate_delegation"
+
+        duplicate_replay, _, _ = await dispatch_coordination_tool(
+            "invoke_agent",
+            {
+                "agent_id": test_id,
+                "task": "Execute boundary tests and reverse-review the calculator",
+                "input": {"acceptance": "capacity and utilization risk"},
+            },
+            context=development_context,
+            db=db,
+            run_id=run.id,
+            work_item_id=development_work.id,
+            source_turn_id="development-review-turn-duplicate",
+            provider_call_id="development-to-test-invocation-duplicate",
+        )
+        assert not duplicate_replay.success
+        assert duplicate_replay.error.code == "group_duplicate_delegation"
+        assert duplicate_replay.data["agent_invocation_id"] == (
+            duplicate_result.data["agent_invocation_id"]
+        )
+
+        # The delegated Test Agent may deliver to Development, but it cannot
+        # create another invocation back into its causal delegation chain.
+        test_context = RuntimeContext(
+            session_id=session_id, runner_id=test_runner.id, user_id="peer-user",
+            account_id=account_id, agent_id=test_id,
+            group_session_id=group_view["id"], group_run_id=group_run.id,
+            group_membership_id=memberships[test_id].id,
+        )
+        cycle_result, cycle_wait, cycle_reason = await dispatch_coordination_tool(
+            "invoke_agent",
+            {
+                "agent_id": development_id,
+                "task": "Return the same review to Development for another pass",
+                "input": {},
+            },
+            context=test_context,
+            db=db,
+            run_id=run.id,
+            work_item_id=test_work.id,
+            source_turn_id="test-cycle-turn",
+            provider_call_id="test-to-development-cycle",
+        )
+        assert not cycle_result.success
+        assert cycle_wait is False and cycle_reason is None
+        assert cycle_result.error.code == "group_invocation_cycle"
+
+        original_test_principal = dict(test_runner.principal_snapshot)
+        test_runner.principal_snapshot = {
+            **original_test_principal,
+            "delegation_chain": [uuid7() for _ in range(8)],
+        }
+        depth_result, _, _ = await dispatch_coordination_tool(
+            "invoke_agent",
+            {"agent_id": product_id, "task": "Request one more deep review", "input": {}},
+            context=test_context,
+            db=db,
+            run_id=run.id,
+            work_item_id=test_work.id,
+            source_turn_id="test-max-depth-turn",
+            provider_call_id="test-max-depth-invocation",
+        )
+        assert not depth_result.success
+        assert depth_result.error.code == "group_invocation_max_depth"
+        test_runner.principal_snapshot = original_test_principal
+
+        run.hard_budget_snapshot = {
+            **dict(run.hard_budget_snapshot or {}),
+            "max_agent_fan_out_per_work_item": 1,
+        }
+        fan_out_result, _, _ = await dispatch_coordination_tool(
+            "invoke_agent",
+            {"agent_id": product_id, "task": "Request an additional product audit", "input": {}},
+            context=development_context,
+            db=db,
+            run_id=run.id,
+            work_item_id=development_work.id,
+            source_turn_id="development-fan-out-turn",
+            provider_call_id="development-fan-out-invocation",
+        )
+        assert not fan_out_result.success
+        assert fan_out_result.error.code == "group_fan_out_exhausted"
+
+        diagnostic_rows = list(await db.scalars(select(GroupDiagnostic).where(
+            GroupDiagnostic.group_run_id == group_run.id,
+        ).order_by(GroupDiagnostic.created_at, GroupDiagnostic.id)))
+        assert [item.diagnostic_code for item in diagnostic_rows] == [
+            "agent_invocation_self_cycle",
+            "group_duplicate_delegation",
+            "group_invocation_cycle",
+            "group_invocation_max_depth",
+            "group_fan_out_exhausted",
+        ]
+        assert all(item.disposition == "blocked" for item in diagnostic_rows)
+        assert all(item.category == "delegation_guard" for item in diagnostic_rows)
+        cycle_diagnostic = next(
+            item for item in diagnostic_rows
+            if item.diagnostic_code == "group_invocation_cycle"
+        )
+        assert cycle_diagnostic.causal_chain == [development_id, test_id, development_id]
+        diagnostic_api = await list_group_run_diagnostics(
+            group_run.id, db=db, actor=actor,
+        )
+        assert [item["diagnostic_code"] for item in diagnostic_api["items"]] == [
+            "group_fan_out_exhausted",
+            "group_invocation_max_depth",
+            "group_invocation_cycle",
+            "group_duplicate_delegation",
+            "agent_invocation_self_cycle",
+        ]
+        assert all("task" not in item["safe_details"] for item in diagnostic_api["items"])
         rejected = await reject_fixed_run_invitation(
             db, context=development_context, run_id=run.id,
             work_item_id=development_work.id, target_agent_id=uuid7(),
@@ -854,6 +1006,17 @@ async def test_group_peers_message_invoke_audit_and_repeat_history():
         assert run.status == "completed" and run.terminal_reason == "completed"
         assert group_run.delivered_summary_epoch == 1
 
+        console_summary = await runtime_console_summary(db)
+        assert console_summary["runs"]["completed"] == 1
+        assert console_summary["diagnostic_count"] == 5
+        console_detail = await runtime_run_detail(db, run)
+        assert console_detail["counts"]["diagnostics"] == 5
+        assert console_detail["budget"]["usage"]["agent_invocations"] == 6
+        assert len(console_detail["agent_invocations"]) == 6
+        assert all("request_text" not in item for item in console_detail["agent_invocations"])
+        assert all("payload_ref" not in item for item in console_detail["outbox"])
+        assert all("content" not in item for item in console_detail["timeline"])
+
     async with factory() as db:
         history_context = RuntimeContext(
             session_id=session_id, runner_id=uuid7(), user_id="peer-user",
@@ -938,7 +1101,12 @@ async def test_group_peers_message_invoke_audit_and_repeat_history():
         )) >= 7
         assert await db.scalar(select(func.count()).select_from(AgentInvocation).where(
             AgentInvocation.group_run_id == group_run.id,
+            AgentInvocation.status == "succeeded",
         )) == 1
+        assert await db.scalar(select(func.count()).select_from(AgentInvocation).where(
+            AgentInvocation.group_run_id == group_run.id,
+            AgentInvocation.status == "rejected",
+        )) == 5
         extract = await db.scalar(select(OutboxCommand).where(
             OutboxCommand.topic == "runtime.maintenance",
             OutboxCommand.action == "extract_memory",

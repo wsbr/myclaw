@@ -1,6 +1,7 @@
 import { lazy, Suspense, useState, useEffect } from 'react'
 import { useNavigate, useLocation, Routes, Route, Navigate } from 'react-router-dom'
 import {
+  Activity,
   Bot,
   Brain,
   ChevronRight,
@@ -32,6 +33,7 @@ const SkillsPage = lazy(() => import('@/pages/Admin/SkillsPage'))
 const ModelsPage = lazy(() => import('@/pages/Admin/ModelsPage'))
 const GovernancePage = lazy(() => import('@/pages/Admin/GovernancePage'))
 const AuditPage = lazy(() => import('@/pages/Admin/AuditPage'))
+const RuntimePage = lazy(() => import('@/pages/Admin/RuntimePage'))
 const MemoriesPage = lazy(() => import('@/pages/Memories'))
 const AccountPage = lazy(() => import('@/pages/Account'))
 const AgentNetworkPage = lazy(() => import('@/pages/AgentNetwork'))
@@ -49,6 +51,7 @@ const navItems: { key: string; label: string; icon: typeof Bot; roles?: string[]
   { key: '/models', label: '模型管理', icon: Cpu, roles: ['admin'] },
   { key: '/governance', label: 'Policy / Sandbox', icon: ShieldCheck, roles: ['admin'] },
   { key: '/audit', label: 'Platform Audit', icon: ScrollText, roles: ['admin'] },
+  { key: '/runtime', label: 'Runtime Console', icon: Activity, roles: ['admin'] },
 ]
 
 const breadcrumbMap: Record<string, string> = {
@@ -62,6 +65,7 @@ const breadcrumbMap: Record<string, string> = {
   '/models': '模型管理',
   '/governance': 'Policy / Sandbox',
   '/audit': 'Platform Audit',
+  '/runtime': 'Runtime Console',
 }
 
 function breadcrumbLabel(pathname: string): string {
@@ -218,6 +222,7 @@ export default function WorkspaceLayout() {
               <Route path="/models" element={<ModelsPage />} />
               <Route path="/governance" element={<GovernancePage />} />
               <Route path="/audit" element={<AuditPage />} />
+              <Route path="/runtime" element={<RuntimePage />} />
               <Route path="/admin" element={<Navigate to="/users" replace />} />
               <Route path="/sessions/:sessionId/trace" element={<TracePage />} />
             </Routes>

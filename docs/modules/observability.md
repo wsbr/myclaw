@@ -85,6 +85,7 @@ plan.permission_entered | plan.permission_exited | plan.implementation_approved
 working_plan.updated
 group.created | group.membership_joined | group.membership_ended | group.membership_invitation_rejected
 group.message_created | group.summary_requested | group.summary_delivered
+group.diagnostic_recorded
 shared_task.updated
 artifact.published | artifact.unavailable | artifact.restored | artifact.deleted
 notification_delivery.created | notification_delivery.succeeded
@@ -156,6 +157,12 @@ Observability 数据允许批量、异步导出和独立保留，可能比业务
 UAT/生产不能只启用 debug exporter。至少一个出口必须有可验证的持久化或可查询后端、明确保留期和真实写入烟测；部署健康检查不能用“Collector 进程已启动”替代“Trace 已成功写出”。
 
 第一阶段可以 100% 采集，但不得记录平台密钥、凭证、模型私有推理或未经控制的敏感全文。模型 Token 流可以实时展示，但不逐 Token 持久化为 ExecutionEvent。
+
+## Runtime 管理控制台
+
+管理员可通过 Web 的 `Runtime Console` 或 `/admin/runtime/*` 只读投影回答当前 Run 状态、等待原因、下一执行实体、预算用量、最近进展、Runner/Tool 租约、Provider/Tool/Agent 调用、Group 诊断、Outbox 积压与终态原因。Run 详情时间线直接来自权威 ExecutionEvent，控制台不保存第二套 lifecycle，也没有任意修改数据库状态的入口。
+
+跨账号运营投影只返回 ID、状态、计数、稳定错误码、受控摘要与时间；不返回 Message/WorkItem 正文、AgentInvocation request_text、Tool 参数/结果、Outbox payload、raw error detail、Prompt 或 Chain-of-Thought。当前 Worker 列表明确标记为“活跃租约观测”，只能证明正在持有 Runner、ToolAttempt 或 Outbox lease 的 Worker，不能冒充完整的空闲 Worker 注册表；持久化 Worker capacity/idle heartbeat 属于后续独立注册能力。
 
 ## 恢复、重新执行与 Replay
 

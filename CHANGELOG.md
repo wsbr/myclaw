@@ -7,6 +7,9 @@ All notable changes to MyClaw are documented in this file. The format follows [K
 ### Added
 
 - Defined the post-`v0.1.1` roadmap for Group diagnostics and loop guardrails, the usage/cost ledger, Agent evaluation and version gates, the Runtime management console, a minimum Tenant boundary, and a local knowledge base.
+- Added append-only Group diagnostics for rejected delegations, including causal Agent chains, stable reason codes, limit snapshots, idempotent fingerprints, and a user-facing GroupRun diagnostic view.
+- Added hard Group fan-out and repeated-delegation guards while preserving healthy asynchronous multi-hop handoffs and distinguishing contained guard actions from business execution failures.
+- Added an administrator-only, read-only Runtime Console for global Runs, budget/progress projections, WorkItems, Runners, Provider/Tool/Agent calls, causal events, active lease observations, Group diagnostics, and redacted Outbox health.
 
 ## [0.1.1] - 2026-08-14
 

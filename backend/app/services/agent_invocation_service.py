@@ -23,6 +23,7 @@ from app.models.runtime_v1 import (
 from app.persistence.reliable_writes import EventRecipient, ExecutionEventWriter, OutboxWriter
 from app.persistence.runtime_graph import persist_new_work_runner
 from app.services.agent_directory_service import resolve_callable_agent
+from app.services.group_diagnostic_service import record_group_invocation_guard
 from app.services.group_collaboration_service import _next_group_message_sequence
 
 
@@ -57,7 +58,20 @@ async def persist_rejected_agent_invocation(
     """
     target_agent_id = str(arguments.get("agent_id") or "").strip()
     target = await db.get(AgentBlueprint, target_agent_id) if target_agent_id else None
+    group_run = await db.scalar(select(GroupRun).where(
+        GroupRun.run_id == run.id,
+    ).with_for_update()) if run.mode == "group" else None
     if target is None:
+        await record_group_invocation_guard(
+            db,
+            run=run,
+            caller_runner=caller_runner,
+            caller_work=caller_work,
+            arguments=arguments,
+            operation_key=operation_key,
+            reason_code=reason_code,
+            reason=reason,
+        )
         return None
     existing = await db.scalar(select(AgentInvocation).where(
         AgentInvocation.caller_work_item_id == caller_work.id,
@@ -72,7 +86,6 @@ async def persist_rejected_agent_invocation(
         if existing.request_hash != expected_hash:
             raise AgentInvocationRejected("AgentInvocation business idempotency collision")
         return existing
-    group_run = await db.scalar(select(GroupRun).where(GroupRun.run_id == run.id)) if run.mode == "group" else None
     invocation = AgentInvocation(
         id=uuid7(), run_id=run.id, caller_work_item_id=caller_work.id,
         caller_runner_id=caller_runner.id, caller_agent_id=caller_runner.agent_id,
@@ -101,7 +114,7 @@ async def persist_rejected_agent_invocation(
     )
     db.add(invocation)
     await db.flush()
-    await ExecutionEventWriter(db).append(
+    rejected_event = await ExecutionEventWriter(db).append(
         session_id=run.session_id, run_id=run.id,
         event_type="agent_invocation.rejected",
         event_dedupe_key=f"agent_invocation:{invocation.id}:rejected",
@@ -115,6 +128,18 @@ async def persist_rejected_agent_invocation(
         },
         correlation_id=run.id,
     )
+    await record_group_invocation_guard(
+        db,
+        run=run,
+        caller_runner=caller_runner,
+        caller_work=caller_work,
+        arguments=arguments,
+        operation_key=operation_key,
+        reason_code=reason_code,
+        reason=reason,
+        invocation=invocation,
+        source_event_id=rejected_event.id,
+    )
     return invocation
 
 
@@ -126,12 +151,19 @@ async def dispatch_agent_invocation(
     target_agent_id = str(arguments.get("agent_id") or "").strip()
     request_text = str(arguments.get("task") or arguments.get("request") or "").strip()
     if not target_agent_id or not request_text:
-        raise AgentInvocationRejected("agent_id and task are required")
+        raise AgentInvocationRejected(
+            "agent_id and task are required", "agent_invocation_arguments_invalid",
+        )
     chain = list(caller_runner.principal_snapshot.get("delegation_chain") or [])
     if target_agent_id == caller_runner.agent_id:
-        raise AgentInvocationRejected("an Agent cannot invoke itself")
+        raise AgentInvocationRejected(
+            "an Agent cannot invoke itself", "agent_invocation_self_cycle",
+        )
     if run.mode in {"chat", "plan"} and chain:
-        raise AgentInvocationRejected("sub Agents cannot invoke another Agent in Chat or Plan")
+        raise AgentInvocationRejected(
+            "sub Agents cannot invoke another Agent in Chat or Plan",
+            "agent_invocation_nested_direct_mode",
+        )
     if run.mode == "chat":
         selected_group = await db.scalar(select(ExecutionEvent.id).where(
             ExecutionEvent.session_id == run.session_id,
@@ -142,11 +174,25 @@ async def dispatch_agent_invocation(
                 "This Chat already selected a post-Chat Group; dispatch work from the emerged Group instead",
                 "agent_invocation_after_group_selection",
             )
-    if run.mode == "group" and (len(chain) >= 8 or target_agent_id in chain):
-        raise AgentInvocationRejected("Group AgentInvocation cycle or maximum depth detected")
+    if run.mode == "group":
+        max_depth = int(
+            (run.hard_budget_snapshot or {}).get("max_agent_depth") or 8
+        )
+        if len(chain) >= max_depth:
+            raise AgentInvocationRejected(
+                "Group AgentInvocation maximum depth detected",
+                "group_invocation_max_depth",
+            )
+        if target_agent_id in chain:
+            raise AgentInvocationRejected(
+                "Group AgentInvocation would re-enter its causal Agent chain",
+                "group_invocation_cycle",
+            )
     target = await db.get(AgentBlueprint, target_agent_id)
     if target is None:
-        raise AgentInvocationRejected("target Agent is unavailable")
+        raise AgentInvocationRejected(
+            "target Agent is unavailable", "agent_invocation_target_unavailable",
+        )
 
     if run.mode == "plan":
         try:
@@ -197,7 +243,10 @@ async def dispatch_agent_invocation(
             ))
             target_membership = await db.get(GroupMembership, native_target.membership_id)
             if caller_membership is None or target_membership is None:
-                raise AgentInvocationRejected("caller is not a current Group member")
+                raise AgentInvocationRejected(
+                    "caller is not a current Group member",
+                    "group_caller_membership_invalid",
+                )
             if native_target.participation_status != "available" or not native_target.agent_version_id:
                 raise AgentInvocationRejected(
                     "target Group member is unavailable in this GroupRun",
@@ -222,19 +271,55 @@ async def dispatch_agent_invocation(
     )
     if not resolved_operation_key:
         raise AgentInvocationRejected("AgentInvocation operation key is required")
+    request_hash = _request_hash(
+        target_agent_id=target_agent_id,
+        request_text=request_text,
+        input_data=dict(arguments.get("input") or {}),
+    )
     existing = await db.scalar(select(AgentInvocation).where(
         AgentInvocation.caller_work_item_id == caller_work.id,
         AgentInvocation.idempotency_key == resolved_operation_key,
     ))
     if existing:
-        expected_hash = _request_hash(
-            target_agent_id=target_agent_id,
-            request_text=request_text,
-            input_data=dict(arguments.get("input") or {}),
-        )
-        if existing.request_hash != expected_hash:
+        if existing.request_hash != request_hash:
             raise AgentInvocationRejected("AgentInvocation business idempotency collision")
+        if existing.status == "rejected":
+            raise AgentInvocationRejected(
+                existing.error_detail or "AgentInvocation was rejected",
+                existing.error_code or "agent_invocation_rejected",
+            )
         return existing
+    if run.mode == "group":
+        duplicate = await db.scalar(select(AgentInvocation.id).where(
+            AgentInvocation.run_id == run.id,
+            AgentInvocation.caller_work_item_id == caller_work.id,
+            AgentInvocation.caller_agent_id == caller_runner.agent_id,
+            AgentInvocation.target_agent_id == target_agent_id,
+            AgentInvocation.request_hash == request_hash,
+            AgentInvocation.status != "rejected",
+        ).limit(1))
+        if duplicate is not None:
+            raise AgentInvocationRejected(
+                "The same Group task was already delegated from this WorkItem",
+                "group_duplicate_delegation",
+            )
+        max_fan_out = int(
+            (run.hard_budget_snapshot or {}).get(
+                "max_agent_fan_out_per_work_item",
+            ) or 8
+        )
+        prior_targets = set(await db.scalars(select(
+            AgentInvocation.target_agent_id,
+        ).where(
+            AgentInvocation.run_id == run.id,
+            AgentInvocation.caller_work_item_id == caller_work.id,
+            AgentInvocation.status != "rejected",
+        )))
+        if target_agent_id not in prior_targets and len(prior_targets) >= max_fan_out:
+            raise AgentInvocationRejected(
+                "Group AgentInvocation fan-out limit reached for this WorkItem",
+                "group_fan_out_exhausted",
+            )
 
     invocation_id, target_work_id, target_runner_id = uuid7(), uuid7(), uuid7()
     request_message_id = uuid7() if run.mode == "group" else None
@@ -286,11 +371,7 @@ async def dispatch_agent_invocation(
                           "request_message_id": request_message_id},
         status="queued", batch_key=caller_runner.id,
         idempotency_key=resolved_operation_key, operation_key=resolved_operation_key,
-        request_hash=_request_hash(
-            target_agent_id=target_agent_id,
-            request_text=request_text,
-            input_data=dict(arguments.get("input") or {}),
-        ),
+        request_hash=request_hash,
         authorization_snapshot={
             "account_id": caller_runner.principal_snapshot.get("account_id"),
             "permission_mode": run.permission_mode,

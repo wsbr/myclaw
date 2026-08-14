@@ -88,6 +88,12 @@ export default function SessionPage() {
     queryFn: () => sessionsApi.getInteractionGraph(activeGroupRun!.id),
     enabled: !!activeGroupRun,
   })
+  const { data: groupDiagnostics = [] } = useQuery({
+    queryKey: ['group-diagnostics', activeGroupRun?.id],
+    queryFn: () => sessionsApi.getGroupDiagnostics(activeGroupRun!.id),
+    enabled: !!activeGroupRun,
+    refetchInterval: activeGroupRun && !isTerminalRun(activeGroupRun.run.status) ? 2500 : false,
+  })
   const { data: sharedTasks = [] } = useQuery({
     queryKey: ['group-shared-tasks', groupId],
     queryFn: () => sessionsApi.getSharedTasks(groupId!), enabled: !!groupId,
@@ -251,6 +257,7 @@ export default function SessionPage() {
         queryClient.invalidateQueries({ queryKey: ['group-runs'] })
         queryClient.invalidateQueries({ queryKey: ['group-run-messages'] })
         queryClient.invalidateQueries({ queryKey: ['group-interaction-graph'] })
+        queryClient.invalidateQueries({ queryKey: ['group-diagnostics'] })
         queryClient.invalidateQueries({ queryKey: ['group-shared-tasks'] })
         queryClient.invalidateQueries({ queryKey: ['required-actions'] })
       }
@@ -644,7 +651,7 @@ export default function SessionPage() {
             {mode === 'group' ? <div className="space-y-6">
               <GroupPanel group={activeGroup} members={groupMembers} runs={groupRuns}
                 activeRun={activeGroupRun}
-                messages={groupMessages} graph={interactionGraph} cards={networkCards?.items || []}
+                messages={groupMessages} graph={interactionGraph} diagnostics={groupDiagnostics} cards={networkCards?.items || []}
                 plans={groupPlans} artifacts={artifacts} requiredActions={sessionActions}
                 sharedTasks={activeSharedTasks} busy={groupBusy}
                 onSelectRun={value => {

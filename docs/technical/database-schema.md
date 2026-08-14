@@ -302,6 +302,12 @@ Reporter 必须是本快照中 available 的成员。唯一 `(group_run_id,agent
 
 它是防重复唤醒和诊断记录，不是第二套 Run lifecycle。
 
+### `group_diagnostic`
+
+`id PK`、`session_id FK`、`run_id FK`、`group_session_id FK`、`group_run_id FK`、`diagnostic_code`、`category delegation_guard|progress_guard|quiescence|delivery`、`severity info|warning|error`、`disposition observed|warned|blocked|recovered`、`source_entity_type`、`source_entity_id`、`source_event_id FK NULL`、`caller_agent_id FK NULL`、`target_agent_id FK NULL`、`dedupe_key`、`causal_fingerprint CHAR(64)`、`causal_chain_json`、`limit_snapshot_json`、`safe_details_json`、`summary`、`created_at`；唯一 `(run_id,dedupe_key)`，索引 `(group_run_id,created_at)` 和 `(run_id,diagnostic_code,created_at)`。
+
+该表只追加，MySQL trigger 拒绝 UPDATE/DELETE。它记录 Runtime 已作出的有界调度决定，不保存原始委托正文、Prompt、Chain-of-Thought 或敏感 Tool 参数；正文只进入不可逆 request fingerprint。已被安全拦截的重复、回环、最大深度和扇出尝试仍作为诊断展示，但不单独把成功交付的 Run 标记为 `completed_with_errors`。真实 WorkItem/AgentInvocation 失败、超时或不可用仍进入失败结算。
+
 ### `shared_task`
 
 `shared_task`：`id PK`、`group_session_id FK`、`group_run_id FK NULL`、`title`、`description`、`status pending|in_progress|completed|blocked|cancelled`、`assignee_agent_id FK NULL`、`version`。只有明确 assignee 且 in_progress 的任务进入 quiescence pending 判断；它不自动创建 WorkItem。

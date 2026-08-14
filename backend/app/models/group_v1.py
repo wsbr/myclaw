@@ -6,7 +6,7 @@ from sqlalchemy import BigInteger, Boolean, CheckConstraint, DateTime, ForeignKe
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
-from app.models.common import TimestampMixin, VersionMixin, uuid7
+from app.models.common import TimestampMixin, VersionMixin, utcnow, uuid7
 
 
 class GroupSession(Base, TimestampMixin, VersionMixin):
@@ -159,6 +159,75 @@ class GroupSummaryRequest(Base, TimestampMixin, VersionMixin):
     status: Mapped[str] = mapped_column(String(20), default="queued", nullable=False)
     final_message_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("message.id")
+    )
+
+
+class GroupDiagnostic(Base):
+    """Append-only, user-safe explanation of one Group Runtime decision."""
+
+    __tablename__ = "group_diagnostic"
+    __table_args__ = (
+        CheckConstraint(
+            "category IN ('delegation_guard','progress_guard','quiescence','delivery')",
+            name="ck_group_diagnostic_category",
+        ),
+        CheckConstraint(
+            "severity IN ('info','warning','error')",
+            name="ck_group_diagnostic_severity",
+        ),
+        CheckConstraint(
+            "disposition IN ('observed','warned','blocked','recovered')",
+            name="ck_group_diagnostic_disposition",
+        ),
+        UniqueConstraint(
+            "run_id", "dedupe_key", name="uq_group_diagnostic_run_dedupe",
+        ),
+        Index(
+            "ix_group_diagnostic_group_run_created",
+            "group_run_id", "created_at", "id",
+        ),
+        Index(
+            "ix_group_diagnostic_run_code_created",
+            "run_id", "diagnostic_code", "created_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
+    session_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("user_session.id"), nullable=False
+    )
+    run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("run.id"), nullable=False
+    )
+    group_session_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("group_session.id"), nullable=False
+    )
+    group_run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("group_run.id"), nullable=False
+    )
+    diagnostic_code: Mapped[str] = mapped_column(String(100), nullable=False)
+    category: Mapped[str] = mapped_column(String(32), nullable=False)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False)
+    disposition: Mapped[str] = mapped_column(String(16), nullable=False)
+    source_entity_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_entity_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    source_event_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("execution_event.id")
+    )
+    caller_agent_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("agent.id")
+    )
+    target_agent_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("agent.id")
+    )
+    dedupe_key: Mapped[str] = mapped_column(String(191), nullable=False)
+    causal_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    causal_chain: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    limit_snapshot: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    safe_details: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), default=utcnow, nullable=False
     )
 
 

@@ -346,6 +346,29 @@ export interface GroupRunMember {
   budget_snapshot: Record<string, unknown>
 }
 
+export interface GroupDiagnostic {
+  id: string
+  session_id: string
+  run_id: string
+  group_session_id: string
+  group_run_id: string
+  diagnostic_code: string
+  category: 'delegation_guard' | 'progress_guard' | 'quiescence' | 'delivery'
+  severity: 'info' | 'warning' | 'error'
+  disposition: 'observed' | 'warned' | 'blocked' | 'recovered'
+  source_entity_type: string
+  source_entity_id: string
+  source_event_id: string | null
+  caller_agent_id: string | null
+  target_agent_id: string | null
+  causal_fingerprint: string
+  causal_chain: string[]
+  limit_snapshot: Record<string, unknown>
+  safe_details: Record<string, unknown>
+  summary: string
+  created_at: string
+}
+
 export interface InteractionGraph {
   nodes: GroupRunMember[]
   edges: Array<{
@@ -464,6 +487,9 @@ export const sessionsApi = {
   getInteractionGraph: (groupRunId: string) => client.get<InteractionGraph>(
     `/group-runs/${groupRunId}/interaction-graph`,
   ).then(r => r.data),
+  getGroupDiagnostics: (groupRunId: string) => client.get<{ items: GroupDiagnostic[] }>(
+    `/group-runs/${groupRunId}/diagnostics`,
+  ).then(r => r.data.items),
   getSharedTasks: (groupId: string) => client.get<{ items: SharedTask[] }>(
     `/groups/${groupId}/shared-tasks`,
   ).then(r => r.data.items),

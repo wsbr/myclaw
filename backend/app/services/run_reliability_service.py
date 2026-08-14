@@ -51,6 +51,8 @@ def default_run_budget(mode: str) -> dict[str, int]:
             "max_provider_attempts": 240,
             "max_tool_invocations": 128,
             "max_agent_invocations": 64,
+            "max_agent_depth": 8,
+            "max_agent_fan_out_per_work_item": 8,
             "max_transport_retries": 16,
             "max_tokens": 768_000,
             "max_active_seconds": 1_800,
@@ -61,6 +63,8 @@ def default_run_budget(mode: str) -> dict[str, int]:
         "max_provider_attempts": 96,
         "max_tool_invocations": 64,
         "max_agent_invocations": 24,
+        "max_agent_depth": 1,
+        "max_agent_fan_out_per_work_item": 8,
         "max_transport_retries": 8,
         # A real-model Plan implementation can legitimately span roughly 20
         # turns when every durable Tool result resumes through a new Runner.

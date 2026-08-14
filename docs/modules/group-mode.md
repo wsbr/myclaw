@@ -217,6 +217,14 @@ GroupSession 使用 `dynamic_future`：每次 Chat 后可以按最新治理结�
 
 平台不要求所有成员共享同一计划，也不把 SharedTask 变成自动编排器。一个严谨测试 Agent 可以在共享任务之外追加验证；一个耐心开发 Agent 可以多次修复；一个产品 Agent 可以质疑“测试通过”是否覆盖真实用户目标。
 
+## 诊断与循环护栏
+
+Group 允许所有成员异步 handoff，但自由协作不等于无界递归。每个 Run 在硬预算快照中固定 `max_agent_depth` 和 `max_agent_fan_out_per_work_item`；Runtime 在创建新 AgentInvocation 前拦截自调用、因果链回入、同一 WorkItem 的完全重复委托、最大深度和扇出耗尽。模型不能覆盖这些机器边界。
+
+每次拦截都会尽可能写入 terminal `AgentInvocation(status=rejected)`，同时追加一条 `GroupDiagnostic` 和用户可见的 `group.diagnostic_recorded` 事件。诊断只保存 Agent 路径、限制快照、稳定错误码和请求指纹，不保存原始任务正文或思维过程；相同原因按因果指纹幂等。Runtime 控制台通过 `GET /group-runs/{group_run_id}/diagnostics` 展示当前 GroupRun 的决策链。
+
+“护栏已成功收敛一次危险尝试”与“业务工作执行失败”是不同结果：前者保留 blocked 诊断但不单独把最终 Run 标为 `completed_with_errors`；成员失败、取消、超时、目标不可用等真实交付损失仍必须进入错误终态和 Reporter 摘要。
+
 ## 停止、等待和交付
 
 成员返回普通最终消息时，只结束自己的当前 Turn 或 AgentInvocation。GroupRun 是否仍在工作由机器状态判断：
