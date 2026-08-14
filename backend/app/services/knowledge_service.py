@@ -666,6 +666,10 @@ async def schedule_semantic_index_revision(
             created_by_account_id=account_id,
         )
         db.add(revision)
+        # There is an intentional circular reference between KnowledgeBase
+        # and its immutable revisions. Persist the child revision before
+        # moving the pending pointer so MySQL never observes a dangling FK.
+        await db.flush([revision])
         knowledge_base.next_revision_no += 1
         replay_generation = "initial"
     knowledge_base.pending_index_revision_id = revision.id

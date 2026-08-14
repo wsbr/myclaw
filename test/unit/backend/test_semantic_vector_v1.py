@@ -194,6 +194,7 @@ async def test_semantic_revision_is_durable_and_worker_publishes_only_after_vect
     monkeypatch.setattr(settings, "knowledge_root", str(tmp_path / "knowledge"))
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
+        await connection.exec_driver_sql("PRAGMA foreign_keys=ON")
         await connection.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
     monkeypatch.setattr(knowledge_worker_module, "AsyncSessionLocal", factory)
@@ -202,11 +203,14 @@ async def test_semantic_revision_is_durable_and_worker_publishes_only_after_vect
         db.add_all([
             Tenant(id=tenant_id, slug="semantic", name="Semantic", status="active"),
             UserIdentity(user_id="semantic-owner", status="active"),
+        ])
+        await db.flush()
+        db.add(
             PlatformAccount(
                 id=account_id, tenant_id=tenant_id, user_id="semantic-owner",
                 display_name="Semantic Owner", status="active",
-            ),
-        ])
+            )
+        )
         await db.flush()
         secret = await store_secret(
             db, plaintext="same-bailian-key", purpose=f"model:{model_id}",
