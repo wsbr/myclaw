@@ -50,7 +50,10 @@ Tenants is deliberately not exposed as self-service in this release.
 
 Deterministic tests use two synthetic Tenants and prove that Session, Run,
 Group, Agent, Memory, Artifact, Usage and authentication lookups fail closed.
-The MySQL migration gate runs a fresh `0001 → 0038`, a `0038 → 0037 → 0038`
+The MySQL migration gate runs a fresh `0001 → 0039`, a `0039 → 0037 → 0039`
 round trip, and a direct cross-Tenant insert that must be rejected by the
-database.
-
+database. Migration `0038` probes committed schema objects before every
+expand/enforcement step, so an interrupted MySQL non-transactional DDL attempt
+resumes from its durable boundary. Existing immutable-update guards are dropped
+only inside the bounded authority backfill and recreated with their exact prior
+definitions before the migration settles.

@@ -97,58 +97,156 @@ def _tenant_fk_name(table: str) -> str:
     return f"fk_{table}_tenant_v1"
 
 
+def _inspector():
+    # MySQL DDL is non-transactional. Rebuild the Inspector for every probe so
+    # a retry sees objects committed before a process/container interruption.
+    return sa.inspect(op.get_bind())
+
+
+def _has_table(table: str) -> bool:
+    return _inspector().has_table(table)
+
+
+def _has_column(table: str, column: str) -> bool:
+    return any(item["name"] == column for item in _inspector().get_columns(table))
+
+
+def _has_index(table: str, name: str) -> bool:
+    return any(item["name"] == name for item in _inspector().get_indexes(table))
+
+
+def _has_constraint(table: str, name: str) -> bool:
+    inspector = _inspector()
+    candidates = (
+        inspector.get_foreign_keys(table)
+        + inspector.get_unique_constraints(table)
+        + inspector.get_check_constraints(table)
+    )
+    return any(item.get("name") == name for item in candidates)
+
+
+def _create_index_if_missing(name: str, table: str, columns: list[str]) -> None:
+    if not _has_index(table, name):
+        op.create_index(name, table, columns)
+
+
+def _create_unique_if_missing(name: str, table: str, columns: list[str]) -> None:
+    if not _has_constraint(table, name):
+        op.create_unique_constraint(name, table, columns)
+
+
+def _create_fk_if_missing(
+    name: str, child: str, parent: str,
+    local_columns: list[str], remote_columns: list[str],
+) -> None:
+    if not _has_constraint(child, name):
+        op.create_foreign_key(
+            name, child, parent, local_columns, remote_columns,
+        )
+
+
+def _drop_backfill_update_guards() -> None:
+    # These older guards reject every UPDATE to terminal/append-only rows,
+    # including an expand/backfill of new authority columns. The migration job
+    # is the only writer while upgrading; recreate the exact guards immediately
+    # after the bounded authority backfill. IF EXISTS also makes crash recovery
+    # safe when a prior attempt stopped between DROP and CREATE.
+    for name in (
+        "trg_run_terminal_update",
+        "trg_tool_invocation_terminal_update",
+        "trg_usage_ledger_entry_immutable_update",
+    ):
+        op.execute(f"DROP TRIGGER IF EXISTS {name}")
+
+
+def _restore_backfill_update_guards() -> None:
+    op.execute(sa.text("""
+        CREATE TRIGGER trg_run_terminal_update
+        BEFORE UPDATE ON run FOR EACH ROW
+        BEGIN
+          IF OLD.status IN ('completed','cancelled','failed') THEN
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'terminal Run is immutable';
+          END IF;
+        END
+    """))
+    op.execute(sa.text("""
+        CREATE TRIGGER trg_tool_invocation_terminal_update
+        BEFORE UPDATE ON tool_invocation FOR EACH ROW
+        BEGIN
+          IF OLD.status IN ('succeeded','failed','rejected','cancelled','outcome_unknown') THEN
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'terminal ToolInvocation is immutable';
+          END IF;
+        END
+    """))
+    op.execute(
+        "CREATE TRIGGER trg_usage_ledger_entry_immutable_update "
+        "BEFORE UPDATE ON usage_ledger_entry FOR EACH ROW "
+        "SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'usage ledger fact is append-only'"
+    )
+
+
 def _add_tenant_column(table: str) -> None:
-    op.add_column(table, sa.Column("tenant_id", sa.String(36), nullable=True))
+    if not _has_column(table, "tenant_id"):
+        op.add_column(table, sa.Column("tenant_id", sa.String(36), nullable=True))
 
 
 def _enforce_tenant_column(table: str) -> None:
     op.alter_column(table, "tenant_id", existing_type=sa.String(36), nullable=False)
-    op.create_foreign_key(
+    _create_fk_if_missing(
         _tenant_fk_name(table), table, "tenant", ["tenant_id"], ["id"]
     )
 
 
 def upgrade() -> None:
-    op.create_table(
-        "tenant",
-        sa.Column("id", sa.String(36), primary_key=True),
-        sa.Column("slug", sa.String(100), nullable=False),
-        sa.Column("name", sa.String(200), nullable=False),
-        sa.Column("status", sa.String(20), nullable=False),
-        sa.Column("version", sa.BigInteger(), nullable=False),
-        sa.Column("created_at", sa.DateTime(), nullable=False),
-        sa.Column("updated_at", sa.DateTime(), nullable=False),
-        sa.CheckConstraint("status IN ('active','disabled')", name="ck_tenant_status"),
-        sa.UniqueConstraint("slug", name="uq_tenant_slug"),
+    if not _has_table("tenant"):
+        op.create_table(
+            "tenant",
+            sa.Column("id", sa.String(36), primary_key=True),
+            sa.Column("slug", sa.String(100), nullable=False),
+            sa.Column("name", sa.String(200), nullable=False),
+            sa.Column("status", sa.String(20), nullable=False),
+            sa.Column("version", sa.BigInteger(), nullable=False),
+            sa.Column("created_at", sa.DateTime(), nullable=False),
+            sa.Column("updated_at", sa.DateTime(), nullable=False),
+            sa.CheckConstraint("status IN ('active','disabled')", name="ck_tenant_status"),
+            sa.UniqueConstraint("slug", name="uq_tenant_slug"),
+        )
+    _create_index_if_missing(
+        "ix_tenant_status_created", "tenant", ["status", "created_at"],
     )
-    op.create_index("ix_tenant_status_created", "tenant", ["status", "created_at"])
     op.execute(sa.text(
-        "INSERT INTO tenant "
-        "(id, slug, name, status, version, created_at, updated_at) VALUES "
-        f"('{DEFAULT_TENANT_ID}', 'default', 'Default Tenant', 'active', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        "INSERT INTO tenant (id, slug, name, status, version, created_at, updated_at) "
+        f"SELECT '{DEFAULT_TENANT_ID}', 'default', 'Default Tenant', 'active', 1, "
+        "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP WHERE NOT EXISTS "
+        f"(SELECT 1 FROM tenant WHERE id = '{DEFAULT_TENANT_ID}')"
     ))
 
-    op.add_column("platform_account", sa.Column("tenant_id", sa.String(36), nullable=True))
+    if not _has_column("platform_account", "tenant_id"):
+        op.add_column("platform_account", sa.Column("tenant_id", sa.String(36), nullable=True))
     op.execute(sa.text(
         f"UPDATE platform_account SET tenant_id = '{DEFAULT_TENANT_ID}' WHERE tenant_id IS NULL"
     ))
     op.alter_column("platform_account", "tenant_id", existing_type=sa.String(36), nullable=False)
-    op.create_foreign_key(
+    _create_fk_if_missing(
         "fk_platform_account_tenant_v1", "platform_account", "tenant",
         ["tenant_id"], ["id"],
     )
-    op.create_unique_constraint(
+    _create_unique_if_missing(
         "uq_platform_account_id_tenant", "platform_account", ["id", "tenant_id"]
     )
 
     for table in TENANT_COLUMNS:
         _add_tenant_column(table)
-    op.add_column("run", sa.Column("account_id", sa.String(36), nullable=True))
-    op.add_column("tool_invocation", sa.Column("account_id", sa.String(36), nullable=True))
-    op.add_column("agent_invocation", sa.Column("account_id", sa.String(36), nullable=True))
-    op.add_column("platform_audit_event", sa.Column("tenant_id", sa.String(36), nullable=True))
-    op.add_column("outbox_command", sa.Column("tenant_id", sa.String(36), nullable=True))
-    op.add_column("outbox_command", sa.Column("account_id", sa.String(36), nullable=True))
+    for table in ("run", "tool_invocation", "agent_invocation"):
+        if not _has_column(table, "account_id"):
+            op.add_column(table, sa.Column("account_id", sa.String(36), nullable=True))
+    if not _has_column("platform_audit_event", "tenant_id"):
+        op.add_column("platform_audit_event", sa.Column("tenant_id", sa.String(36), nullable=True))
+    for column in ("tenant_id", "account_id"):
+        if not _has_column("outbox_command", column):
+            op.add_column("outbox_command", sa.Column(column, sa.String(36), nullable=True))
+
+    _drop_backfill_update_guards()
 
     # Complete the old account expand/contract before Tenant enforcement.
     op.execute(sa.text(
@@ -224,59 +322,65 @@ def upgrade() -> None:
         "o.account_id = s.account_id WHERE o.topic = 'runtime.delivery'"
     ))
 
+    _restore_backfill_update_guards()
+
     op.alter_column("user_session", "account_id", existing_type=sa.String(36), nullable=False)
     for table in TENANT_COLUMNS:
         _enforce_tenant_column(table)
     for table in ("run", "tool_invocation", "agent_invocation"):
         op.alter_column(table, "account_id", existing_type=sa.String(36), nullable=False)
-        op.create_foreign_key(
+        _create_fk_if_missing(
             f"fk_{table}_account_v1", table, "platform_account", ["account_id"], ["id"]
         )
-    op.create_foreign_key(
+    _create_fk_if_missing(
         "fk_platform_audit_tenant_v1", "platform_audit_event", "tenant",
         ["tenant_id"], ["id"],
     )
-    op.create_foreign_key(
+    _create_fk_if_missing(
         "fk_outbox_tenant_v1", "outbox_command", "tenant", ["tenant_id"], ["id"]
     )
-    op.create_foreign_key(
+    _create_fk_if_missing(
         "fk_outbox_account_v1", "outbox_command", "platform_account",
         ["account_id"], ["id"],
     )
 
-    op.create_unique_constraint("uq_agent_id_tenant", "agent", ["id", "tenant_id"])
-    op.create_unique_constraint("uq_user_session_id_tenant", "user_session", ["id", "tenant_id"])
-    op.create_unique_constraint("uq_run_id_tenant", "run", ["id", "tenant_id"])
-    op.create_unique_constraint("uq_work_item_id_tenant", "work_item", ["id", "tenant_id"])
-    op.create_unique_constraint("uq_runner_id_tenant", "runner_v1", ["id", "tenant_id"])
-    op.create_unique_constraint("uq_workspace_id_tenant", "workspace", ["id", "tenant_id"])
-    op.create_unique_constraint("uq_memory_head_id_tenant", "memory_head", ["id", "tenant_id"])
+    for name, table in (
+        ("uq_agent_id_tenant", "agent"),
+        ("uq_user_session_id_tenant", "user_session"),
+        ("uq_run_id_tenant", "run"),
+        ("uq_work_item_id_tenant", "work_item"),
+        ("uq_runner_id_tenant", "runner_v1"),
+        ("uq_workspace_id_tenant", "workspace"),
+        ("uq_memory_head_id_tenant", "memory_head"),
+    ):
+        _create_unique_if_missing(name, table, ["id", "tenant_id"])
 
     for name, child, parent, local_columns, remote_columns in TENANT_COMPOSITE_FKS:
-        op.create_foreign_key(
+        _create_fk_if_missing(
             name, child, parent, local_columns, remote_columns,
         )
 
     for table, (name, columns) in TENANT_INDEXES.items():
-        op.create_index(name, table, columns)
+        _create_index_if_missing(name, table, columns)
 
-    op.create_table(
-        "tenant_membership",
-        sa.Column("id", sa.String(36), primary_key=True),
-        sa.Column("tenant_id", sa.String(36), nullable=False),
-        sa.Column("account_id", sa.String(36), nullable=False),
-        sa.Column("role_key", sa.String(20), nullable=False),
-        sa.Column("status", sa.String(20), nullable=False),
-        sa.Column("version", sa.BigInteger(), nullable=False),
-        sa.Column("created_at", sa.DateTime(), nullable=False),
-        sa.Column("updated_at", sa.DateTime(), nullable=False),
-        sa.CheckConstraint("role_key IN ('member','admin')", name="ck_tenant_membership_role"),
-        sa.CheckConstraint("status IN ('active','disabled')", name="ck_tenant_membership_status"),
-        sa.ForeignKeyConstraint(["tenant_id"], ["tenant.id"]),
-        sa.ForeignKeyConstraint(["account_id"], ["platform_account.id"]),
-        sa.UniqueConstraint("tenant_id", "account_id", name="uq_tenant_membership_account"),
-    )
-    op.create_index(
+    if not _has_table("tenant_membership"):
+        op.create_table(
+            "tenant_membership",
+            sa.Column("id", sa.String(36), primary_key=True),
+            sa.Column("tenant_id", sa.String(36), nullable=False),
+            sa.Column("account_id", sa.String(36), nullable=False),
+            sa.Column("role_key", sa.String(20), nullable=False),
+            sa.Column("status", sa.String(20), nullable=False),
+            sa.Column("version", sa.BigInteger(), nullable=False),
+            sa.Column("created_at", sa.DateTime(), nullable=False),
+            sa.Column("updated_at", sa.DateTime(), nullable=False),
+            sa.CheckConstraint("role_key IN ('member','admin')", name="ck_tenant_membership_role"),
+            sa.CheckConstraint("status IN ('active','disabled')", name="ck_tenant_membership_status"),
+            sa.ForeignKeyConstraint(["tenant_id"], ["tenant.id"]),
+            sa.ForeignKeyConstraint(["account_id"], ["platform_account.id"]),
+            sa.UniqueConstraint("tenant_id", "account_id", name="uq_tenant_membership_account"),
+        )
+    _create_index_if_missing(
         "ix_tenant_membership_account_status", "tenant_membership",
         ["account_id", "status", "tenant_id"],
     )
@@ -286,7 +390,9 @@ def upgrade() -> None:
         "SELECT UUID(), a.tenant_id, a.id, "
         "CASE WHEN EXISTS (SELECT 1 FROM platform_account_role r "
         "WHERE r.account_id = a.id AND r.role_key = 'admin') THEN 'admin' ELSE 'member' END, "
-        "'active', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP FROM platform_account a"
+        "'active', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP FROM platform_account a "
+        "LEFT JOIN tenant_membership m ON m.tenant_id = a.tenant_id AND m.account_id = a.id "
+        "WHERE m.id IS NULL"
     ))
 
 

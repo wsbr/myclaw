@@ -18,6 +18,10 @@ All notable changes to MyClaw are documented in this file. The format follows [K
 - Added a persisted minimum Tenant authority with default-Tenant migration, active membership validation, tenant-scoped user APIs, composite MySQL ownership constraints, Tenant-bound Outbox/Worker fencing, a visible Account-page Tenant identity, and two-Tenant negative isolation tests.
 - Added a Tenant-scoped local KnowledgeBase for bounded UTF-8 text, Markdown and PDF ingestion, checksum-idempotent source history, immutable local index revisions, hybrid retrieval with exact citations, Runner retrieval snapshots, explicit per-Agent grants, a governed `knowledge_search` Tool, and a user-facing Knowledge console.
 
+### Changed
+
+- Made the Tenant expand/backfill migration resumable after interrupted MySQL non-transactional DDL, including bounded suspension and exact restoration of legacy immutable-update guards during authority backfill.
+
 ### Release scope
 
 - This release completes the six dependency-ordered roadmap capabilities for the local/UAT profile. It does not claim customer billing, production multi-tenant identity operations, OCR, remote knowledge storage, production HA, or strong untrusted-code isolation.
