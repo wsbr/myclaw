@@ -242,6 +242,77 @@ paths:
         '200': {description: Redacted Outbox command page without payload or raw errors., content: {application/json: {schema: {$ref: '#/components/schemas/RuntimeOutboxPage'}}}}
         default: {$ref: '#/components/responses/Error'}
 
+  /admin/usage/prices:
+    get:
+      tags: [Operations]
+      operationId: listUsagePriceSnapshots
+      description: Administrator-only immutable price snapshots; overlapping effective windows are rejected.
+      responses:
+        '200': {description: Price snapshot page., content: {application/json: {schema: {$ref: '#/components/schemas/UsagePricePage'}}}}
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Operations]
+      operationId: createUsagePriceSnapshot
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/UsagePriceCreate'}}}
+      responses:
+        '201': {description: Immutable effective-dated price snapshot., content: {application/json: {schema: {$ref: '#/components/schemas/UsagePriceSnapshot'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /admin/usage/entries:
+    get:
+      tags: [Operations]
+      operationId: listUsageLedgerEntries
+      parameters:
+        - {name: run_id, in: query, schema: {$ref: '#/components/schemas/Uuid'}}
+        - {name: account_id, in: query, schema: {$ref: '#/components/schemas/Uuid'}}
+        - {name: agent_version_id, in: query, schema: {$ref: '#/components/schemas/Uuid'}}
+        - {name: model_version_id, in: query, schema: {$ref: '#/components/schemas/Uuid'}}
+        - {$ref: '#/components/parameters/Limit'}
+        - {$ref: '#/components/parameters/Cursor'}
+      responses:
+        '200': {description: Append-only usage entry page., content: {application/json: {schema: {$ref: '#/components/schemas/UsageEntryPage'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /admin/usage/rollups:
+    get:
+      tags: [Operations]
+      operationId: getUsageRollups
+      parameters:
+        - {name: group_by, in: query, schema: {type: string, enum: [run_id, account_id, group_run_id, agent_version_id, model_version_id], default: run_id}}
+        - {name: run_id, in: query, schema: {$ref: '#/components/schemas/Uuid'}}
+        - {name: account_id, in: query, schema: {$ref: '#/components/schemas/Uuid'}}
+        - {name: agent_version_id, in: query, schema: {$ref: '#/components/schemas/Uuid'}}
+        - {name: model_version_id, in: query, schema: {$ref: '#/components/schemas/Uuid'}}
+      responses:
+        '200': {description: Reconciled quantities and known/unknown cost partitions., content: {application/json: {schema: {$ref: '#/components/schemas/UsageRollupPage'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /admin/usage/adjustments:
+    post:
+      tags: [Operations]
+      operationId: createUsageAdjustment
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/UsageAdjustmentCreate'}}}
+      responses:
+        '201': {description: Append-only positive or negative correction., content: {application/json: {schema: {$ref: '#/components/schemas/UsageLedgerEntry'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /runs/{run_id}/usage:
+    get:
+      tags: [Runs]
+      operationId: getOwnedRunUsage
+      parameters:
+        - {$ref: '#/components/parameters/RunId'}
+        - {$ref: '#/components/parameters/RawUserId'}
+      responses:
+        '200': {description: Owned Run usage entries and exact rollup., content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+        default: {$ref: '#/components/responses/Error'}
+
   /admin/accounts/{account_id}/external-identities:
     get:
       tags: [Accounts, Identity]
@@ -2815,6 +2886,77 @@ components:
       additionalProperties: false
       required: [items, next_cursor]
       properties: {items: {type: array, items: {type: object, additionalProperties: true}}, next_cursor: {type: [string, 'null']}}
+    UsagePriceCreate:
+      type: object
+      additionalProperties: false
+      required: [subject_type, subject_key, metric, unit, currency, price_per_unit, price_status, effective_from, source_label]
+      properties:
+        subject_type: {type: string, enum: [model, tool, sandbox, storage, egress]}
+        provider: {type: [string, 'null']}
+        subject_key: {type: string}
+        metric: {type: string}
+        unit: {type: string}
+        currency: {type: string, pattern: '^[A-Z]{3}$'}
+        price_per_unit: {oneOf: [{type: number, minimum: 0}, {type: string}]}
+        price_status: {type: string, enum: [estimated, contracted]}
+        effective_from: {$ref: '#/components/schemas/Timestamp'}
+        effective_to: {oneOf: [{$ref: '#/components/schemas/Timestamp'}, {type: 'null'}]}
+        source_label: {type: string}
+    UsagePriceSnapshot:
+      allOf:
+        - {$ref: '#/components/schemas/UsagePriceCreate'}
+        - type: object
+          required: [id, content_hash, created_at]
+          properties:
+            id: {$ref: '#/components/schemas/Uuid'}
+            content_hash: {$ref: '#/components/schemas/Sha256'}
+            created_at: {$ref: '#/components/schemas/Timestamp'}
+    UsagePricePage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/UsagePriceSnapshot'}}, next_cursor: {type: [string, 'null']}}
+    UsageLedgerEntry:
+      type: object
+      additionalProperties: true
+      required: [id, account_id, session_id, run_id, source_type, source_id, metric, unit, quantity, measurement_status, cost_status, created_at]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        account_id: {$ref: '#/components/schemas/Uuid'}
+        session_id: {$ref: '#/components/schemas/Uuid'}
+        run_id: {$ref: '#/components/schemas/Uuid'}
+        source_type: {type: string, enum: [provider_attempt, tool_attempt, sandbox_attempt, storage_observation, egress_observation, adjustment]}
+        source_id: {$ref: '#/components/schemas/Uuid'}
+        metric: {type: string}
+        unit: {type: string}
+        quantity: {type: string}
+        measurement_status: {type: string, enum: [measured, estimated, unknown]}
+        price_snapshot_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        currency: {type: [string, 'null']}
+        cost_amount: {type: [string, 'null']}
+        cost_status: {type: string, enum: [estimated, contracted, unknown]}
+        adjusts_entry_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+    UsageEntryPage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties: {items: {type: array, items: {$ref: '#/components/schemas/UsageLedgerEntry'}}, next_cursor: {type: [string, 'null']}}
+    UsageRollupPage:
+      type: object
+      additionalProperties: false
+      required: [group_by, items]
+      properties:
+        group_by: {type: string}
+        items: {type: array, items: {type: object, additionalProperties: true}}
+    UsageAdjustmentCreate:
+      type: object
+      additionalProperties: false
+      required: [original_entry_id, quantity_delta, reason]
+      properties:
+        original_entry_id: {$ref: '#/components/schemas/Uuid'}
+        quantity_delta: {oneOf: [{type: number}, {type: string}]}
+        reason: {type: string, minLength: 1, maxLength: 500}
     GroupRun:
       type: object
       additionalProperties: false

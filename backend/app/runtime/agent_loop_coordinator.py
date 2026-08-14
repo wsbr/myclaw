@@ -34,6 +34,7 @@ from app.services.run_reliability_service import (
     BudgetExceeded, assert_post_provider_budget, assert_turn_budget,
     record_progress,
 )
+from app.services.usage_ledger_service import record_provider_attempt_usage
 
 
 class AgentLoopError(RuntimeError):
@@ -69,10 +70,12 @@ TurnStreamObserver = Callable[[str, StreamEvent], Awaitable[None] | None]
 class _TurnRecorder:
     def __init__(
         self, db: AsyncSession, turn: AgentTurn, identity: LoopIdentity,
+        *, usage_ledger_enabled: bool,
     ) -> None:
         self.db = db
         self.turn = turn
         self.identity = identity
+        self.usage_ledger_enabled = usage_ledger_enabled
         self.attempts: dict[int, ProviderAttempt] = {}
 
     async def observe(self, event: ProviderAttemptEvent) -> None:
@@ -116,6 +119,16 @@ class _TurnRecorder:
             attempt.status = "outcome_unknown" if event.received_payload else "failed"
             attempt.error_code = getattr(error, "code", type(error).__name__)
             attempt.error_detail = str(error)
+        if self.usage_ledger_enabled:
+            await record_provider_attempt_usage(
+                self.db,
+                attempt=attempt,
+                turn=self.turn,
+                runner_id=self.identity.runner_id,
+                work_item_id=self.identity.work_item_id,
+                run_id=self.identity.run_id,
+                agent_version_id=self.identity.agent_version_id,
+            )
         await self.db.commit()
 
 
@@ -287,7 +300,10 @@ class AgentLoopCoordinator:
                 # The AgentTurn must exist before ProviderAttempt callbacks,
                 # but no transaction/connection may span the model call.
                 await db.commit()
-                recorder = _TurnRecorder(db, persisted_turn, identity)
+                recorder = _TurnRecorder(
+                    db, persisted_turn, identity,
+                    usage_ledger_enabled=self.reliability_enabled,
+                )
             try:
                 async def observe_stream(event: StreamEvent) -> None:
                     if self.stream_observer is None or persisted_turn is None:

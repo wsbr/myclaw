@@ -164,6 +164,12 @@ UAT/生产不能只启用 debug exporter。至少一个出口必须有可验证�
 
 跨账号运营投影只返回 ID、状态、计数、稳定错误码、受控摘要与时间；不返回 Message/WorkItem 正文、AgentInvocation request_text、Tool 参数/结果、Outbox payload、raw error detail、Prompt 或 Chain-of-Thought。当前 Worker 列表明确标记为“活跃租约观测”，只能证明正在持有 Runner、ToolAttempt 或 Outbox lease 的 Worker，不能冒充完整的空闲 Worker 注册表；持久化 Worker capacity/idle heartbeat 属于后续独立注册能力。
 
+## Usage / 成本账本
+
+管理端 `Usage / 成本` 页面与 `/admin/usage/*` API 直接投影 append-only 账本。ProviderAttempt 自动记录请求数、输入/缓存输入/输出 Token 和活跃毫秒；ToolAttempt 自动记录 Tool unit 与 Sandbox 毫秒。失败、重试与 `outcome_unknown` 和成功 Attempt 使用同一口径，Group 汇总因此自然包含全部成员和返工，而不是只统计最终 Reporter。
+
+价格不是模型配置上的可变数字，而是按 subject/provider/metric 与生效窗口选择的不可变 `usage_price_snapshot`。每个已知成本条目复制所用 currency、unit price 与 price status；找不到价格或计量不可信时 `cost_status=unknown` 且 amount 为 NULL。运营归集必须分别显示 `estimated`、`contracted` 与 `unknown`，修正通过受审计的 adjustment 追加，不能回写历史。
+
 ## 恢复、重新执行与 Replay
 
 第一阶段支持：

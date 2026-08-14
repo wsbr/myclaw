@@ -58,6 +58,7 @@ from app.models.verification_v1 import (
     LateResultObservation, RunProgressMark, VerificationEvidenceRef,
     VerificationResult,
 )
+from app.models.usage_v1 import UsageLedgerEntry, UsagePriceSnapshot
 
 __all__ = [
     "UserIdentity", "PlatformAccount", "PlatformAccountRole", "IdempotencyRecord", "AgentApiKey",
@@ -87,4 +88,5 @@ __all__ = [
     "HistorySummary",
     "VerificationResult", "VerificationEvidenceRef", "RunProgressMark",
     "LateResultObservation",
+    "UsageLedgerEntry", "UsagePriceSnapshot",
 ]

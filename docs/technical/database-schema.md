@@ -315,6 +315,13 @@ Reporter 必须是本快照中 available 的成员。唯一 `(group_run_id,agent
 - `shared_task_dependency`：`shared_task_id FK`、`predecessor_task_id FK`、`sort_order`；PK `(shared_task_id,predecessor_task_id)`，CHECK 禁止自依赖。领域事务锁定相关任务，确保两端属于同一 GroupSession 且新边不成环；该边只影响提示/UI，不触发调度、授权或 quiescence。
 - `shared_task_result_ref`：`shared_task_id FK`、`ref_type artifact|message|verification`、`artifact_id FK NULL`、`message_id FK NULL`、`verification_result_id FK NULL`、`ref_key GENERATED`、`sort_order`；PK `(shared_task_id,sort_order)`，唯一 `(shared_task_id,ref_type,ref_key)`，CHECK 要求与 ref_type 对应的 FK 恰好一个非空；领域校验引用属于同 tenant 且对该 Group 可见。
 
+### `usage_price_snapshot`、`usage_ledger_entry`
+
+- `usage_price_snapshot`：`id PK`、`subject_type model|tool|sandbox|storage|egress`、`provider NULL`、`subject_key`、`metric`、`unit`、`currency CHAR(3)`、`price_per_unit DECIMAL(30,12)`、`price_status estimated|contracted`、`effective_from/to`、`source_label`、`content_hash UNIQUE`、`created_by_account_id FK`、`created_at`。同一 subject/provider/metric/currency 的生效窗口不得重叠；新价格创建新快照，不能修改旧快照。
+- `usage_ledger_entry`：`id PK`、当前 `account_id` 以及 Session/Run/GroupRun/WorkItem/Runner/AgentVersion/AgentTurn/ProviderAttempt/ToolInvocation/ToolAttempt 归因 FK、`source_type`、`source_id`、`source_operation_key`、`metric`、`unit`、`quantity DECIMAL(30,9)`、`measurement_status measured|estimated|unknown`、绑定的 `price_snapshot_id/currency/unit_price_snapshot/cost_amount`、`cost_status estimated|contracted|unknown`、`adjusts_entry_id FK NULL`、`safe_metadata_json`、`created_at`；唯一 `(source_operation_key,metric)`。
+
+Provider 的每次成功、失败、重试或 `outcome_unknown` Attempt 都会生成请求、Token 与活跃时间条目；Sandbox ToolAttempt 生成 Tool unit 与 Sandbox 时间条目。缺少可信计量或生效价格时必须保存 `unknown`，不得以 0 成本代替。纠错只能追加 `source_type=adjustment` 的正/负条目并引用原条目。两张表均由 MySQL trigger 禁止 UPDATE/DELETE；v0.3.0 Tenant 扩展会在保留当前 account 归因的同时补入非空 tenant authority。
+
 ### `verification_result`
 
 `verification_result`：`id PK`、`run_id FK`、`group_run_id FK NULL`、`rule_key`、`rule_version`、`verification_epoch BIGINT`、`status passed|failed|insufficient_evidence`、`fact_fingerprint CHAR(64)`、`observed_facts_json`、`missing_facts_json`、`created_at`；唯一 `(run_id,rule_key,rule_version,verification_epoch)` 和 `(run_id,rule_key,rule_version,fact_fingerprint)`。epoch 在锁定 `run_id + rule_key + rule_version` 后单调分配；完全相同的权威事实幂等返回旧结果，新事实才创建新 epoch，旧结果不覆盖。

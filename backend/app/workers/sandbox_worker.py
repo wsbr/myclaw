@@ -42,6 +42,7 @@ from app.services.workspace_lock_service import (
     assert_workspace_lock, release_workspace_lock,
 )
 from app.services.run_reliability_service import record_late_result
+from app.services.usage_ledger_service import record_tool_attempt_usage
 
 
 logger = logging.getLogger(__name__)
@@ -639,6 +640,9 @@ class SandboxWorker:
             attempt.outcome_confirmed = attempt.status in {"succeeded", "failed", "timed_out", "cancelled"}
             attempt.ended_at = utcnow()
             attempt.lease_expires_at = None
+            await record_tool_attempt_usage(
+                db, attempt=attempt, invocation=invocation,
+            )
             invocation.result_data = envelope
             invocation.error_code = attempt.error_code
             invocation.error_detail = attempt.error_detail
