@@ -21,9 +21,9 @@ interface Props {
 }
 
 const modeCopy: Record<Mode, { label: string; hint: string }> = {
-  chat: { label: 'Chat', hint: '直接讨论并执行' },
-  plan: { label: 'Plan', hint: '先调查和对齐，再批准实施' },
-  group: { label: 'Group', hint: 'Chat 后由模型按诉求选择 Group Agent 涌现协作' },
+  chat: { label: '对话', hint: '直接讨论并执行' },
+  plan: { label: '规划', hint: '先调查和对齐，再批准实施' },
+  group: { label: '群组', hint: '对话后由模型按诉求选择智能体涌现协作' },
 }
 
 export default function SessionComposer({
@@ -32,14 +32,14 @@ export default function SessionComposer({
 }: Props) {
   const placeholder = mode === 'plan'
     ? (planEntered && hasPlan && planCanRevise
-      ? '继续讨论或修改方向，例如：先验证迁移回滚，再实现 UI'
-      : planEntered ? '当前 Plan 正在实施或已完成；退出 Plan 后可以继续对话' : '描述需要只读调查与规划的长任务目标')
+      ? '继续讨论或修改方向，例如：先验证迁移回滚，再优化界面'
+      : planEntered ? '当前规划正在实施或已完成；退出规划后可以继续对话' : '描述需要只读调查与规划的长任务目标')
     : mode === 'group'
-      ? (groupReady ? '发送给 Reporter 或当前 GroupRun 成员' : '先完成一次正常 Chat，Group 将自动涌现')
-      : '输入消息；Enter 发送，Shift+Enter 换行'
+      ? (groupReady ? '发送给汇报智能体或当前群组成员' : '先完成一次正常对话，协作群组将自动涌现')
+      : '输入消息；回车发送，Shift + 回车换行'
   const buttonLabel = mode === 'plan'
-    ? (planEntered && hasPlan && planCanRevise ? '修改方向' : planEntered ? '请先退出 Plan' : '进入只读 Plan')
-    : mode === 'group' ? '提交 Group 工作' : '发送'
+    ? (planEntered && hasPlan && planCanRevise ? '修改方向' : planEntered ? '请先退出规划' : '进入只读规划')
+    : mode === 'group' ? '提交群组任务' : '发送'
 
   return <div className="rounded-2xl border bg-card p-2 shadow-[0_12px_36px_-18px_rgba(0,0,0,0.28)]">
     <div className="flex items-center justify-between gap-3 px-2 pb-2 pt-1 text-[11px] text-muted-foreground">
@@ -47,7 +47,7 @@ export default function SessionComposer({
         <span className="rounded-md bg-muted px-2 py-0.5 font-semibold text-foreground">{modeCopy[mode].label}</span>
         <span>{modeCopy[mode].hint}</span>
       </div>
-      <span className="hidden sm:inline">Enter 发送 · Shift+Enter 换行</span>
+      <span className="hidden sm:inline">回车发送 · Shift + 回车换行</span>
     </div>
     <div className="flex items-end gap-2">
       {accessory}

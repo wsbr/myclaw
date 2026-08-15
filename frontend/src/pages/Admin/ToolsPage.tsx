@@ -3,7 +3,7 @@ import ToolsTab from './ToolsTab'
 
 export default function ToolsPage() {
   return (
-    <AdminSectionPage title="Tool 管理" description="治理代码注册的 Tool、确认策略与平台配置">
+    <AdminSectionPage title="工具管理" description="治理平台工具、外部连接、确认策略与执行边界">
       <ToolsTab />
     </AdminSectionPage>
   )

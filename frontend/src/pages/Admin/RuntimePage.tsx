@@ -21,6 +21,7 @@ import {
 
 import { adminApi, type RuntimeRunProjection } from '@/api/admin'
 import { AdminSectionPage } from './AdminSectionPage'
+import { displayLabel, selectOptions } from '@/lib/presentation'
 
 
 const total = (values?: Record<string, number>) => Object.values(values || {}).reduce((sum, value) => sum + value, 0)
@@ -28,9 +29,9 @@ const short = (value?: string | null) => value ? value.slice(0, 10) : '—'
 const when = (value?: unknown) => typeof value === 'string' && value ? new Date(value).toLocaleString() : '—'
 const duration = (seconds?: number | null) => {
   if (seconds === null || seconds === undefined) return '—'
-  if (seconds < 60) return `${seconds}s`
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`
-  return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`
+  if (seconds < 60) return `${seconds} 秒`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} 分 ${seconds % 60} 秒`
+  return `${Math.floor(seconds / 3600)} 小时 ${Math.floor((seconds % 3600) / 60)} 分`
 }
 const statusColor = (status?: string) => {
   if (status === 'failed' || status === 'dead' || status === 'outcome_unknown' || status === 'stale') return 'error'
@@ -67,31 +68,31 @@ export default function RuntimePage() {
 
   const runColumns = [
     {
-      title: 'Run', dataIndex: 'id',
+      title: '运行', dataIndex: 'id',
       render: (value: string, row: RuntimeRunProjection) => <Space direction="vertical" size={0}>
         <Typography.Text code>{short(value)}</Typography.Text>
         <Typography.Text type="secondary" className="text-xs">{short(row.session_id)} · {short(row.account_id)}</Typography.Text>
       </Space>,
     },
-    { title: '模式', dataIndex: 'mode', render: (value: string) => <Tag>{value}</Tag> },
+    { title: '模式', dataIndex: 'mode', render: (value: string) => <Tag>{displayLabel(value)}</Tag> },
     {
       title: '状态',
       render: (_: unknown, row: RuntimeRunProjection) => <Space direction="vertical" size={0}>
-        <Tag color={statusColor(row.status)}>{row.status}</Tag>
-        <Typography.Text type="secondary" className="text-xs">{row.wait_reason || row.terminal_reason || '—'}</Typography.Text>
+        <Tag color={statusColor(row.status)}>{displayLabel(row.status)}</Tag>
+        <Typography.Text type="secondary" className="text-xs">{displayLabel(row.wait_reason || row.terminal_reason)}</Typography.Text>
       </Space>,
     },
     { title: '年龄', dataIndex: 'age_seconds', render: duration },
     {
       title: '执行事实',
-      render: (_: unknown, row: RuntimeRunProjection) => `W ${total(row.counts.work_items)} · R ${total(row.counts.runners)} · T ${total(row.counts.tool_invocations)} · A ${total(row.counts.agent_invocations)}`,
+      render: (_: unknown, row: RuntimeRunProjection) => `工作项 ${total(row.counts.work_items)} · 执行器 ${total(row.counts.runners)} · 工具 ${total(row.counts.tool_invocations)} · 智能体 ${total(row.counts.agent_invocations)}`,
     },
     {
       title: '下一动作',
       render: (_: unknown, row: RuntimeRunProjection) => row.next_action
         ? <Space direction="vertical" size={0}>
-          <Typography.Text>{row.next_action.actor_type}</Typography.Text>
-          <Typography.Text type="secondary" className="text-xs">{short(row.next_action.owner_agent_id)} · {row.next_action.wait_reason || row.next_action.status}</Typography.Text>
+          <Typography.Text>{displayLabel(row.next_action.actor_type)}</Typography.Text>
+          <Typography.Text type="secondary" className="text-xs">{short(row.next_action.owner_agent_id)} · {displayLabel(row.next_action.wait_reason || row.next_action.status)}</Typography.Text>
         </Space> : '—',
     },
     {
@@ -109,28 +110,28 @@ export default function RuntimePage() {
     : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={empty} />
 
   return <AdminSectionPage
-    title="Runtime Console"
-    description="只读查看权威 Run、Runner、调用、队列、租约与诊断事实；不直接修改数据库状态"
+    title="运行控制台"
+    description="只读查看权威运行、执行器、调用、队列、租约与诊断事实；不直接修改数据库状态"
   >
-    {unknownOutcomes > 0 && <Alert className="mb-4" type="error" showIcon message={`${unknownOutcomes} 个执行结果处于 outcome_unknown，需要人工核对外部副作用`} />}
+    {unknownOutcomes > 0 && <Alert className="mb-4" type="error" showIcon message={`${unknownOutcomes} 个执行结果未知，需要人工核对外部副作用`} />}
 
     <Row gutter={[16, 16]} className="mb-4">
-      <Col xs={12} xl={6}><Card><Statistic title="非终态 Runs" value={activeRuns} /></Card></Col>
-      <Col xs={12} xl={6}><Card><Statistic title="Queued Runners" value={data?.runners.queued || 0}
+      <Col xs={12} xl={6}><Card><Statistic title="进行中的运行" value={activeRuns} /></Card></Col>
+      <Col xs={12} xl={6}><Card><Statistic title="排队中的执行器" value={data?.runners.queued || 0}
         suffix={data?.queue_age.oldest_queued_runner_seconds == null ? undefined : `最老 ${duration(data.queue_age.oldest_queued_runner_seconds)}`} /></Card></Col>
-      <Col xs={12} xl={6}><Card><Statistic title="待处理 Outbox" value={queuedCommands} /></Card></Col>
-      <Col xs={12} xl={6}><Card><Statistic title="Group 诊断" value={data?.diagnostic_count || 0} /></Card></Col>
+      <Col xs={12} xl={6}><Card><Statistic title="待处理发件箱" value={queuedCommands} /></Card></Col>
+      <Col xs={12} xl={6}><Card><Statistic title="群组诊断" value={data?.diagnostic_count || 0} /></Card></Col>
     </Row>
 
-    <Card size="small" title="Runs" className="mb-4" extra={data?.generated_at ? `投影于 ${when(data.generated_at)}` : undefined}>
+    <Card size="small" title="运行列表" className="mb-4" extra={data?.generated_at ? `投影于 ${when(data.generated_at)}` : undefined}>
       <Form
         layout="inline"
         className="mb-4"
         onValuesChange={(_, values) => setFilters(Object.fromEntries(Object.entries(values).filter(([, value]) => value)) as Record<string, string>)}
       >
-        <Form.Item name="status"><Select allowClear placeholder="状态" className="w-44" options={['active', 'waiting_user', 'waiting_approval', 'waiting_tool', 'waiting_agent', 'completed', 'cancelled', 'failed'].map(value => ({ value }))} /></Form.Item>
-        <Form.Item name="mode"><Select allowClear placeholder="模式" className="w-32" options={['chat', 'plan', 'group'].map(value => ({ value }))} /></Form.Item>
-        <Form.Item name="account_id"><Input allowClear placeholder="Account ID" className="w-64" /></Form.Item>
+        <Form.Item name="status"><Select allowClear placeholder="状态" className="w-44" options={selectOptions(['active', 'waiting_user', 'waiting_approval', 'waiting_tool', 'waiting_agent', 'completed', 'cancelled', 'failed'])} /></Form.Item>
+        <Form.Item name="mode"><Select allowClear placeholder="模式" className="w-32" options={selectOptions(['chat', 'plan', 'group'])} /></Form.Item>
+        <Form.Item name="account_id"><Input allowClear placeholder="账号 ID" className="w-64" /></Form.Item>
       </Form>
       <Table
         size="small"
@@ -145,20 +146,20 @@ export default function RuntimePage() {
     </Card>
 
     <div className="grid gap-4 xl:grid-cols-2">
-      <Card size="small" title="Outbox 队列健康">
+      <Card size="small" title="发件箱队列健康">
         <Table size="small" pagination={false} rowKey={row => `${row.topic}:${row.status}`} dataSource={data?.outbox || []} columns={[
-          { title: 'Topic', dataIndex: 'topic' },
-          { title: '状态', dataIndex: 'status', render: value => <Tag color={statusColor(value)}>{value}</Tag> },
+          { title: '主题', dataIndex: 'topic' },
+          { title: '状态', dataIndex: 'status', render: value => <Tag color={statusColor(value)}>{displayLabel(value)}</Tag> },
           { title: '数量', dataIndex: 'count' },
           { title: '最老年龄', dataIndex: 'oldest_age_seconds', render: duration },
         ]} />
       </Card>
-      <Card size="small" title="Worker 进程与槽位健康">
+      <Card size="small" title="工作进程与槽位健康">
         <Table size="small" pagination={false} rowKey={row => `${row.worker_kind}:${row.worker_id}`} dataSource={data?.observed_workers || []} columns={[
           { title: '类型', dataIndex: 'worker_kind', render: value => <Tag>{value}</Tag> },
-          { title: 'Worker', dataIndex: 'worker_id', ellipsis: true },
+          { title: '工作进程', dataIndex: 'worker_id', ellipsis: true },
           { title: '槽位', render: (_, row) => row.capacity == null ? `${row.observed_active_slots}/?` : `${row.active_slots}/${row.capacity}` },
-          { title: '健康', dataIndex: 'health', render: value => <Tag color={statusColor(value)}>{value}</Tag> },
+          { title: '健康', dataIndex: 'health', render: value => <Tag color={statusColor(value)}>{displayLabel(value)}</Tag> },
           { title: '陈旧租约', dataIndex: 'stale_leases' },
           { title: '心跳', dataIndex: 'last_heartbeat_at', render: when },
         ]} />
@@ -166,7 +167,7 @@ export default function RuntimePage() {
     </div>
 
     <Drawer
-      title={`Run 诊断 · ${short(selectedRunId)}`}
+      title={`运行诊断 · ${short(selectedRunId)}`}
       width="86vw"
       open={!!selectedRunId}
       onClose={() => setSelectedRunId(null)}
@@ -177,13 +178,13 @@ export default function RuntimePage() {
         {
           key: 'overview', label: '概览 / 预算', children: <Space direction="vertical" className="w-full" size="large">
             <Descriptions bordered size="small" column={3}>
-              <Descriptions.Item label="状态"><Tag color={statusColor(runtimeDetail.status)}>{runtimeDetail.status}</Tag></Descriptions.Item>
-              <Descriptions.Item label="模式">{runtimeDetail.mode}</Descriptions.Item>
-              <Descriptions.Item label="Account">{runtimeDetail.account_id || '—'}</Descriptions.Item>
+              <Descriptions.Item label="状态"><Tag color={statusColor(runtimeDetail.status)}>{displayLabel(runtimeDetail.status)}</Tag></Descriptions.Item>
+              <Descriptions.Item label="模式">{displayLabel(runtimeDetail.mode)}</Descriptions.Item>
+              <Descriptions.Item label="账号">{runtimeDetail.account_id || '—'}</Descriptions.Item>
               <Descriptions.Item label="等待原因">{runtimeDetail.wait_reason || '—'}</Descriptions.Item>
               <Descriptions.Item label="终态原因">{runtimeDetail.terminal_reason || '—'}</Descriptions.Item>
-              <Descriptions.Item label="Deadline">{when(runtimeDetail.deadline_at)}</Descriptions.Item>
-              <Descriptions.Item label="下一动作" span={3}>{runtimeDetail.next_action ? `${runtimeDetail.next_action.actor_type} · Agent ${short(runtimeDetail.next_action.owner_agent_id)} · ${runtimeDetail.next_action.wait_reason || runtimeDetail.next_action.status}` : '—'}</Descriptions.Item>
+              <Descriptions.Item label="截止时间">{when(runtimeDetail.deadline_at)}</Descriptions.Item>
+              <Descriptions.Item label="下一动作" span={3}>{runtimeDetail.next_action ? `${displayLabel(runtimeDetail.next_action.actor_type)} · 智能体 ${short(runtimeDetail.next_action.owner_agent_id)} · ${displayLabel(runtimeDetail.next_action.wait_reason || runtimeDetail.next_action.status)}` : '—'}</Descriptions.Item>
               <Descriptions.Item label="最近进度" span={3}>{runtimeDetail.last_progress ? `${runtimeDetail.last_progress.reason_code} · 连续无进展 ${runtimeDetail.last_progress.consecutive_no_progress}` : '—'}</Descriptions.Item>
             </Descriptions>
             <Table size="small" pagination={false} rowKey="dimension" dataSource={Object.entries(runtimeDetail.budget.limits).map(([key, limit]) => ({
@@ -197,57 +198,57 @@ export default function RuntimePage() {
           </Space>,
         },
         {
-          key: 'work', label: `Work / Runner (${runtimeDetail.work_items.length}/${runtimeDetail.runners.length})`, children: <Space direction="vertical" className="w-full" size="large">
+          key: 'work', label: `工作项 / 执行器 (${runtimeDetail.work_items.length}/${runtimeDetail.runners.length})`, children: <Space direction="vertical" className="w-full" size="large">
             {recordTable(runtimeDetail.work_items, [
-              { title: 'WorkItem', dataIndex: 'id', render: short }, { title: 'Agent', dataIndex: 'owner_agent_id', render: short }, { title: 'Purpose', dataIndex: 'purpose' }, { title: '状态', dataIndex: 'status', render: (value: string) => <Tag color={statusColor(value)}>{value}</Tag> }, { title: '等待/错误', render: (_: unknown, row: Record<string, unknown>) => row.wait_reason || row.error_code || '—' }, { title: 'Epoch', dataIndex: 'execution_epoch' },
-            ], '暂无 WorkItem')}
+              { title: '工作项', dataIndex: 'id', render: short }, { title: '智能体', dataIndex: 'owner_agent_id', render: short }, { title: '用途', dataIndex: 'purpose' }, { title: '状态', dataIndex: 'status', render: (value: string) => <Tag color={statusColor(value)}>{displayLabel(value)}</Tag> }, { title: '等待/错误', render: (_: unknown, row: Record<string, unknown>) => row.wait_reason || row.error_code || '—' }, { title: '执行轮次', dataIndex: 'execution_epoch' },
+            ], '暂无工作项')}
             {recordTable(runtimeDetail.runners, [
-              { title: 'Runner', dataIndex: 'id', render: short }, { title: 'WorkItem', dataIndex: 'work_item_id', render: short }, { title: 'Agent', dataIndex: 'agent_id', render: short }, { title: '状态', dataIndex: 'status', render: (value: string) => <Tag color={statusColor(value)}>{value}</Tag> }, { title: 'Epoch', dataIndex: 'execution_epoch' }, { title: 'Lease owner', dataIndex: 'lease_owner' }, { title: '心跳', dataIndex: 'heartbeat_at', render: when }, { title: '错误', render: (_: unknown, row: Record<string, unknown>) => row.failure_code || row.error_code || '—' },
-            ], '暂无 Runner')}
+              { title: '执行器', dataIndex: 'id', render: short }, { title: '工作项', dataIndex: 'work_item_id', render: short }, { title: '智能体', dataIndex: 'agent_id', render: short }, { title: '状态', dataIndex: 'status', render: (value: string) => <Tag color={statusColor(value)}>{displayLabel(value)}</Tag> }, { title: '执行轮次', dataIndex: 'execution_epoch' }, { title: '租约持有者', dataIndex: 'lease_owner' }, { title: '心跳', dataIndex: 'heartbeat_at', render: when }, { title: '错误', render: (_: unknown, row: Record<string, unknown>) => row.failure_code || row.error_code || '—' },
+            ], '暂无执行器')}
           </Space>,
         },
         {
-          key: 'calls', label: 'Provider / Tool / Agent', children: <Space direction="vertical" className="w-full" size="large">
+          key: 'calls', label: '模型 / 工具 / 智能体调用', children: <Space direction="vertical" className="w-full" size="large">
             {recordTable(runtimeDetail.provider_attempts, [
-              { title: 'ProviderAttempt', dataIndex: 'id', render: short }, { title: 'Provider', dataIndex: 'provider' }, { title: 'Attempt', dataIndex: 'attempt_no' }, { title: '状态', dataIndex: 'status', render: (value: string) => <Tag color={statusColor(value)}>{value}</Tag> }, { title: 'Usage', dataIndex: 'usage', render: (value: unknown) => <Typography.Text code>{JSON.stringify(value)}</Typography.Text> }, { title: '错误', dataIndex: 'error_code' },
-            ], '暂无 ProviderAttempt')}
+              { title: '模型调用尝试', dataIndex: 'id', render: short }, { title: '服务商', dataIndex: 'provider' }, { title: '尝试次数', dataIndex: 'attempt_no' }, { title: '状态', dataIndex: 'status', render: (value: string) => <Tag color={statusColor(value)}>{displayLabel(value)}</Tag> }, { title: '用量', dataIndex: 'usage', render: (value: unknown) => <Typography.Text code>{JSON.stringify(value)}</Typography.Text> }, { title: '错误', dataIndex: 'error_code' },
+            ], '暂无模型调用尝试')}
             {recordTable(runtimeDetail.tool_invocations, [
-              { title: 'ToolInvocation', dataIndex: 'id', render: short }, { title: 'Tool', dataIndex: 'tool_key' }, { title: '状态', dataIndex: 'status', render: (value: string) => <Tag color={statusColor(value)}>{value}</Tag> }, { title: 'Attempts', dataIndex: 'attempt_count' }, { title: '错误', dataIndex: 'error_code' },
-            ], '暂无 ToolInvocation')}
+              { title: '工具调用', dataIndex: 'id', render: short }, { title: '工具', dataIndex: 'tool_key' }, { title: '状态', dataIndex: 'status', render: (value: string) => <Tag color={statusColor(value)}>{displayLabel(value)}</Tag> }, { title: '尝试次数', dataIndex: 'attempt_count' }, { title: '错误', dataIndex: 'error_code' },
+            ], '暂无工具调用')}
             {recordTable(runtimeDetail.agent_invocations, [
-              { title: 'AgentInvocation', dataIndex: 'id', render: short }, { title: '路径', render: (_: unknown, row: Record<string, unknown>) => `${short(row.caller_agent_id as string)} → ${short(row.target_agent_id as string)}` }, { title: '状态', dataIndex: 'status', render: (value: string) => <Tag color={statusColor(value)}>{value}</Tag> }, { title: 'Route', dataIndex: 'return_route' }, { title: '错误', dataIndex: 'error_code' },
-            ], '暂无 AgentInvocation')}
+              { title: '智能体委托', dataIndex: 'id', render: short }, { title: '路径', render: (_: unknown, row: Record<string, unknown>) => `${short(row.caller_agent_id as string)} → ${short(row.target_agent_id as string)}` }, { title: '状态', dataIndex: 'status', render: (value: string) => <Tag color={statusColor(value)}>{displayLabel(value)}</Tag> }, { title: '返回路由', dataIndex: 'return_route' }, { title: '错误', dataIndex: 'error_code' },
+            ], '暂无智能体委托')}
           </Space>,
         },
         {
           key: 'timeline', label: `因果时间线 (${runtimeDetail.timeline.length})`, children: recordTable(runtimeDetail.timeline, [
-            { title: '#', dataIndex: 'sequence_no' }, { title: '时间', dataIndex: 'occurred_at', render: when }, { title: 'Event', dataIndex: 'event_type' }, { title: 'Actor', render: (_: unknown, row: Record<string, unknown>) => `${row.actor_type}:${row.actor_id || '—'}` }, { title: '实体', render: (_: unknown, row: Record<string, unknown>) => `${row.entity_type}:${short(row.entity_id as string)}` }, { title: '摘要', dataIndex: 'summary' },
+            { title: '#', dataIndex: 'sequence_no' }, { title: '时间', dataIndex: 'occurred_at', render: when }, { title: '事件', dataIndex: 'event_type' }, { title: '执行主体', render: (_: unknown, row: Record<string, unknown>) => `${row.actor_type}:${row.actor_id || '—'}` }, { title: '实体', render: (_: unknown, row: Record<string, unknown>) => `${row.entity_type}:${short(row.entity_id as string)}` }, { title: '摘要', dataIndex: 'summary' },
           ], '暂无事件'),
         },
         {
-          key: 'evidence', label: `消息 / Turn / Checkpoint / Group 边 (${runtimeDetail.messages.length}/${runtimeDetail.agent_turns.length}/${runtimeDetail.checkpoints.length}/${runtimeDetail.group_edges.length})`, children: <Space direction="vertical" className="w-full" size="large">
+          key: 'evidence', label: `消息 / 智能体轮次 / 检查点 / 群组边 (${runtimeDetail.messages.length}/${runtimeDetail.agent_turns.length}/${runtimeDetail.checkpoints.length}/${runtimeDetail.group_edges.length})`, children: <Space direction="vertical" className="w-full" size="large">
             {recordTable(runtimeDetail.messages, [
-              { title: '#', dataIndex: 'sequence_no' }, { title: '消息', dataIndex: 'id', render: short }, { title: '发送方', render: (_: unknown, row: Record<string, unknown>) => `${row.sender_type}:${short(row.sender_agent_id as string)}` }, { title: '接收 Agent', dataIndex: 'recipient_agent_id', render: short }, { title: '可见性', dataIndex: 'visibility' }, { title: 'Role', dataIndex: 'role' }, { title: '时间', dataIndex: 'created_at', render: when },
+              { title: '#', dataIndex: 'sequence_no' }, { title: '消息', dataIndex: 'id', render: short }, { title: '发送方', render: (_: unknown, row: Record<string, unknown>) => `${row.sender_type}:${short(row.sender_agent_id as string)}` }, { title: '接收智能体', dataIndex: 'recipient_agent_id', render: short }, { title: '可见性', dataIndex: 'visibility', render: displayLabel }, { title: '角色', dataIndex: 'role', render: displayLabel }, { title: '时间', dataIndex: 'created_at', render: when },
             ], '暂无已提交消息元数据')}
             {recordTable(runtimeDetail.agent_turns, [
-              { title: 'Turn', dataIndex: 'id', render: short }, { title: 'Runner', dataIndex: 'runner_id', render: short }, { title: '#', dataIndex: 'turn_no' }, { title: '状态', dataIndex: 'status', render: (value: string) => <Tag color={statusColor(value)}>{value}</Tag> }, { title: 'Stop', dataIndex: 'stop_reason' }, { title: 'Usage', dataIndex: 'usage', render: (value: unknown) => <Typography.Text code>{JSON.stringify(value)}</Typography.Text> },
-            ], '暂无 AgentTurn')}
+              { title: '智能体轮次', dataIndex: 'id', render: short }, { title: '执行器', dataIndex: 'runner_id', render: short }, { title: '#', dataIndex: 'turn_no' }, { title: '状态', dataIndex: 'status', render: (value: string) => <Tag color={statusColor(value)}>{displayLabel(value)}</Tag> }, { title: '停止原因', dataIndex: 'stop_reason' }, { title: '用量', dataIndex: 'usage', render: (value: unknown) => <Typography.Text code>{JSON.stringify(value)}</Typography.Text> },
+            ], '暂无智能体轮次')}
             {recordTable(runtimeDetail.checkpoints, [
-              { title: 'Checkpoint', dataIndex: 'id', render: short }, { title: 'Runner', dataIndex: 'runner_id', render: short }, { title: '#', dataIndex: 'sequence_no' }, { title: '类型', dataIndex: 'checkpoint_type' }, { title: '可恢复', dataIndex: 'safe_to_resume', render: (value: boolean) => <Tag color={value ? 'success' : 'default'}>{String(value)}</Tag> }, { title: 'Hash', dataIndex: 'content_hash', render: short },
-            ], '暂无 Checkpoint')}
+              { title: '检查点', dataIndex: 'id', render: short }, { title: '执行器', dataIndex: 'runner_id', render: short }, { title: '#', dataIndex: 'sequence_no' }, { title: '类型', dataIndex: 'checkpoint_type' }, { title: '可恢复', dataIndex: 'safe_to_resume', render: (value: boolean) => <Tag color={value ? 'success' : 'default'}>{value ? '是' : '否'}</Tag> }, { title: '哈希', dataIndex: 'content_hash', render: short },
+            ], '暂无检查点')}
             {recordTable(runtimeDetail.group_edges, [
-              { title: '类型', dataIndex: 'cause_type' }, { title: '路径', render: (_: unknown, row: Record<string, unknown>) => `${short(row.source_agent_id as string)} → ${short(row.target_agent_id as string)}` }, { title: '状态', dataIndex: 'status', render: (value: string) => <Tag color={statusColor(value)}>{value}</Tag> }, { title: 'Cause', dataIndex: 'cause_id', render: short },
-            ], '暂无 Group 交互边')}
+              { title: '类型', dataIndex: 'cause_type' }, { title: '路径', render: (_: unknown, row: Record<string, unknown>) => `${short(row.source_agent_id as string)} → ${short(row.target_agent_id as string)}` }, { title: '状态', dataIndex: 'status', render: (value: string) => <Tag color={statusColor(value)}>{displayLabel(value)}</Tag> }, { title: '原因', dataIndex: 'cause_id', render: short },
+            ], '暂无群组交互边')}
           </Space>,
         },
         {
-          key: 'diagnostics', label: `诊断 / Outbox (${runtimeDetail.diagnostics.length}/${runtimeDetail.outbox.length})`, children: <Space direction="vertical" className="w-full" size="large">
+          key: 'diagnostics', label: `诊断 / 发件箱 (${runtimeDetail.diagnostics.length}/${runtimeDetail.outbox.length})`, children: <Space direction="vertical" className="w-full" size="large">
             {recordTable(runtimeDetail.diagnostics, [
-              { title: '时间', dataIndex: 'created_at', render: when }, { title: 'Code', dataIndex: 'diagnostic_code' }, { title: '类别', dataIndex: 'category' }, { title: '处置', dataIndex: 'disposition', render: (value: string) => <Tag color={statusColor(value)}>{value}</Tag> }, { title: '摘要', dataIndex: 'summary' },
-            ], '暂无 Runtime 诊断')}
+              { title: '时间', dataIndex: 'created_at', render: when }, { title: '代码', dataIndex: 'diagnostic_code' }, { title: '类别', dataIndex: 'category' }, { title: '处置', dataIndex: 'disposition', render: (value: string) => <Tag color={statusColor(value)}>{displayLabel(value)}</Tag> }, { title: '摘要', dataIndex: 'summary' },
+            ], '暂无运行诊断')}
             {recordTable(runtimeDetail.outbox, [
-              { title: '时间', dataIndex: 'created_at', render: when }, { title: 'Topic', dataIndex: 'topic' }, { title: 'Action', dataIndex: 'action' }, { title: '聚合', render: (_: unknown, row: Record<string, unknown>) => `${row.aggregate_type}:${short(row.aggregate_id as string)}` }, { title: '状态', dataIndex: 'status', render: (value: string) => <Tag color={statusColor(value)}>{value}</Tag> }, { title: 'Attempts', dataIndex: 'attempt_count' },
-            ], '暂无关联 Outbox 命令')}
+              { title: '时间', dataIndex: 'created_at', render: when }, { title: '主题', dataIndex: 'topic' }, { title: '动作', dataIndex: 'action' }, { title: '聚合', render: (_: unknown, row: Record<string, unknown>) => `${row.aggregate_type}:${short(row.aggregate_id as string)}` }, { title: '状态', dataIndex: 'status', render: (value: string) => <Tag color={statusColor(value)}>{displayLabel(value)}</Tag> }, { title: '尝试次数', dataIndex: 'attempt_count' },
+            ], '暂无关联发件箱命令')}
           </Space>,
         },
       ]} />}

@@ -47,12 +47,34 @@ from app.services.web_tool_service import (
 from app.runtime.coordination_tools import dispatch_coordination_tool
 from app.runtime.snapshot_resolver import _eager_platform_tool_keys
 from app.services.browser_worker_service import BrowserOutcomeUnknown, BrowserWorkerError
+from app.services.registry_reconcile import builtin_tool_specs
+from app.services.tool_display_names import mcp_tool_display_name_zh
 from app.config import settings
 from app.config import Settings
 from app.schemas.registry_v1 import ModelVersionCreate
 
 
 pytestmark = pytest.mark.unit
+
+
+def test_every_builtin_tool_has_an_intentional_chinese_display_name():
+    specs = builtin_tool_specs()
+
+    assert {spec.tool_key for spec in specs} == set(BUILTIN_TOOLS)
+    assert all(spec.display_name_zh for spec in specs)
+    assert all(any("\u3400" <= char <= "\u9fff" for char in spec.display_name_zh) for spec in specs)
+
+
+def test_mcp_chinese_display_name_does_not_copy_unknown_english_titles():
+    assert mcp_tool_display_name_zh("search_openai_docs", "Search OpenAI Docs") == "搜索 OpenAI 文档"
+    assert mcp_tool_display_name_zh("native_chinese", "原生中文工具") == "原生中文工具"
+    assert mcp_tool_display_name_zh("unknown_tool", "Unknown Tool") == ""
+    assert mcp_tool_display_name_zh(
+        "unknown_tool",
+        "Unknown Tool",
+        current_display_name="Previous English Title",
+        current_display_name_zh="管理员自定义名称",
+    ) == "管理员自定义名称"
 
 
 def test_active_browser_session_keeps_exact_browser_contracts_eager_across_turns():

@@ -15,6 +15,7 @@ import {
   type KnowledgeLexiconTerm, type KnowledgeSearchResult,
   type KnowledgeStorageReconciliation,
 } from '@/api/knowledge'
+import { displayLabel } from '@/lib/presentation'
 
 
 type CreateValues = {
@@ -108,7 +109,7 @@ export default function KnowledgePage() {
 
   const updateAccess = useMutation({
     mutationFn: () => knowledgeApi.updateAccess(selected!.id, agentIds),
-    onSuccess: async () => { message.success('Agent 访问范围已更新'); await refresh() },
+    onSuccess: async () => { message.success('智能体访问范围已更新'); await refresh() },
     onError: () => message.error('访问范围更新失败'),
   })
 
@@ -128,7 +129,7 @@ export default function KnowledgePage() {
       if (result.source.status === 'failed') {
         message.warning(`文件已留痕，但解析失败：${result.source.error_code}`)
       } else if (result.idempotent_replay) {
-        message.info('相同 checksum 已存在，未重复建立索引')
+        message.info('相同校验和已存在，未重复建立索引')
       } else {
         message.success(selected?.embedding_model_id ? '文档已接收，后台正在生成语义向量' : '文档索引已完成')
       }
@@ -212,19 +213,19 @@ export default function KnowledgePage() {
 
   if (bases.isLoading) return <div className="py-24 text-center"><Spin /></div>
 
-  return <div className="space-y-4">
+  return <div className="app-page">
     <div className="flex items-start justify-between gap-4">
       <div>
         <Typography.Title level={2} style={{ margin: 0 }}>知识库</Typography.Title>
         <Typography.Text type="secondary">
-          导入可引用的文档证据，通过真实 Embedding 与向量检索为 Agent 提供语义召回。
+          导入可引用的文档证据，通过真实嵌入与向量检索为智能体提供语义召回。
         </Typography.Text>
       </div>
       <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>新建知识库</Button>
     </div>
 
-    <Alert showIcon type="info" message="默认不向任何 Agent 开放"
-      description="必须显式选择 Agent，并在 AgentVersion 中启用 knowledge_search Tool。Embedding 模型使用独立 ModelVersion；凭据仍由平台 Secret 加密管理。" />
+    <Alert showIcon type="info" message="默认不向任何智能体开放"
+      description="必须显式选择智能体，并在智能体版本中启用知识检索工具。嵌入模型使用独立模型版本；凭据仍由平台密钥服务加密管理。" />
 
     <div className="grid gap-4 xl:grid-cols-[300px_minmax(0,1fr)]">
       <Card title="知识库" styles={{ body: { padding: 8 } }}>
@@ -236,8 +237,8 @@ export default function KnowledgePage() {
             <List.Item.Meta title={item.name} description={
               <Space size={4} wrap>
                 <Tag>{item.document_count} 文档</Tag>
-                <Tag color={item.agent_ids.length ? 'blue' : 'default'}>{item.agent_ids.length} Agent</Tag>
-                <Tag color={item.embedding_model_id ? 'purple' : 'default'}>{item.embedding_model_id ? 'Semantic' : 'Legacy'}</Tag>
+                <Tag color={item.agent_ids.length ? 'blue' : 'default'}>{item.agent_ids.length} 个智能体</Tag>
+                <Tag color={item.embedding_model_id ? 'purple' : 'default'}>{item.embedding_model_id ? '语义混合检索' : '兼容检索'}</Tag>
                 {item.pending_index_revision && <Tag color="processing">索引中</Tag>}
               </Space>
             } />
@@ -259,18 +260,18 @@ export default function KnowledgePage() {
             <Descriptions.Item label="索引版本">{selected.current_index_revision?.revision_no ?? '尚未索引'}</Descriptions.Item>
             <Descriptions.Item label="片段数">{selected.current_index_revision?.chunk_count ?? 0}</Descriptions.Item>
             <Descriptions.Item label="检索配置"><Tag color={selected.current_index_revision?.vector_backend === 'qdrant' ? 'purple' : 'default'}>
-              {selected.current_index_revision?.vector_backend === 'qdrant' ? 'Semantic Hybrid · Qdrant' : 'Legacy Hybrid'}
+              {selected.current_index_revision?.vector_backend === 'qdrant' ? '语义混合检索 · Qdrant' : '兼容混合检索'}
             </Tag></Descriptions.Item>
             <Descriptions.Item label="向量点数">{selected.current_index_revision?.vector_point_count ?? 0}</Descriptions.Item>
             <Descriptions.Item label="领域词表">
-              revision {selected.current_lexicon_revision.revision_no} · {selected.current_lexicon_revision.terms.length} 词
+              修订 {selected.current_lexicon_revision.revision_no} · {selected.current_lexicon_revision.terms.length} 词
             </Descriptions.Item>
             <Descriptions.Item label="后台索引">
               {selected.pending_index_revision
-                ? <Tag color={selected.pending_index_revision.status === 'failed' ? 'error' : 'processing'}>{selected.pending_index_revision.status}</Tag>
+                ? <Tag color={selected.pending_index_revision.status === 'failed' ? 'error' : 'processing'}>{displayLabel(selected.pending_index_revision.status)}</Tag>
                 : '空闲'}
             </Descriptions.Item>
-            <Descriptions.Item label="Revision hash">
+            <Descriptions.Item label="修订哈希">
               <Typography.Text code copyable>{selected.current_index_revision?.content_hash.slice(0, 16) ?? '—'}</Typography.Text>
             </Descriptions.Item>
           </Descriptions>
@@ -283,7 +284,7 @@ export default function KnowledgePage() {
         <Card title="语义检索模型">
           <Space.Compact className="w-full">
             <Select className="w-full" value={embeddingModelId} onChange={setEmbeddingModelId}
-              placeholder="选择已通过 Conformance 并激活的 Embedding 模型"
+              placeholder="选择已通过兼容性验证并激活的嵌入模型"
               options={(embeddingModels.data ?? []).map(model => ({
                 value: model.id,
                 label: `${model.name} · ${model.model_name} · ${model.dimensions}d`,
@@ -292,28 +293,28 @@ export default function KnowledgePage() {
               loading={updateEmbedding.isPending} onClick={() => updateEmbedding.mutate()}>应用并重建</Button>
           </Space.Compact>
           {!embeddingModels.isLoading && !embeddingModels.data?.length && <Alert className="mt-3" showIcon type="warning"
-            message="尚无可用 Embedding 模型"
-            description="请先在管理后台创建独立逻辑模型，追加 text-embedding-v4 版本，运行 Embedding Conformance 并激活。" />}
+            message="尚无可用嵌入模型"
+            description="请先在管理后台创建独立逻辑模型，追加嵌入模型版本，运行兼容性验证并激活。" />}
         </Card>
 
-        <Card title="Agent 访问范围">
+        <Card title="智能体访问范围">
           <Space.Compact className="w-full">
             <Select mode="multiple" className="w-full" value={agentIds} onChange={setAgentIds}
-              placeholder="选择允许检索此知识库的 Agent"
+              placeholder="选择允许检索此知识库的智能体"
               options={(agents.data ?? []).map(agent => ({ value: agent.id, label: agent.name }))} />
             <Button type="primary" loading={updateAccess.isPending} onClick={() => updateAccess.mutate()}>保存</Button>
           </Space.Compact>
         </Card>
 
-        <Card title="领域词表" extra={<Button onClick={openLexicon}>编辑并发布 revision</Button>}>
+        <Card title="领域词表" extra={<Button onClick={openLexicon}>编辑并发布修订</Button>}>
           <Typography.Paragraph type="secondary">
-            为平台术语、产品名、错误码和业务别名建立第三路召回。每次发布生成不可变 revision，并触发 Dense + BM25 + Lexicon 全量重建。
+            为平台术语、产品名、错误码和业务别名建立第三路召回。每次发布生成不可变修订，并触发向量 + BM25 + 词表的全量重建。
           </Typography.Paragraph>
           {selected.current_lexicon_revision.terms.length ? <Space wrap>
             {selected.current_lexicon_revision.terms.map(term => <Tag key={term.id ?? term.canonical_name} color="cyan">
               {term.canonical_name}{term.aliases.length ? `（${term.aliases.join(' / ')}）` : ''}
             </Tag>)}
-          </Space> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="尚未配置领域词表；检索仍使用 Dense + BM25" />}
+          </Space> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="尚未配置领域词表；检索仍使用向量 + BM25" />}
         </Card>
 
         <Card title="文档">
@@ -332,8 +333,8 @@ export default function KnowledgePage() {
               { title: '文件', dataIndex: 'title' },
               { title: '类型', key: 'media', render: (_: unknown, item: KnowledgeDocument) => item.current_source?.media_type ?? '—' },
               { title: '大小', key: 'size', render: (_: unknown, item: KnowledgeDocument) => item.current_source ? `${Math.ceil(item.current_source.size_bytes / 1024)} KiB` : '—' },
-              { title: 'Checksum', key: 'checksum', render: (_: unknown, item: KnowledgeDocument) => <Typography.Text code copyable>{item.current_source?.checksum.slice(0, 12) ?? '—'}</Typography.Text> },
-              { title: '状态', key: 'status', render: (_: unknown, item: KnowledgeDocument) => <Tag color={item.current_source?.status === 'indexed' ? 'success' : 'error'}>{item.current_source?.status ?? item.status}</Tag> },
+              { title: '校验和', key: 'checksum', render: (_: unknown, item: KnowledgeDocument) => <Typography.Text code copyable>{item.current_source?.checksum.slice(0, 12) ?? '—'}</Typography.Text> },
+              { title: '状态', key: 'status', render: (_: unknown, item: KnowledgeDocument) => <Tag color={item.current_source?.status === 'indexed' ? 'success' : 'error'}>{displayLabel(item.current_source?.status ?? item.status)}</Tag> },
               { title: '操作', key: 'actions', render: (_: unknown, item: KnowledgeDocument) => <Popconfirm title="停止后续检索？" onConfirm={() => removeDocument.mutate(item)}><Button danger type="link" size="small">删除</Button></Popconfirm> },
             ]} />
         </Card>
@@ -351,7 +352,7 @@ export default function KnowledgePage() {
           {searchResults.length ? <List dataSource={searchResults} renderItem={item => <List.Item>
             <List.Item.Meta title={<Space wrap>
               <Typography.Text strong>{citationLabel(item)}</Typography.Text>
-              <Tag color="blue">score {item.score.toFixed(3)}</Tag>
+              <Tag color="blue">相关度 {item.score.toFixed(3)}</Tag>
               <Tag color={item.retrieval_kind === 'hybrid_rrf' ? 'purple' : 'default'}>{item.retrieval_kind}</Tag>
               {Object.entries(item.route_evidence).map(([route, evidence]) => <Tag key={route}>
                 {route} #{evidence.rank} · {evidence.score.toFixed(3)}
@@ -359,12 +360,12 @@ export default function KnowledgePage() {
               {item.matched_lexicon_terms.map(term => <Tag key={term.term_id} color="cyan">
                 词表：{term.matched_value} → {term.canonical_name}
               </Tag>)}
-              <Tag>revision {item.index_revision_id.slice(0, 8)}</Tag>
+              <Tag>修订 {item.index_revision_id.slice(0, 8)}</Tag>
             </Space>} description={<>
               <Typography.Paragraph className="mt-2 whitespace-pre-wrap">{item.excerpt}</Typography.Paragraph>
-              <Typography.Text type="secondary" copyable>checksum: {item.source_checksum}</Typography.Text>
+              <Typography.Text type="secondary" copyable>校验和：{item.source_checksum}</Typography.Text>
             </>} />
-          </List.Item>} /> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="检索结果会在这里显示，并附带精确 revision/checksum 引用" />}
+          </List.Item>} /> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="检索结果会在这里显示，并附带精确修订与校验和引用" />}
         </Card>
       </div>}
     </div>
@@ -374,29 +375,29 @@ export default function KnowledgePage() {
       <Form form={createForm} layout="vertical" onFinish={values => create.mutate(values)} initialValues={{ agent_ids: [] }}>
         <Form.Item name="name" label="名称" rules={[{ required: true }, { max: 200 }]}><Input /></Form.Item>
         <Form.Item name="description" label="说明"><Input.TextArea rows={3} maxLength={5000} /></Form.Item>
-        <Form.Item name="agent_ids" label="允许检索的 Agent">
+        <Form.Item name="agent_ids" label="允许检索的智能体">
           <Select mode="multiple" options={(agents.data ?? []).map(agent => ({ value: agent.id, label: agent.name }))} />
         </Form.Item>
-        <Form.Item name="embedding_model_id" label="Embedding 模型" extra="可稍后配置；未配置时使用兼容旧索引。">
+        <Form.Item name="embedding_model_id" label="嵌入模型" extra="可稍后配置；未配置时使用兼容旧索引。">
           <Select allowClear options={(embeddingModels.data ?? []).map(model => ({
             value: model.id, label: `${model.name} · ${model.model_name} · ${model.dimensions}d`,
           }))} />
         </Form.Item>
       </Form>
     </Modal>
-    <Modal title="发布领域词表 revision" width={960} open={lexiconOpen}
+    <Modal title="发布领域词表修订" width={960} open={lexiconOpen}
       onCancel={() => setLexiconOpen(false)} onOk={() => replaceLexicon.mutate()}
       okText="发布并重建" confirmLoading={replaceLexicon.isPending}
       okButtonProps={{ disabled: lexiconDraft.some(term => !term.canonical_name.trim()) }}>
       <Alert className="mb-4" showIcon type="info" message="别名在同一词表中必须唯一"
-        description="文档命中规范词或任一别名时，会写入同一个稳定 term id；用户查询命中别名后可召回包含规范词的片段。" />
+        description="文档命中规范词或任一别名时，会写入同一个稳定术语 ID；用户查询命中别名后可召回包含规范词的片段。" />
       <Table rowKey={(_, index) => String(index)} pagination={false} size="small"
         dataSource={lexiconDraft} columns={[
           { title: '规范词', width: 180, render: (_: unknown, item: KnowledgeLexiconTerm, index: number) => <Input
             value={item.canonical_name} maxLength={200} onChange={event => setLexiconDraft(current => current.map((term, i) => i === index ? { ...term, canonical_name: event.target.value } : term))} /> },
           { title: '类型', width: 120, render: (_: unknown, item: KnowledgeLexiconTerm, index: number) => <Select
             className="w-full" value={item.term_type} onChange={value => setLexiconDraft(current => current.map((term, i) => i === index ? { ...term, term_type: value } : term))}
-            options={['concept', 'entity', 'code', 'product', 'agent', 'other'].map(value => ({ value, label: value }))} /> },
+            options={['concept', 'entity', 'code', 'product', 'agent', 'other'].map(value => ({ value, label: displayLabel(value) }))} /> },
           { title: '别名（逗号分隔）', render: (_: unknown, item: KnowledgeLexiconTerm, index: number) => <Input
             value={item.aliases.join(', ')} onChange={event => setLexiconDraft(current => current.map((term, i) => i === index ? { ...term, aliases: event.target.value.split(/[,，]/) } : term))} /> },
           { title: '说明', render: (_: unknown, item: KnowledgeLexiconTerm, index: number) => <Input

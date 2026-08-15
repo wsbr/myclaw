@@ -10,6 +10,7 @@ import type {
 } from '@/api/sessions'
 import { sessionsApi } from '@/api/sessions'
 import { cn } from '@/lib/utils'
+import { displayLabel } from '@/lib/presentation'
 import {
   eventPhase, formatClock, formatDuration, friendlyEventLabel, isTerminalRun, phaseMeta,
   runStatusMeta, type RuntimePhase,
@@ -101,7 +102,7 @@ function ArtifactList({ artifacts, deleting, onDelete }: {
           <p className="truncate text-sm font-medium">{artifact.name}</p>
           <p className="mt-1 text-xs text-muted-foreground">v{artifact.version_no} · {(artifact.size_bytes / 1024).toFixed(1)} KB</p>
         </div>
-        <Tag color={artifact.status === 'published' ? 'green' : artifact.status === 'unavailable' ? 'orange' : 'default'}>{artifact.status}</Tag>
+        <Tag color={artifact.status === 'published' ? 'green' : artifact.status === 'unavailable' ? 'orange' : 'default'}>{displayLabel(artifact.status)}</Tag>
       </div>
       <Typography.Text className="mt-2 block" copyable={{ text: artifact.checksum }} type="secondary" style={{ fontSize: 11 }}>
         {artifact.checksum.slice(0, 16)}…
@@ -115,7 +116,7 @@ function ArtifactList({ artifacts, deleting, onDelete }: {
 }
 
 function VerificationList({ items }: { items: VerificationResult[] }) {
-  if (!items.length) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前 Run 暂无验证结果" />
+  if (!items.length) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前运行暂无验证结果" />
   return <div className="space-y-3">
     {items.map(result => {
       const cases = result.observed_facts.filter(item => typeof item.case_id === 'string')
@@ -123,7 +124,7 @@ function VerificationList({ items }: { items: VerificationResult[] }) {
       return <div key={result.id} className="rounded-xl border bg-card p-3">
         <div className="flex items-center justify-between gap-2">
           <Typography.Text strong>{result.rule_key}</Typography.Text>
-          <Tag color={result.status === 'passed' ? 'green' : result.status === 'failed' ? 'red' : 'orange'}>{result.status}</Tag>
+          <Tag color={result.status === 'passed' ? 'green' : result.status === 'failed' ? 'red' : 'orange'}>{displayLabel(result.status)}</Tag>
         </div>
         <p className="mt-2 text-xs leading-5 text-muted-foreground">
           epoch {result.verification_epoch} · cases {passedCases}/{cases.length || 9} · evidence {result.source_refs.length}
@@ -138,17 +139,17 @@ function VerificationList({ items }: { items: VerificationResult[] }) {
 }
 
 function ToolLedger({ items }: { items: ToolInvocationView[] }) {
-  if (!items.length) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前 Run 暂无 Tool 调用" />
+  if (!items.length) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="当前运行暂无工具调用" />
   return <div className="space-y-3">
     {[...items].reverse().map(item => {
       const citations = (item.result.content_blocks || []).filter(block => block.type === 'citation')
       return <div key={item.id} className="rounded-xl border bg-card p-3">
         <div className="flex items-start justify-between gap-2">
-          <div className="min-w-0"><p className="font-mono text-xs font-semibold">{item.tool_key}</p><p className="mt-1 text-[10px] text-muted-foreground">ToolVersion v{item.tool_version_no ?? '?'} · {item.tool_version_content_hash?.slice(0, 10) || 'runtime'}</p></div>
-          <Tag color={item.status === 'succeeded' ? 'green' : item.status === 'outcome_unknown' ? 'orange' : item.status === 'failed' ? 'red' : 'blue'}>{item.status}</Tag>
+          <div className="min-w-0"><p className="font-mono text-xs font-semibold">{item.tool_key}</p><p className="mt-1 text-[10px] text-muted-foreground">工具版本 v{item.tool_version_no ?? '?'} · {item.tool_version_content_hash?.slice(0, 10) || '运行时'}</p></div>
+          <Tag color={item.status === 'succeeded' ? 'green' : item.status === 'outcome_unknown' ? 'orange' : item.status === 'failed' ? 'red' : 'blue'}>{displayLabel(item.status)}</Tag>
         </div>
         <div className="mt-2 grid grid-cols-3 gap-1 text-[10px] text-muted-foreground">
-          <span>{item.provider || 'myclaw'}</span><span>{item.attempt_count} attempt</span><span>{String(item.result.timing?.latency_ms ?? item.attempts[item.attempts.length - 1]?.latency_ms ?? '—')} ms</span>
+          <span>{item.provider || 'myclaw'}</span><span>{item.attempt_count} 次尝试</span><span>{String(item.result.timing?.latency_ms ?? item.attempts[item.attempts.length - 1]?.latency_ms ?? '—')} 毫秒</span>
         </div>
         {item.result.summary && <p className="mt-2 text-xs leading-5">{item.result.summary}</p>}
         {citations.length > 0 && <div className="mt-2 space-y-1">{citations.map((citation, index) => <a key={index} className="block truncate text-xs text-blue-600 hover:underline" href={String(citation.url)} target="_blank" rel="noreferrer">{String(citation.title || citation.url)}</a>)}</div>}
@@ -184,7 +185,7 @@ export default function SessionInspector({ sessionId, runId, run, plan, collabor
   const remove = useMutation({
     mutationFn: sessionsApi.deleteArtifact,
     onSuccess: () => client.invalidateQueries({ queryKey: ['artifacts', sessionId] }),
-    onError: (error: any) => message.error(error?.response?.data?.error?.code || 'Artifact 删除失败'),
+    onError: (error: any) => message.error(error?.response?.data?.error?.code || '产物删除失败'),
   })
 
   const events = timeline?.items || []
@@ -243,12 +244,12 @@ export default function SessionInspector({ sessionId, runId, run, plan, collabor
       <div className="mb-3 flex items-center gap-2"><Users className="size-4 text-cyan-600" /><span className="text-sm font-semibold">执行单元</span></div>
       <div className="space-y-2">
         {runners.map(item => <div key={item.id} className="flex items-center justify-between gap-2 rounded-lg bg-muted/45 px-3 py-2 text-xs">
-          <span className="truncate">Runner {item.id.slice(0, 8)}</span>
-          <Tag color={item.status === 'succeeded' ? 'green' : item.status === 'failed' ? 'red' : item.status === 'running' ? 'blue' : 'default'}>{item.status}</Tag>
+          <span className="truncate">执行器 {item.id.slice(0, 8)}</span>
+          <Tag color={item.status === 'succeeded' ? 'green' : item.status === 'failed' ? 'red' : item.status === 'running' ? 'blue' : 'default'}>{displayLabel(item.status)}</Tag>
         </div>)}
         {collaborators.map(item => <div key={item.id} className="flex items-center justify-between gap-2 rounded-lg bg-muted/45 px-3 py-2 text-xs">
-          <span className="truncate">Agent {item.target_agent_id.slice(0, 8)}</span>
-          <Tag color={item.status === 'succeeded' ? 'green' : item.status === 'failed' ? 'red' : item.status === 'running' ? 'blue' : 'default'}>{item.status}</Tag>
+          <span className="truncate">智能体 {item.target_agent_id.slice(0, 8)}</span>
+          <Tag color={item.status === 'succeeded' ? 'green' : item.status === 'failed' ? 'red' : item.status === 'running' ? 'blue' : 'default'}>{displayLabel(item.status)}</Tag>
         </div>)}
       </div>
     </section>}
@@ -258,7 +259,7 @@ export default function SessionInspector({ sessionId, runId, run, plan, collabor
       <div className="space-y-2">
         {artifacts.slice(-3).reverse().map(artifact => <div key={artifact.id} className="flex items-center justify-between gap-2 rounded-lg bg-muted/45 px-3 py-2 text-xs">
           <span className="min-w-0 truncate">{artifact.name}</span>
-          <Tag color={artifact.status === 'published' ? 'green' : artifact.status === 'unavailable' ? 'orange' : 'default'}>{artifact.status}</Tag>
+          <Tag color={artifact.status === 'published' ? 'green' : artifact.status === 'unavailable' ? 'orange' : 'default'}>{displayLabel(artifact.status)}</Tag>
         </div>)}
       </div>
     </section>}
@@ -274,19 +275,19 @@ export default function SessionInspector({ sessionId, runId, run, plan, collabor
 
   return <aside className="absolute inset-y-0 right-0 z-40 flex w-[360px] shrink-0 flex-col border-l bg-background/95 shadow-2xl backdrop-blur-xl xl:static xl:shadow-none">
     <header className="flex h-14 shrink-0 items-center justify-between border-b px-4">
-      <div className="flex items-center gap-2"><Activity className="size-4" /><span className="font-semibold">运行监控</span>{live && <span className="runtime-live-badge">LIVE</span>}</div>
+      <div className="flex items-center gap-2"><Activity className="size-4" /><span className="font-semibold">运行监控</span>{live && <span className="runtime-live-badge">实时</span>}</div>
       <Tooltip title="关闭运行监控"><Button type="text" size="small" aria-label="关闭运行监控" icon={<X className="size-4" />} onClick={onClose} /></Tooltip>
     </header>
     <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-5">
       <Tabs size="small" defaultActiveKey="overview" items={[
         { key: 'overview', label: '运行', children: overview },
         { key: 'artifacts', label: <span className="inline-flex items-center gap-1"><FileBox className="size-3.5" />产物 {artifacts.length || ''}</span>, children: <ArtifactList artifacts={artifacts} deleting={remove.isPending} onDelete={artifact => Modal.confirm({
-          title: '删除 Artifact 引用？',
+          title: '删除产物引用？',
           content: '删除后该版本将不再可下载；已运行的历史记录与来源信息不会改变。',
           okText: '确认删除', okButtonProps: { danger: true }, cancelText: '保留',
           onOk: () => remove.mutateAsync(artifact),
         })} /> },
-        { key: 'tools', label: <span className="inline-flex items-center gap-1"><Wrench className="size-3.5" />Tool {toolInvocations.length || ''}</span>, children: <ToolLedger items={toolInvocations} /> },
+        { key: 'tools', label: <span className="inline-flex items-center gap-1"><Wrench className="size-3.5" />工具 {toolInvocations.length || ''}</span>, children: <ToolLedger items={toolInvocations} /> },
         { key: 'verification', label: <span className="inline-flex items-center gap-1">{verifications.some(item => item.status === 'failed') ? <CircleAlert className="size-3.5" /> : <CheckCircle2 className="size-3.5" />}验证 {verifications.length || ''}</span>, children: <VerificationList items={verifications} /> },
       ]} />
     </div>

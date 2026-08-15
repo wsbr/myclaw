@@ -3,6 +3,7 @@ import { Alert, Button, Card, Form, Input, Modal, Select, Space, Table, Tag, Typ
 import { ApiOutlined, CheckCircleOutlined, PlusOutlined } from '@ant-design/icons'
 import { useEffect, useState } from 'react'
 import client from '../../api/client'
+import { displayLabel } from '@/lib/presentation'
 
 type LogicalModel = {
   id: string
@@ -38,8 +39,8 @@ type ModelVersion = {
 
 const providers = ['openai', 'anthropic', 'openai_compatible', 'azure_openai', 'ollama'].map(value => ({ value, label: value }))
 const modelKinds = [
-  { value: 'chat', label: 'Chat / Agent' },
-  { value: 'embedding', label: 'Embedding / Knowledge' },
+  { value: 'chat', label: '对话模型 / 智能体' },
+  { value: 'embedding', label: '嵌入模型 / 知识库' },
 ]
 const commandHeaders = () => ({ 'Idempotency-Key': crypto.randomUUID() })
 
@@ -104,9 +105,9 @@ export default function ModelsTab() {
       setVersionOpen(false); versionForm.resetFields()
       setSelected(current => current ? { ...current, version: current.version + 1 } : current)
       refresh()
-      message.success('不可变 ModelVersion 已创建')
+      message.success('不可变模型版本已创建')
     },
-    onError: (error: any) => message.error(error?.response?.data?.error?.message || error?.message || 'ModelVersion 创建失败'),
+    onError: (error: any) => message.error(error?.response?.data?.error?.message || error?.message || '模型版本创建失败'),
   })
 
   const runConformance = useMutation({
@@ -115,9 +116,9 @@ export default function ModelsTab() {
     ).then(response => response.data as ConformanceRun),
     onSuccess: result => {
       refresh()
-      message[result.status === 'passed' ? 'success' : 'error'](`Conformance ${result.status}`)
+      message[result.status === 'passed' ? 'success' : 'error'](`兼容性验证：${displayLabel(result.status)}`)
     },
-    onError: () => message.error('Conformance 执行失败'),
+    onError: () => message.error('兼容性验证执行失败'),
   })
 
   const activate = useMutation({
@@ -126,14 +127,14 @@ export default function ModelsTab() {
       { headers: { ...commandHeaders(), 'If-Match': `"${selected!.version}"` } },
     ).then(response => response.data as LogicalModel),
     onSuccess: model => {
-      setSelected(model); refresh(); message.success('ModelVersion 已激活')
+      setSelected(model); refresh(); message.success('模型版本已激活')
     },
-    onError: (error: any) => message.error(error?.response?.data?.error?.message || '只有最新 Conformance 通过的版本可激活'),
+    onError: (error: any) => message.error(error?.response?.data?.error?.message || '只有最新兼容性验证通过的版本可激活'),
   })
 
   return <div className="space-y-4">
-    <Alert showIcon type="info" message="Chat 与 Embedding 统一模型注册表"
-      description="逻辑模型可持续演进；Agent 与知识库分别引用通过对应 Conformance 并激活的不可变 ModelVersion。凭据可使用同一个供应商 API Key。" />
+    <Alert showIcon type="info" message="对话与嵌入模型使用统一注册表"
+      description="逻辑模型可持续演进；智能体与知识库分别引用通过对应兼容性验证并激活的不可变模型版本。凭据可使用同一个供应商访问密钥。" />
     <div className="flex justify-end">
       <Button type="primary" icon={<PlusOutlined />} onClick={() => setLogicalOpen(true)}>新建逻辑模型</Button>
     </div>
@@ -141,9 +142,9 @@ export default function ModelsTab() {
       rowClassName={row => row.id === selected?.id ? 'bg-blue-50' : ''}
       onRow={row => ({ onClick: () => setSelected(row) })}
       columns={[
-        { title: 'Key', dataIndex: 'key', render: (value: string) => <Typography.Text code>{value}</Typography.Text> },
+        { title: '模型键', dataIndex: 'key', render: (value: string) => <Typography.Text code>{value}</Typography.Text> },
         { title: '名称', dataIndex: 'name' },
-        { title: '状态', dataIndex: 'status', render: (value: string) => <Tag color={value === 'active' ? 'success' : 'default'}>{value}</Tag> },
+        { title: '状态', dataIndex: 'status', render: (value: string) => <Tag color={value === 'active' ? 'success' : 'default'}>{displayLabel(value)}</Tag> },
         { title: '当前版本', render: (_: unknown, row: LogicalModel) => row.current_version_id ? <Typography.Text code>{row.current_version_id.slice(0, 16)}</Typography.Text> : '未激活' },
         { title: '配置 revision', dataIndex: 'version' },
       ]} />
@@ -165,24 +166,24 @@ export default function ModelsTab() {
       <Table rowKey="id" loading={versions.isLoading} dataSource={versions.data ?? []} pagination={false}
         expandable={{ expandedRowRender: version => <div className="space-y-2">
           <Typography.Paragraph copyable={{ text: version.content_hash }}><Typography.Text strong>内容哈希：</Typography.Text> {version.content_hash}</Typography.Paragraph>
-          <Typography.Paragraph><Typography.Text strong>API 地址：</Typography.Text> {version.endpoint || '未配置'}</Typography.Paragraph>
-          <Typography.Paragraph><Typography.Text strong>API Key：</Typography.Text> {version.credential_configured ? `已加密保存（${version.credential_source ?? 'stored'}）` : '未配置'}</Typography.Paragraph>
+          <Typography.Paragraph><Typography.Text strong>接口地址：</Typography.Text> {version.endpoint || '未配置'}</Typography.Paragraph>
+          <Typography.Paragraph><Typography.Text strong>访问密钥：</Typography.Text> {version.credential_configured ? `已加密保存（${version.credential_source ?? '平台存储'}）` : '未配置'}</Typography.Paragraph>
           <Typography.Paragraph><Typography.Text strong>默认参数：</Typography.Text> <Typography.Text code>{JSON.stringify(version.default_parameters)}</Typography.Text></Typography.Paragraph>
           <Typography.Paragraph><Typography.Text strong>能力：</Typography.Text> <Typography.Text code>{JSON.stringify(version.capabilities)}</Typography.Text></Typography.Paragraph>
-          {version.latest_conformance && <Typography.Paragraph><Typography.Text strong>Conformance：</Typography.Text> {version.latest_conformance.suite_version} · {version.latest_conformance.status}</Typography.Paragraph>}
+          {version.latest_conformance && <Typography.Paragraph><Typography.Text strong>兼容性验证：</Typography.Text> {version.latest_conformance.suite_version} · {displayLabel(version.latest_conformance.status)}</Typography.Paragraph>}
         </div> }}
         columns={[
           { title: '版本', dataIndex: 'version_no', render: (value: number) => `v${value}` },
-          { title: 'Provider', dataIndex: 'provider', render: (value: string) => <Tag color="blue">{value}</Tag> },
+          { title: '服务商', dataIndex: 'provider', render: (value: string) => <Tag color="blue">{value}</Tag> },
           { title: '模型', dataIndex: 'model_name' },
           { title: '类型', render: (_: unknown, version: ModelVersion) => <Tag color={version.capabilities.model_kind === 'embedding' ? 'purple' : 'blue'}>
-            {version.capabilities.model_kind === 'embedding' ? 'Embedding' : 'Chat'}
+            {version.capabilities.model_kind === 'embedding' ? '嵌入模型' : '对话模型'}
           </Tag> },
-          { title: 'Conformance', render: (_: unknown, version: ModelVersion) => version.latest_conformance
-            ? <Tag color={version.latest_conformance.status === 'passed' ? 'success' : 'error'}>{version.latest_conformance.status}</Tag> : <Tag>未执行</Tag> },
+          { title: '兼容性验证', render: (_: unknown, version: ModelVersion) => version.latest_conformance
+            ? <Tag color={version.latest_conformance.status === 'passed' ? 'success' : 'error'}>{displayLabel(version.latest_conformance.status)}</Tag> : <Tag>未执行</Tag> },
           { title: '激活', render: (_: unknown, version: ModelVersion) => selected.current_version_id === version.id ? <Tag color="success">当前</Tag> : '—' },
           { title: '操作', render: (_: unknown, version: ModelVersion) => <Space>
-            <Button size="small" icon={<ApiOutlined />} loading={runConformance.isPending} onClick={() => runConformance.mutate(version)}>运行 Conformance</Button>
+            <Button size="small" icon={<ApiOutlined />} loading={runConformance.isPending} onClick={() => runConformance.mutate(version)}>运行兼容性验证</Button>
             <Button size="small" type="primary" icon={<CheckCircleOutlined />}
               disabled={version.latest_conformance?.status !== 'passed'} loading={activate.isPending}
               onClick={() => activate.mutate(version)}>激活</Button>
@@ -192,7 +193,7 @@ export default function ModelsTab() {
 
     <Modal title="新建逻辑模型" open={logicalOpen} onCancel={() => setLogicalOpen(false)} onOk={() => logicalForm.submit()} confirmLoading={createLogical.isPending}>
       <Form form={logicalForm} layout="vertical" onFinish={values => createLogical.mutate(values)}>
-        <Form.Item name="key" label="唯一 Key" rules={[{ required: true }]}><Input /></Form.Item>
+        <Form.Item name="key" label="唯一模型键" rules={[{ required: true }]}><Input /></Form.Item>
         <Form.Item name="name" label="显示名称" rules={[{ required: true }]}><Input /></Form.Item>
       </Form>
     </Modal>
@@ -217,17 +218,17 @@ export default function ModelsTab() {
               }
             }} />
           </Form.Item>
-          <Form.Item name="provider" label="Provider" rules={[{ required: true }]}><Select options={providers} style={{ width: 190 }} /></Form.Item>
-          <Form.Item name="model_name" label="Provider 模型名" rules={[{ required: true }]}><Input style={{ width: 220 }} /></Form.Item>
+          <Form.Item name="provider" label="服务商" rules={[{ required: true }]}><Select options={providers} style={{ width: 190 }} /></Form.Item>
+          <Form.Item name="model_name" label="服务商模型名" rules={[{ required: true }]}><Input style={{ width: 220 }} /></Form.Item>
         </Space>
-        <Form.Item name="endpoint" label="API 地址（Endpoint）" rules={[{ required: true, message: '请输入模型 API 地址' }]}>
+        <Form.Item name="endpoint" label="接口地址" rules={[{ required: true, message: '请输入模型 API 地址' }]}>
           <Input placeholder="https://api.example.com/v1" />
         </Form.Item>
-        <Form.Item name="api_key" label="模型 API Key" extra="完整密钥只提交一次；后端加密保存，页面与 API 均不会回显。" rules={[{ required: true, message: '请输入完整模型 API Key' }]}>
-          <Input.Password autoComplete="new-password" placeholder="请输入完整 API Key" />
+        <Form.Item name="api_key" label="模型访问密钥" extra="完整密钥只提交一次；后端加密保存，页面与接口均不会回显。" rules={[{ required: true, message: '请输入完整模型访问密钥' }]}>
+          <Input.Password autoComplete="new-password" placeholder="请输入完整模型访问密钥" />
         </Form.Item>
         <Form.Item name="default_parameters" label="默认参数 JSON" rules={[{ validator: async (_, value) => { try { parseObject(value) } catch { throw new Error('请输入有效 JSON') } } }]}><Input.TextArea rows={4} /></Form.Item>
-        <Form.Item name="capabilities" label="Provider 能力 JSON" rules={[{ required: true }, { validator: async (_, value) => { try { parseObject(value) } catch { throw new Error('请输入有效 JSON') } } }]}><Input.TextArea rows={6} /></Form.Item>
+        <Form.Item name="capabilities" label="服务商能力 JSON" rules={[{ required: true }, { validator: async (_, value) => { try { parseObject(value) } catch { throw new Error('请输入有效 JSON') } } }]}><Input.TextArea rows={6} /></Form.Item>
       </Form>
     </Modal>
   </div>

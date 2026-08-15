@@ -4,6 +4,7 @@ import { ApiOutlined, EditOutlined, PlusOutlined, SyncOutlined } from '@ant-desi
 import { useState } from 'react'
 import type { AxiosResponse } from 'axios'
 import client from '../../api/client'
+import { displayLabel, selectOptions } from '@/lib/presentation'
 
 type ToolDefinition = {
   id: string; tool_key: string; namespace: string; origin: 'builtin' | 'mcp'
@@ -69,7 +70,7 @@ export default function ToolsTab() {
   const updateTool = useMutation({
     mutationFn: ({ tool, patch }: { tool: ToolDefinition; patch: Record<string, unknown> }) =>
       client.patch(`/platform-tools/${tool.id}`, patch, { headers: commandHeaders(tool.config_version) }),
-    onSuccess: () => { message.success('Tool 治理已发布'); setEditing(null); queryClient.invalidateQueries({ queryKey: ['platform-tools'] }) },
+    onSuccess: () => { message.success('工具治理已发布'); setEditing(null); queryClient.invalidateQueries({ queryKey: ['platform-tools'] }) },
     onError: (error: any) => message.error(error?.response?.data?.error?.code || '更新失败'),
   })
   const saveConnection = useMutation({
@@ -79,7 +80,7 @@ export default function ToolsTab() {
         ? client.post('/tool-connections', payload, { headers: commandHeaders() })
         : client.patch(`/tool-connections/${current.id}`, payload, { headers: commandHeaders(current.version) })
     },
-    onSuccess: () => { message.success('连接 revision 已保存，API Key 不会回显'); setConnection(null); queryClient.invalidateQueries({ queryKey: ['tool-connections'] }) },
+    onSuccess: () => { message.success('连接修订已保存，访问密钥不会回显'); setConnection(null); queryClient.invalidateQueries({ queryKey: ['tool-connections'] }) },
     onError: (error: any) => message.error(error?.response?.data?.error?.code || '连接保存失败'),
   })
   const reconcile = useMutation({
@@ -106,25 +107,25 @@ export default function ToolsTab() {
   }
 
   const connectionTab = <>
-    <Alert className="mb-3" type="info" showIcon message="平台统一凭证" description="API Key 仅在保存时提交，数据库使用 AES-GCM 密文；API、日志、Trace 和幂等快照均不会回显。连接测试会真实请求 Provider。" />
+    <Alert className="mb-3" type="info" showIcon message="平台统一凭证" description="访问密钥仅在保存时提交，数据库使用 AES-GCM 密文；接口、日志、执行轨迹和幂等快照均不会回显。连接测试会真实请求服务商。" />
     <div className="mb-3 flex justify-end"><Button icon={<PlusOutlined />} onClick={() => openConnection('new')}>新建连接</Button></div>
     <Table rowKey="id" loading={connections.isLoading} dataSource={connections.data || []} columns={[
       { title: '连接', render: (_, item: ToolConnection) => <><div>{item.display_name}</div><code className="text-xs">{item.connection_key}</code></> },
       { title: '类型', dataIndex: 'connection_type', render: value => <Tag>{value}</Tag> },
-      { title: 'Revision', dataIndex: 'revision_no' },
+      { title: '修订', dataIndex: 'revision_no' },
       { title: '凭证', render: (_, item: ToolConnection) => item.secret_configured ? <Tag color="green">已加密 · {item.secret_fingerprint?.slice(0, 8)}</Tag> : <Tag>匿名</Tag> },
-      { title: '主搜索', dataIndex: 'is_primary', render: value => value ? <Tag color="blue">PRIMARY</Tag> : null },
-      { title: '健康', render: (_, item: ToolConnection) => <Tag color={item.health.status === 'healthy' ? 'green' : item.health.status === 'unhealthy' ? 'red' : 'default'}>{item.health.status}{item.health.latency_ms != null ? ` · ${item.health.latency_ms}ms` : ''}</Tag> },
+      { title: '主搜索', dataIndex: 'is_primary', render: value => value ? <Tag color="blue">主要</Tag> : null },
+      { title: '健康', render: (_, item: ToolConnection) => <Tag color={item.health.status === 'healthy' ? 'green' : item.health.status === 'unhealthy' ? 'red' : 'default'}>{displayLabel(item.health.status)}{item.health.latency_ms != null ? ` · ${item.health.latency_ms} 毫秒` : ''}</Tag> },
       { title: '操作', render: (_, item: ToolConnection) => <Space>
         <Button size="small" icon={<EditOutlined />} onClick={() => openConnection(item)}>配置</Button>
         <Button size="small" icon={<ApiOutlined />} aria-label="真实测试" onClick={async () => {
           const result = await client.post(`/tool-connections/${item.id}/connection-test`).then(r => r.data)
-          message[result.ok ? 'success' : 'error'](result.ok ? `真实连接成功 · ${result.latency_ms}ms` : result.provider_error_code)
+          message[result.ok ? 'success' : 'error'](result.ok ? `真实连接成功 · ${result.latency_ms} 毫秒` : result.provider_error_code)
           queryClient.invalidateQueries({ queryKey: ['tool-connections'] })
         }}>真实测试</Button>
         {item.connection_type === 'mcp' && <Button size="small" icon={<SyncOutlined />} onClick={async () => {
           const result = await client.post(`/mcp-servers/${item.id}/sync`, {}, { headers: commandHeaders() }).then(r => r.data)
-          message.success(`MCP 同步 ${result.tools.length} 个 Tool，默认待审核`)
+          message.success(`MCP 同步 ${result.tools.length} 个工具，默认待审核`)
           queryClient.invalidateQueries({ queryKey: ['platform-tools'] })
         }}>同步 MCP</Button>}
       </Space> },
@@ -132,20 +133,20 @@ export default function ToolsTab() {
   </>
 
   const toolTab = <>
-    <div className="mb-3 flex justify-end"><Button icon={<SyncOutlined />} loading={reconcile.isPending} onClick={() => reconcile.mutate()}>发布代码 ToolVersion</Button></div>
+    <div className="mb-3 flex justify-end"><Button icon={<SyncOutlined />} loading={reconcile.isPending} onClick={() => reconcile.mutate()}>发布代码工具版本</Button></div>
     <Table rowKey="id" loading={tools.isLoading} dataSource={tools.data || []} pagination={false} columns={[
-      { title: 'Tool', render: (_, item: ToolDefinition) => <><div>{item.display_name_zh || item.display_name}</div><code className="text-xs">{item.tool_key}</code></> },
+      { title: '工具', render: (_, item: ToolDefinition) => <><div>{item.display_name_zh || item.display_name}</div><code className="text-xs">{item.tool_key}</code></> },
       { title: '来源', render: (_, item: ToolDefinition) => <Tag color={item.origin === 'mcp' ? 'purple' : 'blue'}>{item.namespace}</Tag> },
       { title: '版本', render: (_, item: ToolDefinition) => <span>v{item.version_no} <code>{item.content_hash?.slice(0, 8)}</code></span> },
-      { title: '执行/风险', render: (_, item: ToolDefinition) => <Space direction="vertical" size={0}><Tag>{item.execution_mode}</Tag><Tag>{item.side_effect}</Tag></Space> },
-      { title: '确认', dataIndex: 'confirmation_policy', render: value => <Tag color={value === 'per_call' ? 'orange' : value === 'session_grant' ? 'gold' : 'default'}>{value}</Tag> },
+      { title: '执行/风险', render: (_, item: ToolDefinition) => <Space direction="vertical" size={0}><Tag>{displayLabel(item.execution_mode)}</Tag><Tag>{displayLabel(item.side_effect)}</Tag></Space> },
+      { title: '确认', dataIndex: 'confirmation_policy', render: value => <Tag color={value === 'per_call' ? 'orange' : value === 'session_grant' ? 'gold' : 'default'}>{displayLabel(value)}</Tag> },
       { title: '状态', dataIndex: 'enabled', render: value => <Tag color={value ? 'green' : 'default'}>{value ? '已启用' : '待审核/停用'}</Tag> },
       { title: '操作', render: (_, item: ToolDefinition) => <Space><Button size="small" onClick={() => openTool(item)}>治理</Button><Button size="small" aria-label={`查看 ${item.tool_key} 合同`} onClick={() => setDetails(item)}>合同</Button></Space> },
     ]} />
   </>
 
   return <>
-    <Tabs items={[{ key: 'connections', label: 'Provider / MCP / Browser', children: connectionTab }, { key: 'catalog', label: 'Tool Catalog', children: toolTab }]} />
+    <Tabs items={[{ key: 'connections', label: '服务商 / MCP / 浏览器', children: connectionTab }, { key: 'catalog', label: '工具目录', children: toolTab }]} />
     <Modal title={`治理 ${editing?.tool_key || ''}`} open={!!editing} onCancel={() => setEditing(null)} onOk={() => toolForm.submit()} confirmLoading={updateTool.isPending}>
       <Form form={toolForm} layout="vertical" onFinish={values => {
         if (!editing) return
@@ -153,12 +154,14 @@ export default function ToolsTab() {
         catch { message.error('治理策略必须是有效 JSON') }
       }}>
         <Form.Item name="display_name" label="英文显示名" rules={[{ required: true }]}><Input /></Form.Item>
-        <Form.Item name="display_name_zh" label="中文显示名"><Input /></Form.Item>
-        <Form.Item name="confirmation_policy" label="默认确认策略"><Select options={[{ value: 'never' }, { value: 'per_call' }, { value: 'session_grant' }]} /></Form.Item>
+        <Form.Item name="display_name_zh" label="中文显示名（可选）">
+          <Input placeholder="未配置时回退显示英文名称" />
+        </Form.Item>
+        <Form.Item name="confirmation_policy" label="默认确认策略"><Select options={selectOptions(['never', 'per_call', 'session_grant'])} /></Form.Item>
         <Form.Item name="enabled" label="管理员审核启用" valuePropName="checked"><Switch /></Form.Item>
-        <Form.Item name="network_policy" label="Network Policy"><Input.TextArea rows={3} /></Form.Item>
-        <Form.Item name="workspace_policy" label="Workspace Policy"><Input.TextArea rows={3} /></Form.Item>
-        <Form.Item name="risk_rules" label="Dynamic Risk Rules"><Input.TextArea rows={3} /></Form.Item>
+        <Form.Item name="network_policy" label="网络策略"><Input.TextArea rows={3} /></Form.Item>
+        <Form.Item name="workspace_policy" label="工作区策略"><Input.TextArea rows={3} /></Form.Item>
+        <Form.Item name="risk_rules" label="动态风险规则"><Input.TextArea rows={3} /></Form.Item>
       </Form>
     </Modal>
     <Modal title={details?.tool_key} open={!!details} onCancel={() => setDetails(null)} footer={null} width={860}>
@@ -166,12 +169,12 @@ export default function ToolsTab() {
         { key: 'identity', label: '不可变版本', children: `${details.tool_version_id} · ${details.content_hash}` },
         { key: 'impl', label: '实现', children: `${details.implementation_ref}@${details.implementation_version}` },
         { key: 'description', label: '模型说明', children: details.description },
-        { key: 'input', label: 'Input Schema', children: <pre className="max-h-64 overflow-auto whitespace-pre-wrap">{JSON.stringify(details.input_schema, null, 2)}</pre> },
-        { key: 'output', label: 'Output Schema', children: <pre className="max-h-64 overflow-auto whitespace-pre-wrap">{JSON.stringify(details.output_schema, null, 2)}</pre> },
+        { key: 'input', label: '输入结构', children: <pre className="max-h-64 overflow-auto whitespace-pre-wrap">{JSON.stringify(details.input_schema, null, 2)}</pre> },
+        { key: 'output', label: '输出结构', children: <pre className="max-h-64 overflow-auto whitespace-pre-wrap">{JSON.stringify(details.output_schema, null, 2)}</pre> },
         { key: 'errors', label: '错误目录', children: <pre className="whitespace-pre-wrap">{JSON.stringify(details.error_catalog, null, 2)}</pre> },
       ]} />}
     </Modal>
-    <Modal title={connection === 'new' ? '新建 Tool 连接' : `配置 ${(connection as ToolConnection | null)?.connection_key || ''}`} open={!!connection} onCancel={() => setConnection(null)} onOk={() => connectionForm.submit()} confirmLoading={saveConnection.isPending}>
+    <Modal title={connection === 'new' ? '新建工具连接' : `配置 ${(connection as ToolConnection | null)?.connection_key || ''}`} open={!!connection} onCancel={() => setConnection(null)} onOk={() => connectionForm.submit()} confirmLoading={saveConnection.isPending}>
       <Form form={connectionForm} layout="vertical" onValuesChange={changed => {
         if (connection === 'new' && changed.connection_type) {
           const type = changed.connection_type
@@ -192,12 +195,12 @@ export default function ToolsTab() {
           })
         }
       }} onFinish={values => connection && saveConnection.mutate({ current: connection, values })}>
-        {connection === 'new' && <Form.Item name="connection_key" label="稳定 Key" rules={[{ required: true }]}><Input placeholder="search.bailian.primary" /></Form.Item>}
+        {connection === 'new' && <Form.Item name="connection_key" label="稳定连接键" rules={[{ required: true }]}><Input placeholder="search.bailian.primary" /></Form.Item>}
         <Form.Item name="display_name" label="显示名" rules={[{ required: true }]}><Input /></Form.Item>
         {connection === 'new' && <Form.Item name="connection_type" label="类型"><Select options={['bocha', 'brave', 'bailian', 'mcp'].map(value => ({ value }))} /></Form.Item>}
-        <Form.Item name="endpoint" label="HTTPS Endpoint" rules={[{ required: true }]}><Input /></Form.Item>
+        <Form.Item name="endpoint" label="HTTPS 接口地址" rules={[{ required: true }]}><Input /></Form.Item>
         <Form.Item name="auth_type" label="认证"><Select options={['none', 'bearer', 'x_api_key'].map(value => ({ value }))} /></Form.Item>
-        <Form.Item name="api_key" label="API Key（write-only）" extra={(connection as ToolConnection)?.secret_configured ? '留空保留当前加密 Secret；输入新值会创建新 revision 并轮换。' : undefined}><Input.Password autoComplete="new-password" /></Form.Item>
+        <Form.Item name="api_key" label="访问密钥（仅写入）" extra={(connection as ToolConnection)?.secret_configured ? '留空保留当前加密密钥；输入新值会创建新修订并轮换。' : undefined}><Input.Password autoComplete="new-password" /></Form.Item>
         <Form.Item name="config" label="类型化扩展配置 JSON"><Input.TextArea rows={4} /></Form.Item>
         <Space><Form.Item name="enabled" valuePropName="checked"><Switch checkedChildren="启用" unCheckedChildren="停用" /></Form.Item><Form.Item name="is_primary" valuePropName="checked"><Switch checkedChildren="主搜索" unCheckedChildren="非主搜索" /></Form.Item></Space>
       </Form>

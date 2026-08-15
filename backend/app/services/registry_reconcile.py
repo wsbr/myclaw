@@ -24,6 +24,7 @@ from app.models.registry import (
 )
 from app.core.tool_registry.schema import assert_valid_schema, builtin_result_schema
 from app.persistence.reliable_writes import PlatformAuditWriter
+from app.services.tool_display_names import builtin_tool_display_name_zh
 
 
 def _stable_hash(value: object) -> str:
@@ -390,7 +391,7 @@ def builtin_tool_specs() -> list[CodeToolSpec]:
             description=tool.description,
             input_schema=tool.input_schema,
             output_schema=builtin_result_schema(tool.name),
-            display_name_zh=tool.name.replace("_", " "),
+            display_name_zh=builtin_tool_display_name_zh(tool.name),
             error_catalog=[
                 {"category": "validation", "recovery": "Correct arguments and retry."},
                 {"category": "authorization", "recovery": "Use an authorized scope or ask the user."},

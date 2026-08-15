@@ -32,17 +32,17 @@ function GovernanceTable({ kind }: { kind: 'policy' | 'sandbox' }) {
   }
   return <>
     <Table<any> rowKey="id" loading={rows.isLoading} dataSource={rows.data || []} columns={kind === 'policy' ? [
-      { title: 'Key', dataIndex: 'policy_key' }, { title: '类型', dataIndex: 'policy_type', render: value => <Tag>{value}</Tag> },
+      { title: '策略键', dataIndex: 'policy_key' }, { title: '类型', dataIndex: 'policy_type', render: value => <Tag>{value}</Tag> },
       { title: '名称', dataIndex: 'name' }, { title: '参数版本', dataIndex: 'parameter_version' },
       { title: '启用', dataIndex: 'enabled', render: value => <Tag color={value ? 'success' : 'default'}>{value ? '启用' : '停用'}</Tag> },
       { title: '操作', render: (_, row: Policy) => <Button size="small" icon={<EditOutlined />} onClick={() => edit(row)}>编辑</Button> },
     ] : [
-      { title: 'Key', dataIndex: 'profile_key' }, { title: '类型', dataIndex: 'type', render: value => <Tag>{value}</Tag> },
+      { title: '配置键', dataIndex: 'profile_key' }, { title: '类型', dataIndex: 'type', render: value => <Tag>{value}</Tag> },
       { title: '说明', dataIndex: 'description' }, { title: '配置版本', dataIndex: 'config_version' },
       { title: '启用', dataIndex: 'enabled', render: value => <Tag color={value ? 'success' : 'default'}>{value ? '启用' : '停用'}</Tag> },
       { title: '操作', render: (_, row: Sandbox) => <Button size="small" icon={<EditOutlined />} onClick={() => edit(row)}>编辑</Button> },
     ]} />
-    <Modal title={kind === 'policy' ? '编辑 Policy' : '编辑 Sandbox Profile'} open={!!editing} onCancel={() => setEditing(null)} onOk={() => form.submit()} confirmLoading={update.isPending}>
+    <Modal title={kind === 'policy' ? '编辑策略' : '编辑沙箱配置'} open={!!editing} onCancel={() => setEditing(null)} onOk={() => form.submit()} confirmLoading={update.isPending}>
       <Form form={form} layout="vertical" onFinish={update.mutate}>
         {kind === 'policy' && <Form.Item name="name" label="名称"><Input /></Form.Item>}
         <Form.Item name="description" label="说明"><Input.TextArea rows={3} /></Form.Item>
@@ -54,10 +54,10 @@ function GovernanceTable({ kind }: { kind: 'policy' | 'sandbox' }) {
 }
 
 export default function GovernancePage() {
-  return <AdminSectionPage title="Policy 与 Sandbox" description="治理上下文/记忆策略和会话 Sandbox Profile">
+  return <AdminSectionPage title="策略与沙箱" description="治理上下文、记忆策略和会话沙箱配置">
     <Tabs items={[
-      { key: 'policies', label: 'Policy Definitions', children: <GovernanceTable kind="policy" /> },
-      { key: 'sandboxes', label: 'Sandbox Profiles', children: <GovernanceTable kind="sandbox" /> },
+      { key: 'policies', label: '策略定义', children: <GovernanceTable kind="policy" /> },
+      { key: 'sandboxes', label: '沙箱配置', children: <GovernanceTable kind="sandbox" /> },
     ]} />
   </AdminSectionPage>
 }

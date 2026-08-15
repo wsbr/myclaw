@@ -10,6 +10,7 @@ import {
   sessionsApi, subscribeSessionEvents,
 } from '@/api/sessions'
 import { cn } from '@/lib/utils'
+import { displayLabel } from '@/lib/presentation'
 import MessageThread from './MessageThread'
 import PendingActions from './PendingActions'
 import PlanPanel from './PlanPanel'
@@ -250,7 +251,7 @@ export default function SessionPage() {
           if (typeof emergedGroupRunId === 'string') setSelectedGroupRunId(emergedGroupRunId)
           if (event.run_id) setActiveRunId(event.run_id)
           setMode('group')
-          toast.info('Chat 已完成，模型选择的 Group Agent 已开始涌现协作')
+          toast.info('对话已完成，模型选择的群组智能体已开始涌现协作')
         }
         queryClient.invalidateQueries({ queryKey: ['groups', sessionId] })
         queryClient.invalidateQueries({ queryKey: ['group-memberships'] })
@@ -285,7 +286,7 @@ export default function SessionPage() {
         setLiveTools(current => Object.fromEntries(
           Object.entries(current).filter(([, item]) => item.run_id !== event.run_id),
         ))
-        if (event.event_type === 'run.failed') toast.error(`Agent 执行失败：${String(event.payload.error_code || 'unknown')}`)
+        if (event.event_type === 'run.failed') toast.error(`智能体执行失败：${String(event.payload.error_code || '未知错误')}`)
       }
     }, value => {
       setConnected(value)
@@ -371,13 +372,13 @@ export default function SessionPage() {
       queryClient.invalidateQueries({ queryKey: ['messages', result.session.id] })
       queryClient.invalidateQueries({ queryKey: ['session-runs', result.session.id, 'plan'] })
     },
-    onError: (error: any) => toast.error(error?.response?.data?.error?.code || 'Plan 创建失败'),
+    onError: (error: any) => toast.error(error?.response?.data?.error?.code || '规划创建失败'),
   })
   const sendGroup = useMutation({
     mutationFn: async (content: string) => {
       await ensureSession()
-      if (!activeGroup) throw new Error('请先在 Chat 中完成一次对话，系统会自动形成 Group')
-      if (!groupIsOpen) throw new Error('Group 已关闭，只能读取历史记录')
+      if (!activeGroup) throw new Error('请先完成一次正常对话，系统会自动形成群组')
+      if (!groupIsOpen) throw new Error('群组已关闭，只能读取历史记录')
       if (latestGroupRun && !['completed', 'cancelled', 'failed'].includes(latestGroupRun.run.status)) {
         return { kind: 'message' as const, value: await sessionsApi.sendGroupRunMessage(latestGroupRun.id, content, groupRecipient) }
       }
@@ -393,7 +394,7 @@ export default function SessionPage() {
       queryClient.invalidateQueries({ queryKey: ['group-runs'] })
       queryClient.invalidateQueries({ queryKey: ['group-run-messages'] })
     },
-    onError: (error: any) => toast.error(error?.response?.data?.error?.code || error.message || 'Group 请求失败'),
+    onError: (error: any) => toast.error(error?.response?.data?.error?.code || error.message || '群组请求失败'),
   })
 
   const refreshPlan = () => {
@@ -414,23 +415,23 @@ export default function SessionPage() {
       queryClient.invalidateQueries({ queryKey: ['messages', result.message.session_id] })
       refreshPlan()
     },
-    onError: (error: any) => toast.error(error?.response?.data?.detail?.code || 'Plan 修改方向失败'),
+    onError: (error: any) => toast.error(error?.response?.data?.detail?.code || '规划修改方向失败'),
   })
   const confirmPlan = useMutation({
     mutationFn: () => sessionsApi.approvePlanImplementation(activeWorkingPlan!, planApproval!.subject_hash),
     onSuccess: () => {
       suppressLiveUntilNextRunRef.current = false
-      refreshPlan(); toast.success('当前 revision 已批准；同一 Session 开始动态实施')
+      refreshPlan(); toast.success('当前修订已批准；同一会话开始动态实施')
     },
-    onError: (error: any) => toast.error(error?.response?.data?.detail?.code || 'Plan 批准失败'),
+    onError: (error: any) => toast.error(error?.response?.data?.detail?.code || '规划批准失败'),
   })
   const rejectPlan = useMutation({
     mutationFn: (reason?: string) => sessionsApi.decideApproval(planApproval!, 'reject', reason),
     onSuccess: () => {
       suppressLiveUntilNextRunRef.current = false
-      refreshPlan(); toast.info('当前 Plan revision 已拒绝，项目经理将继续只读规划')
+      refreshPlan(); toast.info('当前规划修订已拒绝，项目经理将继续只读规划')
     },
-    onError: (error: any) => toast.error(error?.response?.data?.detail?.code || 'Plan 拒绝失败'),
+    onError: (error: any) => toast.error(error?.response?.data?.detail?.code || '规划拒绝失败'),
   })
   const exitPlan = useMutation({
     mutationFn: () => sessionsApi.exitPlanMode(sessionRecord!),
@@ -438,15 +439,15 @@ export default function SessionPage() {
       queryClient.setQueryData(['session', result.id], result)
       setActiveRunId(null); setMode('chat'); refreshPlan()
     },
-    onError: (error: any) => toast.error(error?.response?.data?.detail?.code || '退出 Plan 失败'),
+    onError: (error: any) => toast.error(error?.response?.data?.detail?.code || '退出规划失败'),
   })
   const replaceReporter = useMutation({
     mutationFn: (agentId: string) => sessionsApi.replaceGroupReporter(activeGroupRun!, agentId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['group-runs', groupId] })
-      toast.success('Reporter 已替换，将重新评估自然收口')
+      toast.success('汇报智能体已替换，将重新评估自然收口')
     },
-    onError: (error: any) => toast.error(error?.response?.data?.detail?.code || 'Reporter 替换失败'),
+    onError: (error: any) => toast.error(error?.response?.data?.detail?.code || '汇报智能体替换失败'),
   })
   const closeGroup = useMutation({
     mutationFn: () => sessionsApi.closeGroup(
@@ -457,9 +458,9 @@ export default function SessionPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['groups', sessionId] })
       queryClient.invalidateQueries({ queryKey: ['group-runs'] })
-      toast.info('Group 已关闭并转为只读')
+      toast.info('群组已关闭并转为只读')
     },
-    onError: (error: any) => toast.error(error?.response?.data?.error?.code || 'Group 关闭失败'),
+    onError: (error: any) => toast.error(error?.response?.data?.error?.code || '群组关闭失败'),
   })
 
   const cancel = useMutation({
@@ -478,7 +479,7 @@ export default function SessionPage() {
       setLiveTools({})
       queryClient.setQueryData(['run', run.id], run)
       refreshPlan()
-      toast.info('Run 已取消；已发生的外部副作用不会回滚')
+      toast.info('运行已取消；已发生的外部副作用不会回滚')
     },
     onError: (error: any) => toast.error(error?.response?.data?.error?.code || '取消失败'),
   })
@@ -558,7 +559,7 @@ export default function SessionPage() {
   const selectMode = (nextMode: 'chat' | 'plan' | 'group') => {
     if (nextMode === mode) return
     if (planAlreadyEntered && nextMode !== 'plan') {
-      toast.info('请先退出当前 Plan，再切换到其他模式')
+      toast.info('请先退出当前规划，再切换到其他模式')
       return
     }
     setMode(nextMode)
@@ -574,7 +575,7 @@ export default function SessionPage() {
     <div className="relative flex h-full min-h-0 overflow-hidden bg-background">
       <aside className="hidden w-56 shrink-0 flex-col border-r border-sidebar-border bg-sidebar lg:flex">
         <div className="space-y-2 border-b p-3">
-          <Button icon={<ArrowLeft className="size-3.5" />} block onClick={() => navigate('/agents')}>返回 Agents</Button>
+          <Button icon={<ArrowLeft className="size-3.5" />} block onClick={() => navigate('/agents')}>返回智能体</Button>
           <Button type="primary" icon={<Plus className="size-3.5" />} block onClick={() => navigate(`/agents/${agentId}/chat`)}>新对话</Button>
         </div>
         <div className="min-h-0 flex-1 overflow-y-auto p-3">
@@ -590,7 +591,7 @@ export default function SessionPage() {
               )}>
               <HistoryOutlined className="shrink-0" />
               <span className="min-w-0 flex-1 truncate">{item.title || item.id.slice(0, 12)}</span>
-              {item.interaction_mode === 'plan' && <span className="size-1.5 shrink-0 rounded-full bg-violet-500" title="Plan Session" />}
+              {item.interaction_mode === 'plan' && <span className="size-1.5 shrink-0 rounded-full bg-violet-500" title="规划会话" />}
             </button>
           ))}
         </div>
@@ -600,41 +601,41 @@ export default function SessionPage() {
         <header className="flex h-14 shrink-0 items-center justify-between gap-3 border-b bg-background/85 px-4 backdrop-blur-lg">
           <div className="flex min-w-0 items-center gap-3">
             <div className="hidden min-w-0 md:block">
-              <p className="truncate text-sm font-semibold">{agent?.name || 'Agent'}</p>
-              <p className="truncate text-[10px] text-muted-foreground">{sessionRecord?.title || (sessionId ? `Session ${sessionId.slice(0, 8)}` : '新会话')}</p>
+              <p className="truncate text-sm font-semibold">{agent?.name || '智能体'}</p>
+              <p className="truncate text-[10px] text-muted-foreground">{sessionRecord?.title || (sessionId ? `会话 ${sessionId.slice(0, 8)}` : '新会话')}</p>
             </div>
             <Button.Group className="flex">
-              <Button size="small" icon={<MessageSquare className="size-3.5" />} disabled={Boolean(planAlreadyEntered)} type={mode === 'chat' ? 'primary' : 'default'} onClick={() => selectMode('chat')}>Chat</Button>
-              <Button size="small" icon={<GitBranch className="size-3.5" />} type={mode === 'plan' ? 'primary' : 'default'} onClick={() => selectMode('plan')}>Plan</Button>
-              {(agent?.group_enabled || groups.length > 0) && <Button size="small" icon={<UsersRound className="size-3.5" />} disabled={Boolean(planAlreadyEntered)} type={mode === 'group' ? 'primary' : 'default'} onClick={() => selectMode('group')}>Group</Button>}
+              <Button size="small" icon={<MessageSquare className="size-3.5" />} disabled={Boolean(planAlreadyEntered)} type={mode === 'chat' ? 'primary' : 'default'} onClick={() => selectMode('chat')}>对话</Button>
+              <Button size="small" icon={<GitBranch className="size-3.5" />} type={mode === 'plan' ? 'primary' : 'default'} onClick={() => selectMode('plan')}>规划</Button>
+              {(agent?.group_enabled || groups.length > 0) && <Button size="small" icon={<UsersRound className="size-3.5" />} disabled={Boolean(planAlreadyEntered)} type={mode === 'group' ? 'primary' : 'default'} onClick={() => selectMode('group')}>群组</Button>}
             </Button.Group>
           </div>
           <Space size={6} className="shrink-0">
             {sessionRecord && <Tag color={sessionRecord.permission_mode === 'plan_readonly' ? 'gold' : 'green'} className="hidden md:inline-flex">
-              {sessionRecord.permission_mode} · r{sessionRecord.permission_revision}
+              {displayLabel(sessionRecord.permission_mode)} · 修订 {sessionRecord.permission_revision}
             </Tag>}
             {currentRunMeta && <Tag color={currentRunMeta.tone === 'danger' ? 'red' : currentRunMeta.tone === 'success' ? 'green' : currentRunMeta.tone === 'warning' ? 'orange' : 'blue'}>
               {currentRunMeta.label}
             </Tag>}
             {isRunning && <Button danger size="small" loading={cancel.isPending} onClick={requestCancel}>停止</Button>}
             {mode === 'group' && groupIsOpen && <Button danger size="small" loading={closeGroup.isPending} onClick={() => Modal.confirm({
-              title: '关闭整个 Group？',
-              content: '所有非终态 GroupRun 会被取消，Group 之后只允许读取历史；此操作不同于仅停止当前 Run。',
-              okText: '关闭 Group', okButtonProps: { danger: true }, onOk: () => closeGroup.mutateAsync(),
-            })}>关闭 Group</Button>}
+              title: '关闭整个群组？',
+              content: '所有非终态群组运行会被取消，群组之后只允许读取历史；此操作不同于仅停止当前运行。',
+              okText: '关闭群组', okButtonProps: { danger: true }, onOk: () => closeGroup.mutateAsync(),
+            })}>关闭群组</Button>}
             {!inspectorOpen && <Tooltip title="打开运行监控"><Button size="small" aria-label="打开运行监控" icon={<PanelRightOpen className="size-4" />} onClick={() => setInspectorOpen(true)} /></Tooltip>}
           </Space>
         </header>
 
         {!connected && <Alert banner type="warning" showIcon message="实时连接暂时中断，任务仍在后台执行；正在自动恢复进度。" />}
         {activeRun?.status === 'failed' && <Alert banner type="error" showIcon
-          message={`运行失败：${activeRun.terminal_reason || 'unknown'}`}
+          message={`运行失败：${displayLabel(activeRun.terminal_reason, '未知原因')}`}
           description="右侧运行监控保留失败、权限拒绝、超时与迟到结果的可靠事件。" />}
-        {activeRun?.status === 'cancelled' && <Alert banner type="warning" showIcon message={`运行已停止：${activeRun.terminal_reason || 'cancelled'}`} />}
+        {activeRun?.status === 'cancelled' && <Alert banner type="warning" showIcon message={`运行已停止：${displayLabel(activeRun.terminal_reason, '已取消')}`} />}
         {activeRun?.status === 'completed' && activeRun.terminal_reason === 'completed_with_errors' && <Alert
           banner type="warning" showIcon
-          message="Group 已完成，但本次 Run 记录了成员或调用失败"
-          description="最终摘要必须保留这些失败；可在当前 Run 的图和运行监控中核对。"
+          message="群组已完成，但本次运行记录了成员或调用失败"
+          description="最终摘要必须保留这些失败；可在当前运行的图和运行监控中核对。"
         />}
 
         <section
@@ -677,7 +678,7 @@ export default function SessionPage() {
 
               {mode === 'chat' && activeWorkingPlan && <details open className="overflow-hidden rounded-2xl border border-violet-200 bg-card shadow-sm">
                 <summary className="flex cursor-pointer list-none items-center justify-between gap-3 bg-violet-50/60 px-4 py-3 dark:bg-violet-950/15">
-                  <span className="flex items-center gap-2"><GitBranch className="size-4 text-violet-500" /><span className="font-semibold">WorkingPlan</span><Tag color="purple">revision {activeWorkingPlan.revision}</Tag></span>
+                  <span className="flex items-center gap-2"><GitBranch className="size-4 text-violet-500" /><span className="font-semibold">工作计划</span><Tag color="purple">修订 {activeWorkingPlan.revision}</Tag></span>
                   <span className="text-xs text-muted-foreground">{activeWorkingPlan.items.filter(item => item.status === 'completed').length}/{activeWorkingPlan.items.length}</span>
                 </summary>
                 <div className="space-y-2 p-4">
@@ -739,13 +740,13 @@ export default function SessionPage() {
                   onChange={value => setGroupRecipient(value || undefined)}
                   disabled={!groupIsOpen}
                   options={[
-                    { value: '', label: 'Reporter（默认）' },
+                    { value: '', label: '汇报智能体（默认）' },
                     ...groupMembers.filter(member => member.status === 'joined').map(member => ({
                       value: member.agent_id,
                       label: networkCards?.items.find(card => card.agent_id === member.agent_id)?.name || member.agent_id.slice(0, 10),
                     })),
                   ]}
-                  aria-label="Group 接收 Agent"
+                  aria-label="群组接收智能体"
                 /> : undefined}
                 onChange={setInput}
                 onSubmit={submitComposer}

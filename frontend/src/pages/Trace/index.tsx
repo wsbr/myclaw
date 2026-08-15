@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Button, Card, Collapse, Descriptions, Empty, Select, Spin, Tag, Timeline, Typography } from 'antd'
 import { ArrowLeftOutlined } from '@ant-design/icons'
 import { ExecutionEvent, sessionsApi } from '@/api/sessions'
+import { displayLabel } from '@/lib/presentation'
 
 export default function TracePage() {
   const { sessionId } = useParams<{ sessionId: string }>()
@@ -48,8 +49,8 @@ export default function TracePage() {
         <div className="flex items-start gap-3">
           <Button icon={<ArrowLeftOutlined />} onClick={() => navigate(-1)}>返回</Button>
           <div>
-            <Typography.Title level={3} style={{ margin: 0 }}>Execution Timeline</Typography.Title>
-            <Typography.Text type="secondary">Session {sessionId?.slice(0, 12)} · {session?.origin_type}</Typography.Text>
+            <Typography.Title level={3} style={{ margin: 0 }}>执行时间线</Typography.Title>
+            <Typography.Text type="secondary">会话 {sessionId?.slice(0, 12)} · {displayLabel(session?.origin_type)}</Typography.Text>
           </div>
         </div>
         <Select allowClear placeholder="筛选事件类型" value={eventType} onChange={setEventType}
@@ -68,8 +69,8 @@ export default function TracePage() {
                 </div>
                 <Typography.Paragraph>{event.summary}</Typography.Paragraph>
                 <Descriptions size="small" column={2} bordered>
-                  <Descriptions.Item label="Run">{event.run_id?.slice(0, 12) || '—'}</Descriptions.Item>
-                  <Descriptions.Item label="Event ID">{event.event_id.slice(0, 12)}</Descriptions.Item>
+                  <Descriptions.Item label="运行 ID">{event.run_id?.slice(0, 12) || '—'}</Descriptions.Item>
+                  <Descriptions.Item label="事件 ID">{event.event_id.slice(0, 12)}</Descriptions.Item>
                 </Descriptions>
                 {Object.keys(event.payload || {}).length > 0 && (
                   <pre className="mt-2 overflow-x-auto rounded-lg bg-muted p-3 text-xs">{JSON.stringify(event.payload, null, 2)}</pre>
@@ -79,20 +80,20 @@ export default function TracePage() {
           }))} />
         )}
       </Card>
-      <Card className="mt-4" title="Runner Traces" extra={<Typography.Text type="secondary">脱敏、非权威诊断</Typography.Text>}>
-        {!traces?.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无 Runner Trace" /> : (
+      <Card className="mt-4" title="执行器轨迹" extra={<Typography.Text type="secondary">脱敏、非权威诊断</Typography.Text>}>
+        {!traces?.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无执行器轨迹" /> : (
           <Collapse items={traces.map(trace => ({
             key: trace.runner_id,
-            label: <span><Tag>{trace.runner_id.slice(0, 12)}</Tag><Tag color={trace.trace?.status === 'completed' ? 'green' : trace.trace?.status === 'failed' ? 'red' : 'default'}>{trace.trace?.status || 'not available'}</Tag></span>,
+            label: <span><Tag>{trace.runner_id.slice(0, 12)}</Tag><Tag color={trace.trace?.status === 'completed' ? 'green' : trace.trace?.status === 'failed' ? 'red' : 'default'}>{displayLabel(trace.trace?.status, '不可用')}</Tag></span>,
             children: <div>
-              <Typography.Text type="secondary">跨账本权威引用（Trace 本身非权威）</Typography.Text>
+              <Typography.Text type="secondary">跨账本权威引用（执行轨迹本身非权威）</Typography.Text>
               <pre className="mb-3 mt-2 overflow-x-auto rounded-lg bg-muted p-3 text-xs">{JSON.stringify(trace.ledger_refs, null, 2)}</pre>
-              {trace.status === 'not_available' ? <Empty description="Trace 尚不可用" /> : <>
+              {trace.status === 'not_available' ? <Empty description="执行轨迹尚不可用" /> : <>
               <Timeline items={trace.spans.map(span => ({
                 color: span.status === 'ok' ? 'green' : 'red',
                 children: <div>
                   <div className="flex flex-wrap items-center gap-2"><Typography.Text strong>{span.name}</Typography.Text><Tag>{span.span_kind}</Tag><Tag>{span.duration_ms} ms</Tag></div>
-                  {(span.input_tokens != null || span.output_tokens != null) && <Typography.Text type="secondary">tokens: {span.input_tokens ?? 0} in / {span.output_tokens ?? 0} out</Typography.Text>}
+                  {(span.input_tokens != null || span.output_tokens != null) && <Typography.Text type="secondary">令牌：输入 {span.input_tokens ?? 0} / 输出 {span.output_tokens ?? 0}</Typography.Text>}
                   {Object.keys(span.attributes || {}).length > 0 && <pre className="mt-2 overflow-x-auto rounded-lg bg-muted p-3 text-xs">{JSON.stringify(span.attributes, null, 2)}</pre>}
                 </div>,
               }))} />

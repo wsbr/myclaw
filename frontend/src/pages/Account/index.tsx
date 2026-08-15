@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Alert, Button, Card, Descriptions, Form, Input, Modal, Space, Spin, Tag, Typography, message } from 'antd'
 import { accountsApi, MyAccount } from '@/api/accounts'
 import { useAuthStore } from '@/store/auth'
+import { displayLabel } from '@/lib/presentation'
 
 type ProfileValues = { display_name: string; email?: string }
 
@@ -67,22 +68,22 @@ export default function AccountPage() {
 
   if (isLoading || !account) return <div className="py-24 text-center"><Spin /></div>
 
-  return <div className="mx-auto max-w-3xl space-y-4">
+  return <div className="app-page max-w-3xl">
     <div>
       <Typography.Title level={2} style={{ margin: 0 }}>我的账号</Typography.Title>
-      <Typography.Text type="secondary">管理登录资料与企业 canonical userId</Typography.Text>
+      <Typography.Text type="secondary">管理登录资料与企业统一用户标识</Typography.Text>
     </div>
     <Card title="账号资料">
       <Descriptions column={1} size="small" className="mb-5">
-        <Descriptions.Item label="当前 Tenant">
+        <Descriptions.Item label="当前租户">
           <Space>
-            <Tag color="blue">{account.tenant?.name ?? 'Unknown Tenant'}</Tag>
+            <Tag color="blue">{account.tenant?.name ?? '未知租户'}</Tag>
             <Typography.Text copyable code>{account.tenant_id}</Typography.Text>
           </Space>
         </Descriptions.Item>
-        <Descriptions.Item label="当前 userId"><Typography.Text copyable code>{account.user_id}</Typography.Text></Descriptions.Item>
-        <Descriptions.Item label="角色"><Space>{account.roles.map(role => <Tag key={role}>{role}</Tag>)}</Space></Descriptions.Item>
-        <Descriptions.Item label="状态"><Tag color="green">{account.status}</Tag></Descriptions.Item>
+        <Descriptions.Item label="当前用户标识"><Typography.Text copyable code>{account.user_id}</Typography.Text></Descriptions.Item>
+        <Descriptions.Item label="角色"><Space>{account.roles.map(role => <Tag key={role}>{displayLabel(role)}</Tag>)}</Space></Descriptions.Item>
+        <Descriptions.Item label="状态"><Tag color="green">{displayLabel(account.status)}</Tag></Descriptions.Item>
       </Descriptions>
       <Form form={form} layout="vertical" initialValues={{
         display_name: account.display_name, email: account.email ?? undefined,
@@ -96,19 +97,19 @@ export default function AccountPage() {
         <Button type="primary" htmlType="submit" loading={updateProfile.isPending}>保存资料</Button>
       </Form>
     </Card>
-    <Card title="更新企业 userId">
+    <Card title="更新企业用户标识">
       <Alert type="warning" showIcon className="mb-4"
-        message="userId 变更会被视为新人"
-        description="旧 Session、Memory、Plan、Group、Artifact 与执行历史不会迁移或合并；新 userId 只能访问新身份下的数据。" />
+        message="用户标识变更会被视为新身份"
+        description="旧会话、记忆、规划、群组、产物与执行历史不会迁移或合并；新用户标识只能访问新身份下的数据。" />
       <Input.TextArea value={assertion} onChange={event => setAssertion(event.target.value)}
-        placeholder="粘贴 aud=myclaw-user-id-link 的短期企业身份断言" autoSize={{ minRows: 3, maxRows: 8 }} />
+        placeholder="粘贴面向 myclaw-user-id-link 的短期企业身份断言" autoSize={{ minRows: 3, maxRows: 8 }} />
       <Button danger className="mt-3" disabled={assertion.trim().length < 20} loading={changeUserId.isPending}
         onClick={() => Modal.confirm({
-          title: '确认切换 canonical userId？',
+          title: '确认切换企业用户标识？',
           content: '这是身份切换，不会迁移任何旧数据。成功后当前登录会立即失效。',
           okText: '确认切换', okButtonProps: { danger: true },
           onOk: () => changeUserId.mutateAsync(),
-        })}>验证并切换 userId</Button>
+        })}>验证并切换用户标识</Button>
     </Card>
   </div>
 }

@@ -5,6 +5,7 @@ import { Alert, Button, Card, Form, Input, InputNumber, Modal, Radio, Select, Sp
 import { ArrowLeftOutlined, CloudUploadOutlined, ExperimentOutlined, KeyOutlined, PauseCircleOutlined, PlayCircleOutlined, PlusOutlined, SaveOutlined } from '@ant-design/icons'
 import { agentsApi, AgentApiKey, AgentDraft, AgentEvalRun, AgentEvalSuite, AgentOption, AgentPublishedVersion } from '@/api/agents'
 import PromptEditor from '@/components/PromptEditor'
+import { displayLabel } from '@/lib/presentation'
 
 const policyTypes = ['context', 'history', 'memory_write', 'memory_recall'] as const
 
@@ -83,14 +84,14 @@ export default function AgentConfigPage() {
   })
   const stateChange = useMutation({
     mutationFn: (target: 'deactivate' | 'reactivate') => agentsApi.setState(
-      id!, target, target === 'deactivate' ? 'Builder 从配置页停用' : 'Builder 从配置页重新启用',
+      id!, target, target === 'deactivate' ? '构建者从配置页停用' : '构建者从配置页重新启用',
     ),
     onSuccess: result => {
-      message.success(result.status === 'inactive' ? 'Agent 已停用' : 'Agent 已重新启用')
+      message.success(result.status === 'inactive' ? '智能体已停用' : '智能体已重新启用')
       queryClient.invalidateQueries({ queryKey: ['agent', id] })
       queryClient.invalidateQueries({ queryKey: ['agents'] })
     },
-    onError: (error: any) => message.error(error?.response?.data?.error?.code || 'Agent 状态更新失败'),
+    onError: (error: any) => message.error(error?.response?.data?.error?.code || '智能体状态更新失败'),
   })
   const apiKeys = useQuery({
     queryKey: ['agent-api-keys', id], queryFn: () => agentsApi.listApiKeys(id!), enabled: !isNew,
@@ -157,7 +158,7 @@ export default function AgentConfigPage() {
       id!, suite.id, detail!.draft.draft_revision,
     ),
     onSuccess: () => {
-      message.success('评测已启动，每个用例都创建了独立的真实 Run')
+      message.success('评测已启动，每个用例都创建了独立的真实运行')
       queryClient.invalidateQueries({ queryKey: ['agent-eval-runs', id] })
     },
     onError: (error: any) => message.error(
@@ -176,7 +177,7 @@ export default function AgentConfigPage() {
     onError: () => message.error('评测门禁状态更新失败'),
   })
   const showSecret = (key: AgentApiKey) => Modal.success({
-    title: 'API Key 仅显示一次',
+    title: '访问密钥仅显示一次',
     width: 680,
     content: <div className="space-y-2"><Alert type="warning" showIcon message="关闭后无法再次查看；请立即保存到企业密钥管理系统。" />
       <Typography.Text copyable code>{key.secret}</Typography.Text></div>,
@@ -188,7 +189,7 @@ export default function AgentConfigPage() {
       setKeyOpen(false); keyForm.resetFields(); showSecret(key)
       queryClient.invalidateQueries({ queryKey: ['agent-api-keys', id] })
     },
-    onError: (error: any) => message.error(error?.response?.data?.error?.code || 'API Key 创建失败'),
+    onError: (error: any) => message.error(error?.response?.data?.error?.code || '访问密钥创建失败'),
   })
   const rotateKey = useMutation({
     mutationFn: (key: AgentApiKey) => agentsApi.rotateApiKey(id!, key),
@@ -196,15 +197,15 @@ export default function AgentConfigPage() {
       showSecret(key)
       queryClient.invalidateQueries({ queryKey: ['agent-api-keys', id] })
     },
-    onError: (error: any) => message.error(error?.response?.data?.error?.code || 'API Key 轮换失败'),
+    onError: (error: any) => message.error(error?.response?.data?.error?.code || '访问密钥轮换失败'),
   })
   const revokeKey = useMutation({
     mutationFn: (key: AgentApiKey) => agentsApi.revokeApiKey(id!, key.id),
     onSuccess: () => {
-      message.success('API Key 已吊销')
+      message.success('访问密钥已吊销')
       queryClient.invalidateQueries({ queryKey: ['agent-api-keys', id] })
     },
-    onError: (error: any) => message.error(error?.response?.data?.error?.code || 'API Key 吊销失败'),
+    onError: (error: any) => message.error(error?.response?.data?.error?.code || '访问密钥吊销失败'),
   })
 
   if (!isNew && isLoading) return <Spin size="large" className="mx-auto mt-20 block" />
@@ -216,10 +217,10 @@ export default function AgentConfigPage() {
         <Space align="start">
           <Button icon={<ArrowLeftOutlined />} onClick={() => navigate('/agents')}>返回</Button>
           <div>
-            <Typography.Title level={3} style={{ margin: 0 }}>{isNew ? '装配新 Agent' : draft?.name || '未命名 Agent'}</Typography.Title>
-            {!isNew && <Typography.Text type="secondary">草稿 revision {draft?.draft_revision} · 已发布 v{detail?.agent.latest_published_version_no ?? '—'}</Typography.Text>}
+            <Typography.Title level={3} style={{ margin: 0 }}>{isNew ? '装配新智能体' : draft?.name || '未命名智能体'}</Typography.Title>
+            {!isNew && <Typography.Text type="secondary">草稿修订 {draft?.draft_revision} · 已发布 v{detail?.agent.latest_published_version_no ?? '—'}</Typography.Text>}
           </div>
-          {detail && <Tag color={detail.agent.status === 'published' ? 'green' : 'gold'}>{detail.agent.status}</Tag>}
+          {detail && <Tag color={detail.agent.status === 'published' ? 'green' : 'gold'}>{displayLabel(detail.agent.status)}</Tag>}
         </Space>
         <Space>
           <Button icon={<SaveOutlined />} loading={save.isPending} onClick={() => form.validateFields().then(values => save.mutate(values))}>保存草稿</Button>
@@ -229,22 +230,22 @@ export default function AgentConfigPage() {
             icon={detail.agent.status === 'inactive' ? <PlayCircleOutlined /> : <PauseCircleOutlined />}
             loading={stateChange.isPending}
             onClick={() => Modal.confirm({
-              title: detail.agent.status === 'inactive' ? '重新启用 Agent？' : '停用 Agent？',
+              title: detail.agent.status === 'inactive' ? '重新启用智能体？' : '停用智能体？',
               content: detail.agent.status === 'inactive'
-                ? '只影响后续新 Run；已经冻结的 Plan / Group 仍按其版本规则结算。'
-                : '将阻止新的 Chat、Plan 与 Group 执行；已固定的运行快照不会被移除。',
+                ? '只影响后续新运行；已经冻结的规划与群组仍按其版本规则结算。'
+                : '将阻止新的对话、规划与群组执行；已固定的运行快照不会被移除。',
               onOk: () => stateChange.mutateAsync(detail.agent.status === 'inactive' ? 'reactivate' : 'deactivate'),
             })}>{detail.agent.status === 'inactive' ? '重新启用' : '停用'}</Button>}
           {!isNew && <Button type="primary" icon={<CloudUploadOutlined />} loading={publish.isPending} onClick={() => publish.mutate()}>发布版本</Button>}
         </Space>
       </div>
 
-      <Alert className="mb-4" type="info" showIcon message="Chat 新 Run 使用最新发布版本；已确认的 Plan / Group 不会随草稿变化。" />
+      <Alert className="mb-4" type="info" showIcon message="新对话使用最新发布版本；已确认的规划与群组不会随草稿变化。" />
       {!isNew && capabilityCheck.data && <Alert className="mb-4" showIcon
         type={capabilityCheck.data.publishable ? 'success' : 'error'}
         message={capabilityCheck.data.publishable ? '当前已保存草稿通过发布前能力检查' : '当前已保存草稿不可发布'}
         description={capabilityCheck.data.publishable
-          ? '发布时会冻结精确 Model、Tool 注册哈希、SkillVersion/checksum、Policy、Sandbox 与 AgentCard。'
+          ? '发布时会冻结精确模型、工具注册哈希、技能版本与校验和、策略、沙箱和智能体卡片。'
           : capabilityCheck.data.issues.join('；')} />}
       <Form form={form} layout="vertical" initialValues={{ visibility: 'private', group_enabled: false, tool_ids: [], skill_ids: [], bound_agent_ids: [] }}>
         <Tabs tabPosition="left" items={[
@@ -255,46 +256,46 @@ export default function AgentConfigPage() {
           </Card> },
           { key: 'model', label: '模型与指令', children: <Card>
             <Form.Item name="model_id" label="模型" rules={[{ required: true }]}><Select options={options(models)} placeholder="选择平台模型" /></Form.Item>
-            <Form.Item name="sandbox_profile_id" label="Sandbox" rules={[{ required: true }]}><Select options={options(sandboxes)} /></Form.Item>
-            <Form.Item name="instructions" label="Agent Instructions" rules={[{ required: true }]}><PromptEditor height={320} /></Form.Item>
-            <Typography.Text type="secondary">采样参数由平台 Model Registry 统一治理。</Typography.Text>
+            <Form.Item name="sandbox_profile_id" label="沙箱配置" rules={[{ required: true }]}><Select options={options(sandboxes)} /></Form.Item>
+            <Form.Item name="instructions" label="智能体指令" rules={[{ required: true }]}><PromptEditor height={320} /></Form.Item>
+            <Typography.Text type="secondary">采样参数由平台模型注册表统一治理。</Typography.Text>
           </Card> },
           { key: 'capabilities', label: '能力装配', children: <Card>
-            <Form.Item name="tool_ids" label="Platform Tools"><Select mode="multiple" options={options(tools)} optionFilterProp="label" /></Form.Item>
-            <Form.Item name="skill_ids" label="Skills"><Select mode="multiple" options={options(skills)} optionFilterProp="label" /></Form.Item>
+            <Form.Item name="tool_ids" label="平台工具"><Select mode="multiple" options={options(tools)} optionFilterProp="label" /></Form.Item>
+            <Form.Item name="skill_ids" label="技能"><Select mode="multiple" options={options(skills)} optionFilterProp="label" /></Form.Item>
           </Card> },
           { key: 'context', label: '上下文与记忆', children: <Card>
-            <Form.Item name="context_policy_id" label="Context Policy" rules={[{ required: true }]}><Select options={options(policies[0])} /></Form.Item>
-            <Form.Item name="history_policy_id" label="History Policy" rules={[{ required: true }]}><Select options={options(policies[1])} /></Form.Item>
-            <Form.Item name="memory_write_policy_id" label="Memory Write Policy" rules={[{ required: true }]}><Select options={options(policies[2])} /></Form.Item>
-            <Form.Item name="memory_recall_policy_id" label="Memory Recall Policy" rules={[{ required: true }]}><Select options={options(policies[3])} /></Form.Item>
+            <Form.Item name="context_policy_id" label="上下文策略" rules={[{ required: true }]}><Select options={options(policies[0])} /></Form.Item>
+            <Form.Item name="history_policy_id" label="历史策略" rules={[{ required: true }]}><Select options={options(policies[1])} /></Form.Item>
+            <Form.Item name="memory_write_policy_id" label="记忆写入策略" rules={[{ required: true }]}><Select options={options(policies[2])} /></Form.Item>
+            <Form.Item name="memory_recall_policy_id" label="记忆召回策略" rules={[{ required: true }]}><Select options={options(policies[3])} /></Form.Item>
           </Card> },
           { key: 'collaboration', label: '协作与访问', children: <Card>
-            <Form.Item name="bound_agent_ids" label="可调用 Agent"><Select mode="multiple" options={options(boundAgents.filter(item => item.id !== id))} optionFilterProp="label" /></Form.Item>
-            <Form.Item name="group_enabled" label="允许加入 Group" valuePropName="checked"><Switch /></Form.Item>
+            <Form.Item name="bound_agent_ids" label="可调用智能体"><Select mode="multiple" options={options(boundAgents.filter(item => item.id !== id))} optionFilterProp="label" /></Form.Item>
+            <Form.Item name="group_enabled" label="允许加入群组协作" valuePropName="checked"><Switch /></Form.Item>
             <Typography.Text type="secondary">绑定只授予发现与调用范围，不提升原始用户权限。</Typography.Text>
           </Card> },
           ...(!isNew ? [{ key: 'versions', label: '版本历史', children: <Card>
             <Table rowKey="id" loading={versions.isLoading} dataSource={versions.data ?? []} pagination={false}
               expandable={{ expandedRowRender: (version: AgentPublishedVersion) => <div className="space-y-2">
                 <Typography.Paragraph copyable={{ text: version.content_hash }}><Typography.Text strong>完整快照哈希：</Typography.Text> {version.content_hash}</Typography.Paragraph>
-                <Typography.Paragraph copyable={{ text: version.model_version_id }}><Typography.Text strong>ModelVersion：</Typography.Text> {version.model_version_id}</Typography.Paragraph>
-                <Typography.Paragraph><Typography.Text strong>PolicyVersions：</Typography.Text> {[version.context_policy_version_id, version.history_policy_version_id, version.memory_write_policy_version_id, version.memory_recall_policy_version_id].join(' · ')}</Typography.Paragraph>
-                <Typography.Paragraph><Typography.Text strong>SandboxProfileVersion：</Typography.Text> {version.sandbox_profile_version_id}</Typography.Paragraph>
-                <Typography.Paragraph><Typography.Text strong>Tools：</Typography.Text> {version.tools.map(tool => `${tool.tool_id}@${tool.registration_hash.slice(0, 12)}`).join(' · ') || '无'}</Typography.Paragraph>
-                <Typography.Paragraph><Typography.Text strong>Skills：</Typography.Text> {version.skills.map(skill => `${skill.skill_version_id}@${skill.checksum.slice(0, 12)}`).join(' · ') || '无'}</Typography.Paragraph>
-                <Typography.Paragraph copyable={{ text: version.agent_card_content_hash || '' }}><Typography.Text strong>AgentCard：</Typography.Text> {version.agent_card_content_hash || '—'}</Typography.Paragraph>
+                <Typography.Paragraph copyable={{ text: version.model_version_id }}><Typography.Text strong>模型版本：</Typography.Text> {version.model_version_id}</Typography.Paragraph>
+                <Typography.Paragraph><Typography.Text strong>策略版本：</Typography.Text> {[version.context_policy_version_id, version.history_policy_version_id, version.memory_write_policy_version_id, version.memory_recall_policy_version_id].join(' · ')}</Typography.Paragraph>
+                <Typography.Paragraph><Typography.Text strong>沙箱配置版本：</Typography.Text> {version.sandbox_profile_version_id}</Typography.Paragraph>
+                <Typography.Paragraph><Typography.Text strong>工具：</Typography.Text> {version.tools.map(tool => `${tool.tool_id}@${tool.registration_hash.slice(0, 12)}`).join(' · ') || '无'}</Typography.Paragraph>
+                <Typography.Paragraph><Typography.Text strong>技能：</Typography.Text> {version.skills.map(skill => `${skill.skill_version_id}@${skill.checksum.slice(0, 12)}`).join(' · ') || '无'}</Typography.Paragraph>
+                <Typography.Paragraph copyable={{ text: version.agent_card_content_hash || '' }}><Typography.Text strong>智能体卡片：</Typography.Text> {version.agent_card_content_hash || '—'}</Typography.Paragraph>
               </div> }}
               columns={[
                 { title: '版本', dataIndex: 'version_no', render: (value: number) => `v${value}` },
-                { title: '状态', dataIndex: 'publication_status', render: (value: string) => <Tag color={value === 'published' ? 'success' : 'default'}>{value}</Tag> },
+                { title: '状态', dataIndex: 'publication_status', render: (value: string) => <Tag color={value === 'published' ? 'success' : 'default'}>{displayLabel(value)}</Tag> },
                 { title: '快照哈希', dataIndex: 'content_hash', render: (value: string) => <Typography.Text code copyable>{value.slice(0, 16)}</Typography.Text> },
                 { title: '发布时间', dataIndex: 'published_at', render: (value: string | null) => value ? new Date(value).toLocaleString() : '—' },
               ]} />
           </Card> }] : []),
           ...(!isNew ? [{ key: 'evals', label: '评测与门禁', children: <Space direction="vertical" size="large" className="w-full">
             <Alert showIcon type="info" message="评测证据与发布候选精确绑定"
-              description="每个用例创建独立的真实 Draft Test Run。只有当前套件版本通过，且草稿与冻结依赖的候选哈希完全一致，发布按钮才会放行；任何草稿或依赖变化都会使旧成绩失效。" />
+              description="每个用例创建独立的真实草稿测试运行。只有当前套件版本通过，且草稿与冻结依赖的候选哈希完全一致，发布按钮才会放行；任何草稿或依赖变化都会使旧成绩失效。" />
             <Card title="发布门禁套件" extra={<Button type="primary" icon={<PlusOutlined />} onClick={() => openEvalDefinition()}>新建套件</Button>}>
               <Table rowKey="id" loading={evalSuites.isLoading} dataSource={evalSuites.data ?? []} pagination={false}
                 expandable={{ expandedRowRender: (suite: AgentEvalSuite) => <div className="space-y-2">
@@ -302,7 +303,7 @@ export default function AgentConfigPage() {
                   <Typography.Paragraph copyable={{ text: suite.content_hash }}><Typography.Text strong>套件哈希：</Typography.Text> {suite.content_hash}</Typography.Paragraph>
                   <Table rowKey="id" size="small" pagination={false} dataSource={suite.cases} columns={[
                     { title: '用例', dataIndex: 'name' },
-                    { title: 'Key', dataIndex: 'case_key' },
+                    { title: '用例键', dataIndex: 'case_key' },
                     { title: '输入', dataIndex: 'input_text', ellipsis: true },
                     { title: '断言', dataIndex: 'assertions', render: (value: object) => <Typography.Text code>{JSON.stringify(value)}</Typography.Text> },
                   ]} />
@@ -310,7 +311,7 @@ export default function AgentConfigPage() {
                 columns={[
                   { title: '名称', dataIndex: 'name' },
                   { title: '版本', dataIndex: 'current_version_no', render: (value: number) => `v${value}` },
-                  { title: '状态', dataIndex: 'status', render: (value: string) => <Tag color={value === 'active' ? 'success' : 'default'}>{value}</Tag> },
+                  { title: '状态', dataIndex: 'status', render: (value: string) => <Tag color={value === 'active' ? 'success' : 'default'}>{displayLabel(value)}</Tag> },
                   { title: '通过线', dataIndex: 'gate_policy', render: (value: { min_pass_rate?: string }) => `${Number(value?.min_pass_rate ?? 1) * 100}%` },
                   { title: '用例数', dataIndex: 'cases', render: (value: unknown[]) => value.length },
                   { title: '操作', render: (_: unknown, suite: AgentEvalSuite) => <Space wrap>
@@ -324,36 +325,36 @@ export default function AgentConfigPage() {
               <Table rowKey="id" loading={evalRuns.isLoading} dataSource={evalRuns.data ?? []} pagination={false}
                 expandable={{ expandedRowRender: (run: AgentEvalRun) => <Table rowKey="id" size="small" pagination={false} dataSource={run.case_runs} columns={[
                   { title: '用例', dataIndex: 'name' },
-                  { title: '状态', dataIndex: 'status', render: (value: string) => <Tag color={value === 'passed' ? 'success' : value === 'failed' || value === 'error' ? 'error' : 'processing'}>{value}</Tag> },
+                  { title: '状态', dataIndex: 'status', render: (value: string) => <Tag color={value === 'passed' ? 'success' : value === 'failed' || value === 'error' ? 'error' : 'processing'}>{displayLabel(value)}</Tag> },
                   { title: '断言结果', dataIndex: 'assertion_results', render: (value: object[]) => value.length ? <Typography.Text code>{JSON.stringify(value)}</Typography.Text> : '等待结算' },
                   { title: '错误', dataIndex: 'failure_code', render: (value: string | null) => value || '—' },
-                  { title: 'Run', render: (_: unknown, item: { session_id: string; run_id: string }) => <Button size="small" onClick={() => navigate(`/agents/${id}/chat/${item.session_id}`)}>查看过程</Button> },
+                  { title: '运行', render: (_: unknown, item: { session_id: string; run_id: string }) => <Button size="small" onClick={() => navigate(`/agents/${id}/chat/${item.session_id}`)}>查看过程</Button> },
                 ]} /> }}
                 columns={[
                   { title: '套件', render: (_: unknown, run: AgentEvalRun) => `${run.suite_name} v${run.suite_version_no}` },
                   { title: '候选哈希', dataIndex: 'candidate_content_hash', render: (value: string) => <Typography.Text code copyable>{value.slice(0, 16)}</Typography.Text> },
-                  { title: '状态', dataIndex: 'status', render: (value: string) => <Tag color={value === 'passed' ? 'success' : value === 'failed' || value === 'error' ? 'error' : 'processing'}>{value}</Tag> },
+                  { title: '状态', dataIndex: 'status', render: (value: string) => <Tag color={value === 'passed' ? 'success' : value === 'failed' || value === 'error' ? 'error' : 'processing'}>{displayLabel(value)}</Tag> },
                   { title: '结果', render: (_: unknown, run: AgentEvalRun) => `${run.passed_count}/${run.case_count} · ${run.score == null ? '—' : `${(Number(run.score) * 100).toFixed(1)}%`}` },
                   { title: '时间', dataIndex: 'created_at', render: (value: string) => new Date(value).toLocaleString() },
                 ]} />
             </Card>
           </Space> }] : []),
-          ...(!isNew ? [{ key: 'api', label: 'API 接入', children: <Card title="Agent API Keys"
-            extra={<Button type="primary" icon={<KeyOutlined />} onClick={() => setKeyOpen(true)}>创建 Key</Button>}>
-            <Alert className="mb-4" type="info" showIcon message="外部系统使用 AgentApiKey + userId 调用；Key 不代表新的用户身份。" />
+          ...(!isNew ? [{ key: 'api', label: '接口接入', children: <Card title="智能体访问密钥"
+            extra={<Button type="primary" icon={<KeyOutlined />} onClick={() => setKeyOpen(true)}>创建密钥</Button>}>
+            <Alert className="mb-4" type="info" showIcon message="外部系统使用智能体访问密钥与用户标识调用；密钥不代表新的用户身份。" />
             <Table rowKey="id" loading={apiKeys.isLoading} dataSource={apiKeys.data ?? []} pagination={false} columns={[
               { title: '名称', dataIndex: 'name' },
               { title: '调用方', dataIndex: 'caller_label' },
-              { title: 'Prefix', dataIndex: 'prefix', render: (value: string) => <Typography.Text code>{value}</Typography.Text> },
-              { title: '状态', dataIndex: 'status', render: (value: string) => <Tag color={value === 'active' ? 'success' : 'default'}>{value}</Tag> },
+              { title: '前缀', dataIndex: 'prefix', render: (value: string) => <Typography.Text code>{value}</Typography.Text> },
+              { title: '状态', dataIndex: 'status', render: (value: string) => <Tag color={value === 'active' ? 'success' : 'default'}>{displayLabel(value)}</Tag> },
               { title: '到期', dataIndex: 'expires_at', render: (value: string | null) => value ? new Date(value).toLocaleString() : '永不' },
               { title: '最后使用', dataIndex: 'last_used_at', render: (value: string | null) => value ? new Date(value).toLocaleString() : '—' },
               { title: '操作', render: (_: unknown, key: AgentApiKey) => <Space>
                 <Button size="small" disabled={key.status !== 'active'} loading={rotateKey.isPending} onClick={() => Modal.confirm({
-                  title: '轮换 API Key？', content: '新 Key 会立即生效；旧 Key 将被吊销。', onOk: () => rotateKey.mutateAsync(key),
+                  title: '轮换访问密钥？', content: '新密钥会立即生效；旧密钥将被吊销。', onOk: () => rotateKey.mutateAsync(key),
                 })}>轮换</Button>
                 <Button size="small" danger disabled={key.status !== 'active'} loading={revokeKey.isPending} onClick={() => Modal.confirm({
-                  title: '吊销 API Key？', content: '吊销立即生效且不可撤销。', okButtonProps: { danger: true }, onOk: () => revokeKey.mutateAsync(key),
+                  title: '吊销访问密钥？', content: '吊销立即生效且不可撤销。', okButtonProps: { danger: true }, onOk: () => revokeKey.mutateAsync(key),
                 })}>吊销</Button>
               </Space> },
             ]} />
@@ -361,15 +362,15 @@ export default function AgentConfigPage() {
         ]} />
       </Form>
       <Modal title="测试当前草稿" open={testOpen} onCancel={() => setTestOpen(false)}
-        okText="创建测试 Run" confirmLoading={draftTest.isPending}
+        okText="创建测试运行" confirmLoading={draftTest.isPending}
         okButtonProps={{ disabled: !testContent.trim() }} onOk={() => draftTest.mutate()}>
         <Alert className="mb-3" type="warning" showIcon
           message="平台会复制当前 revision 为不可变测试快照"
-          description="后续草稿编辑不会改变本次测试；该 Run 为私有 Chat，不能进入 Plan / Group，也不能被其他 Agent 调用。" />
+          description="后续草稿编辑不会改变本次测试；该运行是私有对话，不能进入规划或群组模式，也不能被其他智能体调用。" />
         <Input.TextArea value={testContent} onChange={event => setTestContent(event.target.value)}
           placeholder="输入草稿测试消息" autoSize={{ minRows: 3, maxRows: 8 }} />
       </Modal>
-      <Modal title="创建 Agent API Key" open={keyOpen} onCancel={() => setKeyOpen(false)}
+      <Modal title="创建智能体访问密钥" open={keyOpen} onCancel={() => setKeyOpen(false)}
         onOk={() => keyForm.submit()} confirmLoading={createKey.isPending}>
         <Form form={keyForm} layout="vertical" onFinish={values => createKey.mutate(values)}>
           <Form.Item name="name" label="名称" rules={[{ required: true }]}><Input /></Form.Item>

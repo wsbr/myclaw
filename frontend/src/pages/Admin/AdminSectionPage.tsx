@@ -9,12 +9,14 @@ interface AdminSectionPageProps {
 
 export function AdminSectionPage({ title, description, children }: AdminSectionPageProps) {
   return (
-    <div className="mx-auto max-w-6xl">
-      <div className="mb-6">
-        <h2 className="text-2xl font-semibold tracking-tight">{title}</h2>
-        <p className="text-muted-foreground mt-1 text-sm">{description}</p>
+    <div className="app-page">
+      <div className="page-header">
+        <div>
+          <h2 className="page-title">{title}</h2>
+          <p className="page-description">{description}</p>
+        </div>
       </div>
-      <Card className="rounded-xl shadow-sm" bordered={false}>
+      <Card className="surface-panel" bordered={false}>
         {children}
       </Card>
     </div>

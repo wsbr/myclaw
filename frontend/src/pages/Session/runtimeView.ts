@@ -9,7 +9,7 @@ export const runStatusMeta: Record<Run['status'], {
   tone: 'neutral' | 'active' | 'warning' | 'success' | 'danger'
   description: string
 }> = {
-  active: { label: '正在执行', tone: 'active', description: 'Agent 正在处理当前任务' },
+  active: { label: '正在执行', tone: 'active', description: '智能体正在处理当前任务' },
   waiting_user: { label: '等待回复', tone: 'warning', description: '需要你补充信息后继续' },
   waiting_approval: { label: '等待批准', tone: 'warning', description: '需要你确认下一步操作' },
   waiting_tool: { label: '等待工具', tone: 'warning', description: '正在等待工具资源或结果' },
@@ -55,10 +55,10 @@ const EVENT_LABELS: Record<string, string> = {
   'runner.started': '执行器已启动',
   'runner.succeeded': '执行器完成',
   'runner.failed': '执行器失败',
-  'agent_turn.started': 'Agent 开始分析',
+  'agent_turn.started': '智能体开始分析',
   'agent_turn.waiting_actions': '等待动作结果',
-  'agent_turn.completed': 'Agent 完成本轮',
-  'agent_turn.failed': 'Agent 本轮失败',
+  'agent_turn.completed': '智能体完成本轮',
+  'agent_turn.failed': '智能体本轮失败',
   'message.created': '消息已写入',
   'working_plan.updated': '计划已更新',
   'plan.permission_entered': '进入只读计划',

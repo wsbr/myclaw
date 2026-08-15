@@ -36,7 +36,7 @@ export default function PendingActions({
             <span className="font-medium">{action.tool_key || ('presentation' in action ? action.presentation.title : '') || '受保护操作'}</span>
           </div>
           <p className="mt-2 text-sm leading-6 text-muted-foreground">
-            Agent 请求执行以下精确参数。批准只对本次参数哈希有效。
+            智能体请求执行以下精确参数。批准只对本次参数哈希有效。
           </p>
           {action.arguments && <details className="mt-3 rounded-xl border bg-background/70">
             <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-muted-foreground">查看请求参数</summary>
@@ -56,14 +56,14 @@ export default function PendingActions({
           <CircleHelp className="size-4" />
         </div>
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2"><Tag color="blue">需要补充信息</Tag><span className="font-medium">Agent 提问</span></div>
+          <div className="flex items-center gap-2"><Tag color="blue">需要补充信息</Tag><span className="font-medium">智能体提问</span></div>
           <p className="mt-3 whitespace-pre-wrap text-sm leading-6">{action.question}</p>
           <Input.TextArea
             className="mt-3"
             value={answers[action.id] || ''}
             onChange={event => onAnswerChange(action.id, event.target.value)}
             autoSize={{ minRows: 2, maxRows: 6 }}
-            placeholder="输入回答；只会恢复提出该问题的 Work Item"
+            placeholder="输入回答；只会恢复提出该问题的工作项"
           />
           <Button
             className="mt-3"

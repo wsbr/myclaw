@@ -21,6 +21,7 @@ from app.models.registry import (
 )
 from app.services.tool_connection_service import _assert_public_endpoint, resolve_connection_revision
 from app.services.browser_worker_service import PinnedEgressProxy
+from app.services.tool_display_names import mcp_tool_display_name_zh
 
 
 class McpToolError(RuntimeError):
@@ -152,16 +153,24 @@ async def sync_mcp_tools(db, *, connection: ToolConnection, actor_account_id: st
         definition = await db.scalar(select(ToolDefinition).where(
             ToolDefinition.tool_key == key,
         ).with_for_update())
+        display_name_zh = mcp_tool_display_name_zh(
+            remote.name,
+            remote_title,
+            current_display_name=definition.display_name if definition is not None else "",
+            current_display_name_zh=definition.display_name_zh if definition is not None else "",
+        )
         if definition is None:
             definition = ToolDefinition(
                 id=uuid7(), tool_key=key, namespace=f"mcp.{connection.connection_key}",
                 origin="mcp", display_name=remote_title,
-                display_name_zh=remote_title,
+                display_name_zh=display_name_zh,
                 summary=remote.description or f"Remote MCP Tool {remote.name}",
                 status="active", next_version_no=1,
             )
             db.add(definition)
             await db.flush()
+        definition.display_name = remote_title
+        definition.display_name_zh = display_name_zh
         payload = {
             "remote_name": remote.name, "description": remote.description or "",
             "remote_contract_hash": remote_contract_hash,

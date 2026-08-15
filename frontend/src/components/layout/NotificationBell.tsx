@@ -6,6 +6,7 @@ import { Bell } from 'lucide-react'
 import dayjs from 'dayjs'
 import relativeTime from 'dayjs/plugin/relativeTime'
 import { RequiredAction, sessionsApi } from '@/api/sessions'
+import { displayLabel } from '@/lib/presentation'
 
 dayjs.extend(relativeTime)
 
@@ -28,15 +29,15 @@ export default function NotificationBell() {
     if ('presentation' in action) return action.presentation.title
     if (action.type === 'clarification') return action.question
     if (action.type === 'tool_confirmation') return action.tool_key
-    return 'Group action required'
+    return '群组操作待处理'
   }
   return <Popover trigger="click" placement="rightTop" open={open} onOpenChange={setOpen} content={
     <div className="w-80"><div className="px-1 pb-2"><Typography.Text strong>待处理操作</Typography.Text>
-      <p className="text-xs text-muted-foreground">来自持久 Required Action，不代表 Channel 已送达。</p></div>
+      <p className="text-xs text-muted-foreground">来自持久化待处理事项，不代表外部渠道已经送达。</p></div>
       <List className="max-h-96 overflow-y-auto" dataSource={actions}
         locale={{ emptyText: <Empty description="暂无待处理操作" image={Empty.PRESENTED_IMAGE_SIMPLE} /> }}
         renderItem={(item: RequiredAction) => <List.Item className="cursor-pointer" onClick={() => openAction(item)}>
-          <List.Item.Meta title={<span><Tag color="warning">{item.type}</Tag>{actionTitle(item)}</span>}
+          <List.Item.Meta title={<span><Tag color="warning">{displayLabel(item.type)}</Tag>{actionTitle(item)}</span>}
             description={<span className="text-xs">{dayjs('created_at' in item ? item.created_at : new Date()).fromNow()}</span>} />
         </List.Item>} />
     </div>

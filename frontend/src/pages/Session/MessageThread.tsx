@@ -53,7 +53,7 @@ function MessageItem({ item, agentName }: { item: Message; agentName?: string })
     </div>
     <div className={cn('min-w-0 max-w-[84%]', isUser && 'items-end')}>
       <div className={cn('mb-1 flex items-center gap-2 px-1 text-[11px] text-muted-foreground', isUser && 'justify-end')}>
-        <span className="font-medium text-foreground/75">{isUser ? '你' : agentName || 'Agent'}</span>
+        <span className="font-medium text-foreground/75">{isUser ? '你' : agentName || '智能体'}</span>
         <time>{formatClock(item.created_at)}</time>
       </div>
       <div className={cn(
@@ -113,7 +113,7 @@ export default function MessageThread({
       <div className="mb-5 flex size-12 items-center justify-center rounded-2xl border bg-card shadow-sm">
         <Bot className="size-5" />
       </div>
-      <p className="text-lg font-semibold">开始与 {agentName || 'Agent'} 协作</p>
+      <p className="text-lg font-semibold">开始与 {agentName || '智能体'} 协作</p>
       <p className="mt-2 text-sm leading-6 text-muted-foreground">
         发出目标后可以离开页面，任务会继续运行；回到这里即可恢复消息和进度。
       </p>
@@ -126,7 +126,7 @@ export default function MessageThread({
           <Bot className="size-4" />
         </div>
         <div className="min-w-0 max-w-[84%]">
-          <div className="mb-1 px-1 text-[11px] font-medium text-foreground/75">{agentName || 'Agent'} · 正在响应</div>
+          <div className="mb-1 px-1 text-[11px] font-medium text-foreground/75">{agentName || '智能体'} · 正在响应</div>
           <div className="min-h-12 whitespace-pre-wrap break-words rounded-2xl rounded-tl-md border bg-card px-4 py-3 text-sm leading-7 shadow-sm">
             {liveText || (activeTools.length === 0 && liveTools.length === 0) && <div className="flex items-center gap-2 py-1 text-muted-foreground">
               <span className="runtime-pulse-dot" />

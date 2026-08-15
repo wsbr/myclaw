@@ -15,6 +15,7 @@ import type {
   SharedTask,
   WorkingPlan,
 } from '@/api/sessions'
+import { displayLabel } from '@/lib/presentation'
 
 interface Props {
   group?: GroupSession
@@ -42,15 +43,15 @@ export default function GroupPanel({
   requiredActions, sharedTasks, busy, onSelectRun, onReplaceReporter, onDownload,
 }: Props) {
   const cardByAgent = new Map(cards.map(card => [card.agent_id, card]))
-  const name = (agentId?: string | null) => agentId ? cardByAgent.get(agentId)?.name || short(agentId) : 'Group'
+  const name = (agentId?: string | null) => agentId ? cardByAgent.get(agentId)?.name || short(agentId) : '群组'
   const availableMembers = activeRun?.members.filter(item => item.participation_status === 'available') || []
 
   if (!group) {
     return (
       <Card className="mb-5 text-center">
-        <Empty description="当前 Session 尚未建立 Agent-native Group">
+        <Empty description="当前会话尚未建立智能体原生群组">
           <Typography.Paragraph type="secondary">
-            先在 Chat 中正常对话。模型会根据本次诉求，从当前可用、治理允许且已开启 Group 的 Agent 目录中选择必要成员，Chat 完成后再涌现协作。
+            先进行一次正常对话。模型会根据本次诉求，从当前可用、治理允许且已开启群组模式的智能体目录中选择必要成员，对话完成后再涌现协作。
           </Typography.Paragraph>
         </Empty>
       </Card>
@@ -78,8 +79,8 @@ export default function GroupPanel({
         label: (
           <div className="min-w-40">
             <b>{name(member.agent_id)}</b>
-            <div className="mt-1 text-xs">{member.participation_status} · v{short(member.agent_version_id)}</div>
-            {activeRun?.reporter_agent_id === member.agent_id && <Tag className="mt-1" color="purple">Reporter</Tag>}
+            <div className="mt-1 text-xs">{displayLabel(member.participation_status)} · v{short(member.agent_version_id)}</div>
+            {activeRun?.reporter_agent_id === member.agent_id && <Tag className="mt-1" color="purple">汇报智能体</Tag>}
           </div>
         ),
       },
@@ -92,7 +93,7 @@ export default function GroupPanel({
   if (hasGroupBroadcast && activeRun) graphNodes.push({
     id: `group:${activeRun.id}`,
     position: { x: 210, y: -150 },
-    data: { label: <b>Group 留痕</b> },
+    data: { label: <b>群组留痕</b> },
     style: { borderColor: '#7c3aed', borderRadius: 999, background: '#f5f3ff' },
   })
   const edgeBuckets = new Map<string, NonNullable<typeof graph>['edges']>()
@@ -103,8 +104,8 @@ export default function GroupPanel({
   const graphEdges: Edge[] = [...edgeBuckets.entries()].map(([key, facts]) => {
     const fact = facts[0]
     const label = fact.cause_type === 'message'
-      ? 'message'
-      : fact.cause_type === 'group_message' ? 'record' : 'invoke_agent'
+      ? '消息'
+      : fact.cause_type === 'group_message' ? '群组留痕' : '智能体委托'
     return {
       id: key,
       source: fact.source_agent_id,
@@ -123,12 +124,12 @@ export default function GroupPanel({
 
   return (
     <div className="space-y-4">
-      <Card size="small" title="Group 状态" extra={<Tag color={group.status === 'open' ? 'green' : 'default'}>{group.status}</Tag>}>
+      <Card size="small" title="群组状态" extra={<Tag color={group.status === 'open' ? 'green' : 'default'}>{displayLabel(group.status)}</Tag>}>
         <Descriptions size="small" column={2}>
-          <Descriptions.Item label="Group">{short(group.id)}</Descriptions.Item>
-          <Descriptions.Item label="成员策略">{group.membership_policy}</Descriptions.Item>
-          <Descriptions.Item label="形成方式">{group.formation_mode === 'emergent_model_selected' ? 'Chat 模型语义选员' : '手动选择（历史）'}</Descriptions.Item>
-          <Descriptions.Item label="Initiator">{name(group.initiator_agent_id)}</Descriptions.Item>
+          <Descriptions.Item label="群组 ID">{short(group.id)}</Descriptions.Item>
+          <Descriptions.Item label="成员策略">{displayLabel(group.membership_policy)}</Descriptions.Item>
+          <Descriptions.Item label="形成方式">{group.formation_mode === 'emergent_model_selected' ? '对话模型语义选员' : '手动选择（历史）'}</Descriptions.Item>
+          <Descriptions.Item label="发起智能体">{name(group.initiator_agent_id)}</Descriptions.Item>
           <Descriptions.Item label="成员">{members.filter(item => item.status === 'joined').length}</Descriptions.Item>
           <Descriptions.Item label="目标" span={2}>{activeRun?.goal || '—'}</Descriptions.Item>
         </Descriptions>
@@ -136,21 +137,21 @@ export default function GroupPanel({
           className="mt-3 w-full"
           value={activeRun?.id}
           onChange={onSelectRun}
-          placeholder="选择要审计的 GroupRun"
+          placeholder="选择要审计的群组运行"
           options={runs.map(item => ({
             value: item.id,
-            label: `${short(item.id)} · ${item.run.status}${item.run.terminal_reason === 'completed_with_errors' ? '（有错误）' : ''} · ${item.goal.slice(0, 48)}`,
+            label: `${short(item.id)} · ${displayLabel(item.run.status)}${item.run.terminal_reason === 'completed_with_errors' ? '（有错误）' : ''} · ${item.goal.slice(0, 48)}`,
           }))}
         />
       </Card>
 
       {activeRun?.run.terminal_reason === 'completed_with_errors' && <Alert
         type="warning" showIcon
-        message="本 GroupRun 已完成，但存在失败事实"
-        description="图、消息与摘要均限定在当前选中的 Run；失败不会再被旧 Run 内容覆盖。"
+        message="本次群组运行已完成，但存在失败事实"
+        description="图、消息与摘要均限定在当前选中的运行；失败不会再被旧运行内容覆盖。"
       />}
 
-      <Card size="small" title="Runtime 诊断与循环护栏" extra={<Tag color={diagnostics.length ? 'orange' : 'green'}>{diagnostics.length} 条</Tag>}>
+      <Card size="small" title="运行诊断与循环护栏" extra={<Tag color={diagnostics.length ? 'orange' : 'green'}>{diagnostics.length} 条</Tag>}>
         {diagnostics.length ? <Table
           size="small"
           pagination={false}
@@ -171,11 +172,11 @@ export default function GroupPanel({
             {
               title: '调用链',
               render: (_: unknown, item: GroupDiagnostic) => item.caller_agent_id
-                ? `${name(item.caller_agent_id)} → ${name(item.target_agent_id)}` : 'Runtime',
+                ? `${name(item.caller_agent_id)} → ${name(item.target_agent_id)}` : '运行系统',
             },
             {
               title: '处置', dataIndex: 'disposition', width: 90,
-              render: (value: string) => <Tag color={value === 'blocked' ? 'orange' : 'blue'}>{value}</Tag>,
+              render: (value: string) => <Tag color={value === 'blocked' ? 'orange' : 'blue'}>{displayLabel(value)}</Tag>,
             },
           ]}
           expandable={{
@@ -185,27 +186,27 @@ export default function GroupPanel({
               <Descriptions.Item label="诊断指纹"><Typography.Text copyable>{item.causal_fingerprint}</Typography.Text></Descriptions.Item>
             </Descriptions>,
           }}
-        /> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="本次 GroupRun 未触发循环或调度护栏" />}
+        /> : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="本次群组运行未触发循环或调度护栏" />}
         <Typography.Paragraph type="secondary" className="!mb-0 !mt-2 text-xs">
           护栏拦截会保留不可变诊断事实；被成功收敛的重复或循环委托不会单独污染最终业务结果。
         </Typography.Paragraph>
       </Card>
 
-      <Card size="small" title={`固定的 GroupRun 成员快照 · ${short(activeRun?.id)}`}>
+      <Card size="small" title={`固定的群组成员快照 · ${short(activeRun?.id)}`}>
         <Table size="small" pagination={false} rowKey="membership_id" dataSource={activeRun?.members || []}
           columns={[
-            { title: 'Agent', dataIndex: 'agent_id', render: (value: string) => name(value) },
-            { title: 'AgentVersion', dataIndex: 'agent_version_id', render: short },
-            { title: '参与', dataIndex: 'participation_status', render: (value: string) => <Tag>{value}</Tag> },
+            { title: '智能体', dataIndex: 'agent_id', render: (value: string) => name(value) },
+            { title: '智能体版本', dataIndex: 'agent_version_id', render: short },
+            { title: '参与', dataIndex: 'participation_status', render: (value: string) => <Tag>{displayLabel(value)}</Tag> },
             { title: '权限 / 能力边界', dataIndex: 'capability_boundary', render: (value: object) => <Typography.Text code>{JSON.stringify(value)}</Typography.Text> },
             { title: '预算', dataIndex: 'budget_snapshot', render: (value: object) => <Typography.Text code>{JSON.stringify(value)}</Typography.Text> },
           ]} />
       </Card>
 
       {activeRun?.run.status === 'waiting_user' && (
-        <Card size="small" className="border-amber-300" title={<Space><Tag color="warning">Required Action</Tag>Reporter 不可用</Space>}>
+        <Card size="small" className="border-amber-300" title={<Space><Tag color="warning">需要处理</Tag>汇报智能体不可用</Space>}>
           <Space wrap>
-            <Typography.Text>选择另一名当前快照内可用成员继续本次 summary epoch：</Typography.Text>
+            <Typography.Text>选择另一名当前快照内可用成员继续本轮摘要：</Typography.Text>
             <Select className="w-56" defaultValue={activeRun.reporter_agent_id || undefined}
               options={availableMembers.map(item => ({ value: item.agent_id, label: name(item.agent_id) }))}
               onChange={value => onReplaceReporter(value)} disabled={busy} />
@@ -213,20 +214,20 @@ export default function GroupPanel({
         </Card>
       )}
 
-      <Card size="small" title="真实 Interaction Graph" extra={<Tag>{graphEdges.length} facts</Tag>}>
+      <Card size="small" title="真实交互图" extra={<Tag>{graphEdges.length} 条事实</Tag>}>
         {graphNodes.length ? (
           <div className="h-80 rounded border">
             <ReactFlow nodes={graphNodes} edges={graphEdges} fitView nodesDraggable={false}>
               <Background /><Controls showInteractive={false} />
             </ReactFlow>
           </div>
-        ) : <Empty description="还没有真实 Message 或 AgentInvocation 互动" />}
+        ) : <Empty description="还没有真实消息或智能体委托记录" />}
         <Typography.Paragraph type="secondary" className="!mb-0 !mt-2 text-xs">
-          图只显示当前选中 GroupRun 的持久化事实。委托的定向请求与交付折叠在 invoke_agent 边中；群留痕不通知成员，指向 Group 节点且不与历史 Run 混合。
+          图只显示当前选中群组运行的持久化事实。委托的定向请求与交付折叠在智能体委托边中；群组留痕不通知成员，指向群组节点且不与历史运行混合。
         </Typography.Paragraph>
       </Card>
 
-      <Card size="small" title="Group 消息">
+      <Card size="small" title="群组消息">
         {messages.length === 0 ? <Empty description="暂无消息" /> : (
           <div className="max-h-96 space-y-2 overflow-y-auto">
             {messages.map(item => (
@@ -245,41 +246,41 @@ export default function GroupPanel({
       </Card>
 
       <div className="grid gap-4 lg:grid-cols-2">
-        <Card size="small" title="Runs / Summary epochs">
+        <Card size="small" title="运行与摘要轮次">
           <Table size="small" pagination={false} rowKey="id" dataSource={runs}
             onRow={item => ({ onClick: () => onSelectRun(item.id), className: item.id === activeRun?.id ? 'bg-blue-50/60 cursor-pointer' : 'cursor-pointer' })}
             columns={[
-              { title: 'Run', dataIndex: 'id', render: short },
-              { title: '状态', render: (_: unknown, item: GroupRun) => <Tag color={item.run.terminal_reason === 'completed_with_errors' ? 'warning' : undefined}>{item.run.status}{item.run.terminal_reason === 'completed_with_errors' ? ' · 有错误' : ''}</Tag> },
-              { title: 'Reporter', dataIndex: 'reporter_agent_id', render: name },
-              { title: 'Epoch', render: (_: unknown, item: GroupRun) => `${item.delivered_summary_epoch}/${item.summary_epoch}` },
+              { title: '运行', dataIndex: 'id', render: short },
+              { title: '状态', render: (_: unknown, item: GroupRun) => <Tag color={item.run.terminal_reason === 'completed_with_errors' ? 'warning' : undefined}>{displayLabel(item.run.status)}{item.run.terminal_reason === 'completed_with_errors' ? ' · 有错误' : ''}</Tag> },
+              { title: '汇报智能体', dataIndex: 'reporter_agent_id', render: name },
+              { title: '摘要轮次', render: (_: unknown, item: GroupRun) => `${item.delivered_summary_epoch}/${item.summary_epoch}` },
             ]} />
         </Card>
-        <Card size="small" title="SharedTask（可选白板，不调度执行）">
+        <Card size="small" title="共享任务（可选白板，不调度执行）">
           {sharedTasks.length ? sharedTasks.map(task => (
             <div key={task.id} className="mb-2 rounded border p-2 text-sm">
-              <Space><Tag>{task.status}</Tag><b>{task.title}</b></Space>
+              <Space><Tag>{displayLabel(task.status)}</Tag><b>{task.title}</b></Space>
               <div className="mt-1 text-muted-foreground">{task.description}</div>
             </div>
-          )) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="模型尚未按需创建 SharedTask" />}
+          )) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="模型尚未按需创建共享任务" />}
         </Card>
       </div>
 
       <div className="grid gap-4 lg:grid-cols-3">
-        <Card size="small" title="Working Plan">
-          {plans.length ? plans.map(plan => <div key={plan.id} className="mb-2"><Tag>{plan.status}</Tag>{plan.summary}</div>)
+        <Card size="small" title="工作计划">
+          {plans.length ? plans.map(plan => <div key={plan.id} className="mb-2"><Tag>{displayLabel(plan.status)}</Tag>{plan.summary}</div>)
             : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无计划" />}
         </Card>
-        <Card size="small" title="Artifacts">
+        <Card size="small" title="产物">
           {artifacts.length ? artifacts.map(artifact => (
             <Button key={artifact.id} type="link" block className="!text-left" onClick={() => onDownload(artifact)}>
               {artifact.name} · {artifact.size_bytes} B
             </Button>
-          )) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无 Artifact" />}
+          )) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无产物" />}
         </Card>
-        <Card size="small" title="Required Actions">
+        <Card size="small" title="待处理事项">
           {requiredActions.length ? requiredActions.map(action => (
-            <div key={action.id} className="mb-2 rounded border p-2 text-sm"><Tag color="warning">{action.type}</Tag>{action.status}</div>
+            <div key={action.id} className="mb-2 rounded border p-2 text-sm"><Tag color="warning">{displayLabel(action.type)}</Tag>{displayLabel(action.status)}</div>
           )) : <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="无需用户处理" />}
         </Card>
       </div>

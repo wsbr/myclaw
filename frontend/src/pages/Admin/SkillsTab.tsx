@@ -35,6 +35,7 @@ import { marked } from 'marked'
 import { useEffect, useMemo, useState } from 'react'
 import PromptEditor from '../../components/PromptEditor'
 import client from '../../api/client'
+import { displayLabel } from '@/lib/presentation'
 
 type SkillVersion = {
   id: string
@@ -191,7 +192,7 @@ export default function SkillsTab() {
     }
     Modal.confirm({
       title: '放弃尚未保存的修改？',
-      content: '切换 Skill、版本或文件后，当前编辑内容将丢失。',
+      content: '切换技能、版本或文件后，当前编辑内容将丢失。',
       okText: '放弃并切换',
       cancelText: '继续编辑',
       onOk: action,
@@ -206,7 +207,7 @@ export default function SkillsTab() {
       return client.post('/skills', data, { headers: { ...headers(), 'Content-Type': 'multipart/form-data' } })
     },
     onSuccess: response => {
-      message.success('Skill 包已上传')
+      message.success('技能包已上传')
       setUploadOpen(false)
       setPackageFile(undefined)
       form.resetFields()
@@ -242,7 +243,7 @@ export default function SkillsTab() {
       `/skills/${selectedSkillId}/versions/${version.id}/publish`, {}, { headers: headers() },
     ),
     onSuccess: response => {
-      message.success(`v${response.data.version_no} 已发布，新 Runner 将使用该 checksum`)
+      message.success(`v${response.data.version_no} 已发布，新执行器将使用该校验和`)
       setSelectedVersionId(response.data.id)
       refresh()
     },
@@ -250,7 +251,7 @@ export default function SkillsTab() {
   })
   const sync = useMutation({
     mutationFn: () => client.post(`/skills/${selectedSkillId}/sync`, {}, { headers: headers() }),
-    onSuccess: () => message.success('共享只读 Skill Workspace 已同步'),
+    onSuccess: () => message.success('共享只读技能工作区已同步'),
     onError: (error: any) => message.error(apiError(error, '同步失败')),
   })
   const saveRevision = useMutation({
@@ -420,7 +421,7 @@ export default function SkillsTab() {
         { title: '版本', dataIndex: 'version_no', width: 80, render: value => <Typography.Text strong>v{value}</Typography.Text> },
         { title: '状态', dataIndex: 'status', width: 100, render: statusTag },
         { title: '包', width: 120, render: (_, version: SkillVersion) => `${version.archive_type || '—'} · ${formatBytes(version.package_size)}` },
-        { title: 'Checksum', dataIndex: 'checksum', width: 180, render: value => <Typography.Text code copyable={{ text: value }}>{value.slice(0, 16)}</Typography.Text> },
+        { title: '校验和', dataIndex: 'checksum', width: 180, render: value => <Typography.Text code copyable={{ text: value }}>{value.slice(0, 16)}</Typography.Text> },
         { title: '内容哈希', dataIndex: 'content_hash', width: 150, render: value => <Typography.Text code>{value?.slice(0, 12) || '—'}</Typography.Text> },
         { title: '创建时间', dataIndex: 'created_at', width: 170, render: value => value ? value.replace('T', ' ').slice(0, 19) : '—' },
         {
@@ -445,7 +446,7 @@ export default function SkillsTab() {
     <>
       <div className="mb-4 grid gap-3 sm:grid-cols-3">
         <Card size="small" className="rounded-xl shadow-sm">
-          <Typography.Text type="secondary">Skill 总数</Typography.Text>
+          <Typography.Text type="secondary">技能总数</Typography.Text>
           <div className="mt-1 text-2xl font-semibold">{skills.data?.length || 0}</div>
         </Card>
         <Card size="small" className="rounded-xl shadow-sm">
@@ -453,7 +454,7 @@ export default function SkillsTab() {
           <div className="mt-1 flex items-center gap-2 text-2xl font-semibold"><CheckCircleOutlined className="text-emerald-500" />{publishedCount}</div>
         </Card>
         <Card size="small" className="rounded-xl shadow-sm">
-          <Typography.Text type="secondary">未建立发布版本的 Skill</Typography.Text>
+          <Typography.Text type="secondary">未建立发布版本的技能</Typography.Text>
           <div className="mt-1 flex items-center gap-2 text-2xl font-semibold"><ClockCircleOutlined className="text-amber-500" />{Math.max((skills.data?.length || 0) - publishedCount, 0)}</div>
         </Card>
       </div>
@@ -462,10 +463,10 @@ export default function SkillsTab() {
         <Card className="rounded-xl shadow-sm xl:sticky xl:top-0 xl:self-start" styles={{ body: { padding: 16 } }}>
           <div className="mb-4 flex items-center justify-between gap-2">
             <div>
-              <Typography.Title level={5} style={{ margin: 0 }}>Skill 库</Typography.Title>
-              <Typography.Text type="secondary" className="text-xs">选择一个 Skill 管理内容与版本</Typography.Text>
+              <Typography.Title level={5} style={{ margin: 0 }}>技能库</Typography.Title>
+              <Typography.Text type="secondary" className="text-xs">选择一个技能管理内容与版本</Typography.Text>
             </div>
-            <Button type="primary" shape="circle" icon={<PlusOutlined />} title="上传 Skill 包" onClick={() => setUploadOpen(true)} />
+            <Button type="primary" shape="circle" icon={<PlusOutlined />} title="上传技能包" onClick={() => setUploadOpen(true)} />
           </div>
           <Input
             allowClear
@@ -484,7 +485,7 @@ export default function SkillsTab() {
           {skills.isLoading ? (
             <div className="flex min-h-64 items-center justify-center"><Spin /></div>
           ) : filteredSkills.length === 0 ? (
-            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有匹配的 Skill" />
+            <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有匹配的技能" />
           ) : (
             <div className="max-h-[760px] space-y-2 overflow-auto pr-1">
               {filteredSkills.map(skill => {
@@ -515,14 +516,14 @@ export default function SkillsTab() {
 
         <Card className="min-w-0 rounded-xl shadow-sm" styles={{ body: { padding: 20 } }}>
           {!selectedSkill ? (
-            <Empty description="选择一个 Skill 查看详情" />
+            <Empty description="选择一个技能查看详情" />
           ) : (
             <>
               <div className="mb-2 flex flex-wrap items-start justify-between gap-4">
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-center gap-2">
                     <Typography.Title level={4} style={{ margin: 0 }}>{selectedSkill.name}</Typography.Title>
-                    <Tag color={selectedSkill.status === 'active' ? 'success' : 'default'}>{selectedSkill.status}</Tag>
+                    <Tag color={selectedSkill.status === 'active' ? 'success' : 'default'}>{displayLabel(selectedSkill.status)}</Tag>
                     {selectedSkill.current_version ? <Tag color="blue">当前 v{selectedSkill.current_version.version_no}</Tag> : <Tag>尚未发布</Tag>}
                   </div>
                   <Typography.Paragraph type="secondary" className="!mb-1 !mt-2 max-w-4xl">
@@ -537,9 +538,9 @@ export default function SkillsTab() {
                     loading={sync.isPending}
                     onClick={() => sync.mutate()}
                   >
-                    同步 Workspace
+                    同步工作区
                   </Button>
-                  <Button type="primary" icon={<PlusOutlined />} onClick={() => setUploadOpen(true)}>上传 Skill</Button>
+                  <Button type="primary" icon={<PlusOutlined />} onClick={() => setUploadOpen(true)}>上传技能</Button>
                 </Space>
               </div>
               <Tabs
@@ -555,7 +556,7 @@ export default function SkillsTab() {
       </div>
 
       <Modal
-        title="上传通用 Skill 包"
+        title="上传通用技能包"
         open={uploadOpen}
         onCancel={() => setUploadOpen(false)}
         onOk={() => form.submit()}
