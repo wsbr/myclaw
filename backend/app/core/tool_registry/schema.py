@@ -210,6 +210,16 @@ BUILTIN_RESULT_DATA_SCHEMAS: dict[str, dict[str, Any]] = {
             "revision_manifest": _A, "retrieval_profile": {"type": "object"},
         },
     ),
+    "schedule_task": _object("operation", properties={
+        "operation": _S,
+        "schedule": {"type": "object"},
+        "items": _A,
+        "count": _I,
+        "fire": {"type": "object"},
+        "schedule_id": _S,
+        "status": _S,
+        "replayed": _B,
+    }),
     "web_search": _object("query", "original_query", "effective_query", "results", "count", "retrieved_at", properties={
         "query": _S, "original_query": _S, "effective_query": _S,
         "results": _A, "count": _I, "retrieved_at": _S,
@@ -247,8 +257,12 @@ RUNTIME_RESULT_DATA_SCHEMAS: dict[str, dict[str, Any]] = {
         "tools": _A, "loaded_tool_definitions": _A,
     }),
     "update_plan": _object("working_plan", properties={"working_plan": {"type": "object"}}),
+    "find_agent_user": _object("candidates", "resolution", properties={
+        "candidates": _A, "resolution": _S,
+    }),
     "ask_user": _object("clarification_id", "status", properties={
         "clarification_id": _S, "status": _S,
+        "target_display_name": _S,
     }),
     "discover_agents": _object("candidates", properties={"candidates": _A}),
     "select_group_members": _object(

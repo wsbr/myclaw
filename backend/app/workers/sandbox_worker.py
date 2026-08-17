@@ -143,6 +143,8 @@ class SandboxClaim:
     group_run_id: str | None
     group_membership_id: str | None
     runtime_clock: dict
+    authentication_source: str
+    permission_mode: str
     preflight_error: str | None = None
 
 
@@ -413,6 +415,14 @@ class SandboxWorker:
                 group_session_id=group_session_id, group_run_id=work.group_run_id,
                 group_membership_id=work.group_membership_id,
                 runtime_clock=dict((source_runner.prompt_manifest or {}).get("runtime_clock") or {}),
+                authentication_source=str(
+                    (invocation.authorization_snapshot or {}).get("authentication_source")
+                    or "web_session"
+                ),
+                permission_mode=str(
+                    (invocation.authorization_snapshot or {}).get("permission_mode")
+                    or "direct"
+                ),
                 preflight_error=preflight_error,
             )
 
@@ -446,6 +456,8 @@ class SandboxWorker:
                     group_session_id=claim.group_session_id, group_run_id=claim.group_run_id,
                     group_membership_id=claim.group_membership_id,
                     runtime_clock=dict(claim.runtime_clock),
+                    authentication_source=claim.authentication_source,
+                    permission_mode=claim.permission_mode,
                 )
                 # Tool implementations that publish Artifacts, advance Browser
                 # state, or create Memory candidates write authoritative rows.
@@ -668,13 +680,18 @@ class SandboxWorker:
             attempt.outcome_confirmed = attempt.status in {"succeeded", "failed", "timed_out", "cancelled"}
             attempt.ended_at = utcnow()
             attempt.lease_expires_at = None
-            await record_tool_attempt_usage(
-                db, attempt=attempt, invocation=invocation,
-            )
+            # MySQL protects terminal ToolInvocations with an OLD.status
+            # trigger. Populate the complete terminal fact before any query
+            # can autoflush it; otherwise usage attribution flushes status
+            # first and a later result_data UPDATE is correctly rejected as a
+            # mutation of a terminal row.
             invocation.result_data = envelope
             invocation.error_code = attempt.error_code
             invocation.error_detail = attempt.error_detail
             invocation.version += 1
+            await record_tool_attempt_usage(
+                db, attempt=attempt, invocation=invocation,
+            )
             event_type = ("tool.succeeded" if invocation.status == "succeeded"
                           else "tool.outcome_unknown" if invocation.status == "outcome_unknown"
                           else "tool.retry_scheduled" if invocation.status == "queued"
@@ -786,6 +803,14 @@ class SandboxWorker:
                 group_session_id=group_session_id, group_run_id=work.group_run_id,
                 group_membership_id=work.group_membership_id,
                 runtime_clock=dict((source.prompt_manifest or {}).get("runtime_clock") or {}),
+                authentication_source=str(
+                    (invocation.authorization_snapshot or {}).get("authentication_source")
+                    or "web_session"
+                ),
+                permission_mode=str(
+                    (invocation.authorization_snapshot or {}).get("permission_mode")
+                    or "direct"
+                ),
             )
         await self.settle(claim, ToolResult(
             status="failed", error="Sandbox worker stopped after process execution may have started",

@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.database import get_db
 from app.deps import CurrentAccount, get_current_builder
 from app.models.agent_v1 import AgentAssemblyVersion, AgentBlueprint
+from app.services.agent_access_service import agent_use_filter
 from app.models.registry import (
     ToolDefinition, ToolGovernance, ToolVersion,
     PolicyDefinition,
@@ -69,12 +70,14 @@ async def bound_agents(db: AsyncSession = Depends(get_db), current: CurrentAccou
     rows = list(await db.execute(
         select(AgentBlueprint, AgentAssemblyVersion)
         .join(AgentAssemblyVersion, AgentAssemblyVersion.id == AgentBlueprint.current_published_version_id)
-        .where(AgentBlueprint.status == "published")
+        .where(
+            AgentBlueprint.status == "published",
+            agent_use_filter(current.account.id),
+        )
         .order_by(AgentAssemblyVersion.name)
     ))
     return [
         {"id": agent.id, "name": version.name, "description": version.description,
          "visibility": agent.visibility, "group_enabled": version.group_enabled}
         for agent, version in rows
-        if agent.owner_account_id == current.account.id or agent.visibility == "enterprise"
     ]

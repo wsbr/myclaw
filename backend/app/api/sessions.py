@@ -14,7 +14,7 @@ from app.database import get_db
 from app.deps import SessionActor, get_session_actor
 from app.models.agent_v1 import AgentBlueprint
 from app.models.common import utcnow, uuid7
-from app.models.foundation import IdempotencyRecord, UserSession
+from app.models.foundation import IdempotencyRecord, PlatformAccount, UserSession
 from app.models.runtime_v1 import Message, Run, SessionSandbox, ToolInvocation
 from app.schemas.runtime_v1 import (
     ChatCommandResponse,
@@ -31,6 +31,9 @@ from app.services.cursor_service import SortKey, paginate_scalars
 from app.database import AsyncSessionLocal
 from app.config import settings
 from app.services.raw_identity_service import ensure_raw_user_account
+from app.services.agent_access_service import has_agent_use_access
+from app.services.agent_people_service import resolve_agent_person
+from app.services.principal_ref_service import encode_account_ref
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
@@ -142,7 +145,11 @@ async def create_session(
         AgentBlueprint.id == body.entry_agent_id,
         AgentBlueprint.tenant_id == actor.account.tenant_id,
     ))
-    if agent is None or (not actor.api_key and agent.visibility == "private" and agent.owner_account_id != actor.account.id and "admin" not in actor.roles):
+    if agent is None or (
+        not actor.api_key and not await has_agent_use_access(
+            db, agent=agent, account_id=actor.account.id, roles=actor.roles,
+        )
+    ):
         raise HTTPException(status_code=404, detail="Agent not found")
     record, replay = await _idempotency(
         db, actor=actor, operation="create_session", key=idempotency_key,
@@ -221,8 +228,19 @@ async def list_messages(
         ).where(
             ToolInvocation.run_id.in_(run_ids),
         ).group_by(ToolInvocation.run_id))).all())
+    sender_user_ids = {
+        row.sender_user_id for row in rows if row.sender_user_id
+    }
+    sender_names = dict((await db.execute(select(
+        PlatformAccount.user_id, PlatformAccount.display_name,
+    ).where(PlatformAccount.user_id.in_(sender_user_ids)))).all()) if sender_user_ids else {}
     return {"items": [MessageResponse.model_validate(row).model_copy(update={
                 "tool_activity_count": int(tool_counts.get(row.run_id, 0)),
+                "sender_display_name": sender_names.get(row.sender_user_id),
+                "is_external_human": bool(
+                    row.sender_type == "user" and row.sender_user_id
+                    and row.sender_user_id != row.user_id
+                ),
             }).model_dump(mode="json") for row in rows],
             "next_cursor": next_cursor}
 
@@ -234,9 +252,49 @@ async def create_message(
     db: AsyncSession = Depends(get_db), actor: SessionActor = Depends(get_session_actor),
 ):
     session = await _owned_session(db, session_id, actor)
+    if not actor.api_key:
+        agent = await db.scalar(select(AgentBlueprint).where(
+            AgentBlueprint.id == session.entry_agent_id,
+            AgentBlueprint.tenant_id == session.tenant_id,
+        ))
+        if agent is None or not await has_agent_use_access(
+            db, agent=agent, account_id=actor.account.id, roles=actor.roles,
+        ):
+            raise HTTPException(status_code=404, detail="Agent not found")
+    if actor.api_key is not None and body.mentions:
+        raise HTTPException(status_code=403, detail={
+            "code": "platform_user_mentions_require_web_account",
+        })
+    mention_ids = [item.account_id for item in body.mentions]
+    if len(mention_ids) != len(set(mention_ids)):
+        raise HTTPException(status_code=422, detail={"code": "duplicate_user_mentions"})
+    resolved_mentions = []
+    for account_id in mention_ids:
+        person = await resolve_agent_person(
+            db, tenant_id=session.tenant_id, agent_id=session.entry_agent_id,
+            requester_account_id=session.account_id,
+            target_account_id=account_id,
+        )
+        if person is None:
+            raise HTTPException(status_code=422, detail={
+                "code": "user_mention_not_contactable",
+                "account_id": account_id,
+            })
+        resolved_mentions.append({
+            "account_id": person.account_id,
+            "display_name": person.display_name,
+            "handle": person.handle,
+            "principal_ref": encode_account_ref(
+                tenant_id=session.tenant_id, agent_id=session.entry_agent_id,
+                account_id=person.account_id,
+            ),
+        })
     record, replay = await _idempotency(
         db, actor=actor, operation="create_chat_run", key=idempotency_key,
-        request={"session_id": session_id, "content": body.content},
+        request={
+            "session_id": session_id, "content": body.content,
+            "mention_account_ids": sorted(mention_ids),
+        },
     )
     if replay and record.response_snapshot:
         return ChatCommandResponse.model_validate(record.response_snapshot)
@@ -244,6 +302,7 @@ async def create_message(
         message, run, _, _ = await enqueue_chat_message(
             db, session_id=session_id, user_id=session.user_id,
             content=body.content, idempotency_record_id=record.id,
+            resolved_mentions=resolved_mentions,
         )
     except (ValueError, RuntimeError, AgentUnavailable) as error:
         await db.rollback()

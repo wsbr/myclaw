@@ -66,10 +66,12 @@ Builder 拥有 Agent 蓝图，不因此拥有使用该 Agent 的用户数据，�
 private | enterprise
 ```
 
-- `private`：仅 Owner 和管理员可测试或使用；
+- `private`：Owner 可维护普通成员使用白名单；Owner、管理员及白名单内的有效 Tenant 成员可以发现和使用，只有 Owner/管理员可以配置、测试、发布、评测、管理 Key 或修改白名单；
 - `enterprise`：部署实例内用户可使用。
 
 发现不等于授权。调用目标 Agent 前必须同时满足目标可发现、已发布且启用、Collaboration Policy 允许、原始 `account_id` 有权使用，以及当前 Group/Session/预算允许。
+
+私有 Agent 白名单是可撤销的“使用授权”，不是协作者角色，也不改变 Agent Owner。移出白名单后，成员仍可读取自己已有 Session 的历史，但不能创建新 Session、发送新消息、发起 AgentInvocation/Group 工作或继续触发该 Agent 的定时任务；已经提交并固定快照的运行允许按既有结算规则完成。
 
 调用链始终继承 Run 创建时固定的 `tenant_id + account_id`，不能变成 Agent Owner、Builder 或管理员身份。目标 Agent 的 Tool Credential 也不能把用户提升为平台角色。
 

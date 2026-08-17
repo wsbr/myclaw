@@ -17,10 +17,12 @@ Start with the repository [README](../README.md). It contains the supported loca
 | Agent identity, versions, and assembly | [Agent assembly](modules/agent-assembly.md) |
 | Agent discovery and long-term network direction | [Enterprise Agent Network](modules/enterprise-agent-network.md) |
 | Delegation, messages, and AgentInvocation | [Agent collaboration](modules/agent-collaboration.md) |
+| Agent-mediated questions and human action routing | [Human collaboration](modules/human-collaboration.md) |
 | Plan permission mode and WorkingPlan | [Plan mode](modules/plan-mode.md) |
 | Emergent membership and Group collaboration | [Group mode](modules/group-mode.md) |
 | Unified Agent Loop, turns, actions, and recovery | [Runtime execution](modules/runtime-execution.md) |
 | Queueing, leases, fencing, and worker concurrency | [Runtime scheduling](modules/runtime-scheduling.md) |
+| User-owned one-time, Cron, and interval Agent tasks | [Agent schedules](modules/agent-schedules.md) |
 | Tool registration and governance | [Tool system](modules/tool-system.md) |
 | Skill packaging and synchronization | [Skill system](modules/skill-system.md) |
 | Model registry and Provider behavior | [Model system](modules/model-system.md) |

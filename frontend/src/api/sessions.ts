@@ -6,7 +6,8 @@ export interface UserSession {
   entry_agent_id: string
   status: 'active' | 'closed' | 'archived'
   title: string | null
-  origin_type: 'web' | 'api' | 'channel'
+  origin_type: 'web' | 'api' | 'channel' | 'schedule'
+  origin_schedule_id: string | null
   permission_mode: 'direct' | 'readonly' | 'plan_readonly'
   permission_revision: number
   interaction_mode: 'chat' | 'plan'
@@ -21,6 +22,9 @@ export interface Message {
   session_id: string
   role: 'user' | 'assistant' | 'system' | 'tool_notice'
   sender_type: 'user' | 'agent' | 'system'
+  sender_user_id: string | null
+  sender_display_name: string | null
+  is_external_human: boolean
   content: string
   content_format: string
   status: string
@@ -259,9 +263,18 @@ export interface ClarificationAction {
   run_id: string
   work_item_id: string
   asked_by_agent_id: string
+  asked_by_agent_name?: string | null
+  requester_account_id?: string | null
+  requester_display_name?: string | null
+  target_account_id?: string | null
+  target_display_name?: string | null
+  context_summary?: string | null
+  source_session_owned?: boolean
   group_session_id: string | null
   group_membership_id: string | null
   question: string
+  answer_text?: string | null
+  answered_by_user_id?: string | null
   version: number
   created_at: string
 }
@@ -425,8 +438,11 @@ export const sessionsApi = {
   get: (id: string) => client.get<UserSession>(`/sessions/${id}`).then(r => r.data),
   close: (id: string) => client.delete(`/sessions/${id}`, idempotency()),
   getMessages: (id: string) => client.get<{ items: Message[] }>(`/sessions/${id}/messages`).then(r => r.data.items),
-  sendMessage: (id: string, content: string) => client.post<{ message: Message; run: Run; links: Record<string, string> }>(
-    `/sessions/${id}/messages`, { content }, idempotency(),
+  sendMessage: (id: string, content: string, mentionAccountIds: string[] = []) => client.post<{ message: Message; run: Run; links: Record<string, string> }>(
+    `/sessions/${id}/messages`, {
+      content,
+      mentions: mentionAccountIds.map(account_id => ({ account_id })),
+    }, idempotency(),
   ).then(r => r.data),
   getSessionRuns: (id: string, mode?: Run['mode']) => client.get<{ items: Run[] }>(
     `/sessions/${id}/runs`, { params: { mode } },

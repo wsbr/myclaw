@@ -32,6 +32,7 @@ from app.models.registry import (
 )
 from app.models.agent_v1 import (
     AgentBlueprint,
+    AgentMember,
     AgentAssemblyVersion,
     AgentVersionTool,
     AgentVersionSkill,
@@ -45,7 +46,7 @@ from app.models.runtime_v1 import (
     ProviderAttempt,
     SessionGrant,
     WorkingPlan,
-    Message, Run, WorkerInstance, WorkItem, DurableRunner, RunnerCheckpoint, Clarification, SessionSandbox, Workspace,
+    Message, MessageMention, Run, WorkerInstance, WorkItem, DurableRunner, RunnerCheckpoint, Clarification, SessionSandbox, Workspace,
     WorkspaceLock, WorkspaceLockRequest, WorkspaceReadLease, BrowserSessionState,
     ToolInvocation, ToolAttempt, ToolConfirmation, AgentInvocation,
     RunnerSkillSnapshot, RunnerToolSnapshot, RunnerPolicySnapshot,
@@ -74,6 +75,7 @@ from app.models.agent_eval_v1 import (
     AgentEvalCase, AgentEvalCaseRun, AgentEvalRun, AgentEvalSuite,
     AgentEvalSuiteVersion,
 )
+from app.models.schedule_v1 import AgentSchedule, AgentScheduleFire, RunnerScheduleSnapshot
 
 __all__ = [
     "Tenant", "TenantMembership", "UserIdentity", "PlatformAccount", "PlatformAccountRole", "IdempotencyRecord", "AgentApiKey",
@@ -83,11 +85,11 @@ __all__ = [
     "ToolConnectionRevision", "ToolGovernance",
     "RegisteredSkill", "SkillVersion", "PolicyDefinition", "PolicyVersion",
     "SandboxProfile", "SandboxProfileVersion",
-    "AgentBlueprint", "AgentAssemblyVersion", "AgentVersionTool",
+    "AgentBlueprint", "AgentMember", "AgentAssemblyVersion", "AgentVersionTool",
     "AgentVersionSkill", "AgentVersionBinding", "AgentCard",
     "AgentTurn", "Approval", "CapabilitySnapshot", "PlanUpdate", "ProviderAttempt",
     "SessionGrant", "WorkingPlan",
-    "Message", "Run", "WorkerInstance", "WorkItem", "DurableRunner", "RunnerCheckpoint", "Clarification",
+    "Message", "MessageMention", "Run", "WorkerInstance", "WorkItem", "DurableRunner", "RunnerCheckpoint", "Clarification",
     "SessionSandbox", "Workspace", "WorkspaceLock", "WorkspaceLockRequest", "WorkspaceReadLease",
     "BrowserSessionState",
     "ToolInvocation", "ToolAttempt", "ToolConfirmation", "AgentInvocation",
@@ -109,4 +111,5 @@ __all__ = [
     "KnowledgeBase", "KnowledgeBaseAgentAccess", "KnowledgeChunk",
     "KnowledgeDocument", "KnowledgeIndexRevision", "KnowledgeLexiconRevision",
     "KnowledgeRetrievalSnapshot", "KnowledgeSource",
+    "AgentSchedule", "AgentScheduleFire", "RunnerScheduleSnapshot",
 ]

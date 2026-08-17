@@ -69,6 +69,39 @@ WEB_RETRIEVAL_LIMITS = {
     "web_fetch": {"turn": 3, "normal_run": 3, "run": 8},
 }
 
+SCHEDULE_MUTATING_OPERATIONS = frozenset({
+    "create", "update", "pause", "resume", "delete", "run_now",
+})
+
+
+def _scheduled_schedule_mutation_failure(
+    call: ToolCallItem, authentication_source: str,
+) -> DispatchResult | None:
+    """Reject schedule recursion before creating an Approval or Invocation."""
+
+    if (
+        authentication_source != "schedule"
+        or call.name != "schedule_task"
+        or call.arguments.get("operation") not in SCHEDULE_MUTATING_OPERATIONS
+    ):
+        return None
+    return DispatchResult(
+        call.call_id, call.name,
+        ToolResult(
+            status="failed",
+            summary="Scheduled runs cannot mutate schedules",
+            error=ToolError(
+                code="schedule_recursive_mutation_denied",
+                message=(
+                    "A platform-scheduled run cannot create, update, pause, resume, "
+                    "delete, or immediately run another schedule"
+                ),
+                category="authorization",
+                details={"authentication_source": authentication_source},
+            ),
+        ),
+    )
+
 
 def _safe_argument_projection(value: Any, *, force_text_redaction: bool = False) -> Any:
     """Return a UI/log-safe projection while hashes continue binding raw input."""
@@ -199,6 +232,39 @@ async def _builtin_executor(name, arguments, context, db):
     return await ToolRegistry.execute(name, arguments, context, db=db)
 
 
+def _approval_presentation(
+    *, tool_name: str, arguments: dict[str, Any], confirmation_policy: str,
+    dynamic_risk: dict[str, Any], force_text_redaction: bool,
+) -> dict[str, Any]:
+    if tool_name == "schedule_task":
+        operation = str(arguments.get("operation") or "")
+        labels = {
+            "create": "创建", "update": "修改", "pause": "暂停",
+            "resume": "恢复", "delete": "删除", "run_now": "立即运行",
+        }
+        action = labels.get(operation, "管理")
+        title = f"确认{action}定时任务"
+        summary = (
+            f"智能体将代表你{action}一项持久化定时任务；请核对时间、内容和上下文方式。"
+        )
+    else:
+        title = f"Approve {tool_name}"
+        summary = (
+            "Approve this exact Tool call"
+            if confirmation_policy == "per_call"
+            else "Approve this call and a limited Session grant"
+        )
+    return {
+        "title": title,
+        "summary": summary,
+        "tool_key": tool_name,
+        "arguments": _safe_argument_projection(
+            arguments, force_text_redaction=force_text_redaction,
+        ),
+        "risk": dynamic_risk,
+    }
+
+
 async def _record_authorization_rejection(
     db: AsyncSession | None, *, call: ToolCallItem, context: RuntimeContext,
     run_id: str | None, source_turn_id: str | None, error_code: str,
@@ -258,6 +324,7 @@ class ActionDispatcher:
 
     def _preflight(
         self, call: ToolCallItem, *, effective: set[str], permission_mode: str,
+        authentication_source: str,
     ) -> DispatchResult | None:
         definition = self.definitions.get(call.name)
         if call.name not in effective or definition is None:
@@ -297,6 +364,11 @@ class ActionDispatcher:
                     ),
                 ),
             )
+        recursive_schedule = _scheduled_schedule_mutation_failure(
+            call, authentication_source,
+        )
+        if recursive_schedule is not None:
+            return recursive_schedule
         return None
 
     async def _apply_web_retrieval_limits(
@@ -420,6 +492,7 @@ class ActionDispatcher:
         for call in calls:
             failure = self._preflight(
                 call, effective=effective, permission_mode=runtime_context.permission_mode,
+                authentication_source=runtime_context.authentication_source,
             )
             if failure is not None:
                 rejected[call.call_id] = failure
@@ -560,6 +633,17 @@ class ActionDispatcher:
                     ),
                 ),
             )
+
+        recursive_schedule = _scheduled_schedule_mutation_failure(
+            call, runtime_context.authentication_source,
+        )
+        if recursive_schedule is not None:
+            await _record_authorization_rejection(
+                db, call=call, context=runtime_context, run_id=run_id,
+                source_turn_id=source_turn_id,
+                error_code="schedule_recursive_mutation_denied",
+            )
+            return recursive_schedule
 
         if db is not None and run_id and work_item_id and source_turn_id:
             # Agent turns run concurrently, but every durable dispatch writes
@@ -817,18 +901,14 @@ class ActionDispatcher:
                     target_account_id=runtime_context.account_id,
                     subject_hash=subject_hash, request_hash=subject_hash,
                     idempotency_key=operation_key,
-                    presentation={
-                        "title": f"Approve {call.name}",
-                        "summary": "Approve this exact Tool call"
-                        if confirmation_policy == "per_call"
-                        else "Approve this call and a limited Session grant",
-                        "tool_key": call.name,
-                        "arguments": _safe_argument_projection(
-                            call.arguments,
-                            force_text_redaction="login_credential" in dynamic_risk.get("reasons", []),
+                    presentation=_approval_presentation(
+                        tool_name=call.name, arguments=call.arguments,
+                        confirmation_policy=confirmation_policy,
+                        dynamic_risk=dynamic_risk,
+                        force_text_redaction=(
+                            "login_credential" in dynamic_risk.get("reasons", [])
                         ),
-                        "risk": dynamic_risk,
-                    },
+                    ),
                     status="pending",
                     deadline_at=owning_run.deadline_at if owning_run else None,
                 )

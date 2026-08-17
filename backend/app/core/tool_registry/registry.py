@@ -12,6 +12,7 @@ from app.core.tool_registry.builtin.workspace_catalog import (
 )
 from app.core.tool_registry.builtin.memory_tools import MemoryProposeTool, MemorySearchTool
 from app.core.tool_registry.builtin.knowledge_search import KnowledgeSearchTool
+from app.core.tool_registry.builtin.schedule_task import ScheduleTaskTool
 from app.core.tool_registry.builtin.web_tools import WebFetchTool, WebSearchTool
 from app.core.tool_registry.builtin.browser_tools import (
     BrowserInteractTool, BrowserNavigateTool, BrowserObserveTool, BrowserScreenshotTool,
@@ -24,6 +25,7 @@ BUILTIN_TOOLS: dict[str, BaseTool] = {
         PublishArtifactTool, ListFilesTool, SearchFilesTool, ApplyPatchTool,
         DeletePathTool, MemorySearchTool, MemoryProposeTool,
         KnowledgeSearchTool,
+        ScheduleTaskTool,
         WebSearchTool, WebFetchTool,
         BrowserNavigateTool, BrowserObserveTool, BrowserInteractTool, BrowserScreenshotTool,
     ]

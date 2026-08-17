@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from sqlalchemy import or_, select
+from sqlalchemy import select
 
 from app.models.agent_v1 import AgentAssemblyVersion, AgentBlueprint, AgentCard
+from app.models.foundation import PlatformAccountRole
+from app.services.agent_access_service import agent_use_filter, has_agent_use_access
 
 
 def agent_card_view(card: AgentCard) -> dict:
@@ -60,10 +62,12 @@ async def discover_agent_cards(
     if account_id is None:
         statement = statement.where(AgentCard.visibility == "enterprise")
     else:
-        statement = statement.where(or_(
-            AgentCard.visibility == "enterprise",
-            AgentBlueprint.owner_account_id == account_id,
-        ))
+        is_admin = bool(await db.scalar(select(PlatformAccountRole.account_id).where(
+            PlatformAccountRole.account_id == account_id,
+            PlatformAccountRole.role_key == "admin",
+        ).limit(1)))
+        if not is_admin:
+            statement = statement.where(agent_use_filter(account_id))
     if not exhaustive:
         statement = statement.limit(500)
     if actor_agent_id:
@@ -145,9 +149,13 @@ async def resolve_callable_agent(
         or version.immutable_at is None
     ):
         raise LookupError("target Agent version is not currently published")
-    if card.visibility != "enterprise" and (
-        account_id is None or target.owner_account_id != account_id
-    ):
+    if account_id is None:
+        visible = card.visibility == "enterprise"
+    else:
+        visible = await has_agent_use_access(
+            db, agent=target, account_id=account_id,
+        )
+    if not visible:
         raise PermissionError("target Agent is outside the current discovery boundary")
     collaboration = dict(card.collaboration_summary or {})
     governance = collaboration.get("governance") or {}

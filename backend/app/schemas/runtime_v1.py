@@ -28,6 +28,7 @@ class SessionResponse(BaseModel):
     status: str
     title: str | None
     origin_type: str
+    origin_schedule_id: str | None = None
     permission_mode: str = "direct"
     permission_revision: int = 1
     interaction_mode: str = "chat"
@@ -40,8 +41,15 @@ class SessionResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class MessageMentionRequest(BaseModel):
+    account_id: str = Field(min_length=1, max_length=36)
+
+    model_config = {"extra": "forbid"}
+
+
 class MessageCreateRequest(BaseModel):
     content: str
+    mentions: list[MessageMentionRequest] = Field(default_factory=list, max_length=20)
 
     model_config = {"extra": "forbid"}
 
@@ -81,6 +89,9 @@ class MessageResponse(BaseModel):
     session_id: str
     role: str
     sender_type: str
+    sender_user_id: str | None = None
+    sender_display_name: str | None = None
+    is_external_human: bool = False
     content: str
     content_format: str
     status: str
@@ -193,11 +204,18 @@ class ClarificationResponse(BaseModel):
     group_session_id: str | None
     group_membership_id: str | None
     asked_by_agent_id: str
+    tenant_id: str | None = None
+    requester_account_id: str | None = None
+    target_account_id: str | None = None
     target_user_id: str
+    target_display_name_snapshot: str | None = None
+    target_handle_snapshot: str | None = None
     question: str
+    context_summary: str | None = None
     status: str
     answer_message_id: str | None
     answer_text: str | None
+    answered_by_user_id: str | None
     version: int
     created_at: datetime
     updated_at: datetime

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Button, Spin, Tooltip } from 'antd'
-import { ArrowDown, Bot, Check, Copy, UserRound } from 'lucide-react'
+import { ArrowDown, Bot, CalendarClock, Check, Copy, UserRound } from 'lucide-react'
 import DOMPurify from 'dompurify'
 import { marked } from 'marked'
 import { sessionsApi } from '@/api/sessions'
@@ -25,7 +25,9 @@ interface Props {
 function MessageItem({ item, agentName }: { item: Message; agentName?: string }) {
   const [copied, setCopied] = useState(false)
   const [toolsOpen, setToolsOpen] = useState(false)
-  const isUser = item.role === 'user'
+  const isUser = item.sender_type === 'user'
+  const isExternalHuman = isUser && item.is_external_human
+  const isScheduledDirective = item.sender_type === 'system'
   const hasTools = !isUser && Boolean(item.run_id) && item.tool_activity_count > 0
   const { data: tools = [] } = useQuery({
     queryKey: ['tool-invocations', item.run_id],
@@ -44,23 +46,41 @@ function MessageItem({ item, agentName }: { item: Message; agentName?: string })
     return () => window.clearTimeout(timer)
   }, [copied])
 
-  return <article className={cn('group flex gap-3', isUser && 'flex-row-reverse')}>
+  return <article className={cn('group flex gap-3', isUser && !isExternalHuman && 'flex-row-reverse')}>
     <div className={cn(
       'mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-xl border shadow-sm',
-      isUser ? 'border-primary bg-primary text-primary-foreground' : 'bg-card text-foreground',
+      isExternalHuman
+        ? 'border-violet-300 bg-violet-50 text-violet-700 dark:border-violet-800 dark:bg-violet-950/40 dark:text-violet-300'
+        : isUser
+        ? 'border-primary bg-primary text-primary-foreground'
+        : isScheduledDirective
+          ? 'border-sky-300 bg-sky-50 text-sky-700 dark:border-sky-800 dark:bg-sky-950/40 dark:text-sky-300'
+          : 'bg-card text-foreground',
     )}>
-      {isUser ? <UserRound className="size-4" /> : <Bot className="size-4" />}
+      {isUser
+        ? <UserRound className="size-4" />
+        : isScheduledDirective
+          ? <CalendarClock className="size-4" />
+          : <Bot className="size-4" />}
     </div>
-    <div className={cn('min-w-0 max-w-[84%]', isUser && 'items-end')}>
-      <div className={cn('mb-1 flex items-center gap-2 px-1 text-[11px] text-muted-foreground', isUser && 'justify-end')}>
-        <span className="font-medium text-foreground/75">{isUser ? '你' : agentName || '智能体'}</span>
+    <div className={cn('min-w-0 max-w-[84%]', isUser && !isExternalHuman && 'items-end')}>
+      <div className={cn('mb-1 flex items-center gap-2 px-1 text-[11px] text-muted-foreground', isUser && !isExternalHuman && 'justify-end')}>
+        <span className="font-medium text-foreground/75">
+          {isExternalHuman
+            ? `${item.sender_display_name || '平台用户'}的澄清回复`
+            : isUser ? '你' : isScheduledDirective ? '定时任务' : agentName || '智能体'}
+        </span>
         <time>{formatClock(item.created_at)}</time>
       </div>
       <div className={cn(
         'relative whitespace-pre-wrap break-words px-4 py-3 text-sm leading-7 shadow-sm',
-        isUser
+        isExternalHuman
+          ? 'rounded-2xl rounded-tl-md border border-violet-200 bg-violet-50/60 text-card-foreground dark:border-violet-900 dark:bg-violet-950/20'
+          : isUser
           ? 'rounded-2xl rounded-tr-md bg-primary text-primary-foreground'
-          : 'rounded-2xl rounded-tl-md border bg-card text-card-foreground',
+          : isScheduledDirective
+            ? 'rounded-2xl rounded-tl-md border border-sky-200 bg-sky-50/60 text-card-foreground dark:border-sky-900 dark:bg-sky-950/20'
+            : 'rounded-2xl rounded-tl-md border bg-card text-card-foreground',
       )}>
         {renderedContent ? <div
           className="message-markdown"
@@ -79,7 +99,7 @@ function MessageItem({ item, agentName }: { item: Message; agentName?: string })
         historical
         onOpen={() => setToolsOpen(true)}
       />}
-      <div className={cn('mt-1 flex h-7 items-center opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100', isUser && 'justify-end')}>
+      <div className={cn('mt-1 flex h-7 items-center opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100', isUser && !isExternalHuman && 'justify-end')}>
         <Tooltip title={copied ? '已复制' : '复制消息'}>
           <Button
             type="text"

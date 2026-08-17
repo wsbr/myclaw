@@ -60,6 +60,21 @@ Permission mode：`direct ↔ plan_readonly`，由用户显式进入/退出 Plan
 
 ## 4. Run：唯一生命周期权威
 
+在 Run 之前，用户定时任务使用两个独立状态机：
+
+```text
+AgentSchedule: active ↔ paused
+               active → completed
+               active|paused|completed → disabled
+
+AgentScheduleFire: queued|deferred → dispatching → running
+                   running → succeeded|failed|cancelled
+                   queued|deferred → skipped|cancelled
+                   dispatching(lease expired, no Run) → queued
+```
+
+`AgentScheduleFire` 的唯一 operation key 是至少一次轮询下的幂等边界。Fire 同时冻结 `new_session|continue_session` 和来源 Session；只有分派事务创建/复用普通 Session 并创建 Run/WorkItem/Runner 后才进入 running，其后终态只投影对应 Run 的真实终态。暂停/停用只取消没有 Run 的待分派 Fire，不改写已经开始的 Run。误点和重叠积压必须有界合并，禁止按历史分钟数制造无界补跑队列。对话工具的变更操作先进入 `waiting_confirmation`，批准后才由 durable Tool worker 改写任务；定时来源 Run 禁止递归变更任务。
+
 状态：
 
 ```text
@@ -156,7 +171,7 @@ Chat、Plan、Group 和未来远程 Gateway 共享 AgentInvocation 的身份、�
 
 ## 9. Clarification 与 Approval
 
-Clarification：`open → answered|cancelled`。只有 target user 可回答。回答事务创建 user Message、结算 Clarification、写 Event 和 resume Outbox。相同幂等请求返回原答案，不同答案返回 409。
+Clarification：`open → answered|cancelled`。只有 `target_account_id` 对应的平台账号可回答；目标可以是 Session owner，也可以是同 Tenant 内当前 Agent 可触达的另一名用户。跨用户回答不授予源 Session 读取权限，事务以真实回答者记录 Message/Event、结算 Clarification 并为源 WorkItem 创建 replacement Runner。相同幂等请求返回原答案，不同答案返回 409。
 
 Approval：`pending → approved|rejected|cancelled`。请求 AuthContext 的 `tenant_id + account_id` 必须与 Approval 的 `tenant_id + target_account_id` 相同；审批前重新核对 approval subject hash、资源版本、permission/credential/account authorization revision 和策略。Web/生产身份来自已验证账号；第一阶段 Agent API 的 account 由 raw userId Header 解析，因此 API Key 持有者能冒充目标用户。批准不是永久授权，只适用于精确业务 subject。Run 取消时未决动作进入 cancelled。
 

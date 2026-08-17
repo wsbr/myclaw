@@ -108,6 +108,12 @@ CHECK/Trigger 要求只有 `account_type=user` 可以存在 role 行，且 user 
 
 `id PK`、`tenant_id FK`、`owner_account_id`、`visibility private|enterprise`、`status draft|published|inactive`、`current_published_version_id FK NULL`、`draft_version_id FK`、`next_version_no`、`version`；复合 FK `(tenant_id,owner_account_id) → platform_account(tenant_id,id)`。
 
+### `agent_member`
+
+`id PK`、`tenant_id FK`、`agent_id`、`account_id`、`status active|revoked`、`granted_by_account_id`、`granted_at`、`revoked_at NULL`、`version`、时间戳；唯一 `(agent_id,account_id)`，复合 FK `(agent_id,tenant_id) → agent(id,tenant_id)`、`(account_id,tenant_id)` 和 `(granted_by_account_id,tenant_id) → platform_account(id,tenant_id)`，并索引 `(account_id,status,agent_id)` 与 `(agent_id,status,account_id)`。
+
+该表只表达 private Agent 的可撤销使用白名单，不表达 Owner 或配置协作者。Owner 保存在 `agent.owner_account_id` 且不得重复写入成员表；enterprise Agent 不读取此表。授权只对 active TenantMembership + active PlatformAccount 生效，并在新 Session、消息/Run、AgentInvocation、Group 选择和定时分派前实时重读。撤销保留历史行和平台审计，不删除成员已有 Session。
+
 ### `agent_version`
 
 `id PK`、`agent_id FK`、`publication_status draft|published|deprecated|draft_test_snapshot`、`version_no NULL`、`draft_revision NULL`、`draft_agent_key GENERATED NULL|agent_id`、`derived_from_version_id FK NULL`、`name`、`description`、`instructions MEDIUMTEXT`、`model_id FK`、`model_version_id FK NULL`、`context_policy_id FK`、`context_policy_version_id FK NULL`、`history_policy_id FK`、`history_policy_version_id FK NULL`、`memory_write_policy_id FK`、`memory_write_policy_version_id FK NULL`、`memory_recall_policy_id FK`、`memory_recall_policy_version_id FK NULL`、`sandbox_profile_id FK`、`sandbox_profile_version_id FK NULL`、`group_enabled`、`discovery_config_json`、`collaboration_config_json`、`content_hash CHAR(64)`、`published_at`、`published_by_account_id FK`、`version`。
@@ -181,9 +187,17 @@ AgentVersion 的四个逻辑 Policy FK 必须分别匹配 policy_type，发布�
 
 ### `user_session`
 
-`id PK`、`tenant_id FK`、`account_id`、`entry_agent_id FK`、`origin web|api|channel`、`origin_channel_account_id FK NULL`、`origin_external_conversation_id NULL`、`status active|closed|archived`、`permission_mode direct|plan_readonly`、`permission_revision`、`session_sandbox_id FK NULL`、`next_event_sequence BIGINT NOT NULL DEFAULT 1`、`version`；复合 FK `(tenant_id,account_id) → platform_account(tenant_id,id)`，CHECK 要求 origin=channel 时两个 origin 字段非空、其他来源为空。ChannelConversationBinding 在同一事务随后引用 Session，避免循环外键。
+`id PK`、`tenant_id FK`、`account_id`、`entry_agent_id FK`、`origin web|api|channel|schedule`、`origin_channel_account_id FK NULL`、`origin_external_conversation_id NULL`、`origin_schedule_id FK NULL`、`status active|closed|archived`、`permission_mode direct|plan_readonly`、`permission_revision`、`session_sandbox_id FK NULL`、`next_event_sequence BIGINT NOT NULL DEFAULT 1`、`version`；复合 FK `(tenant_id,account_id) → platform_account(tenant_id,id)`。ChannelConversationBinding 在同一事务随后引用 Session，避免循环外键；schedule 来源必须能由 `origin_schedule_id` 回溯任务定义。
 
 索引：`(tenant_id,account_id,updated_at,id)`、`(entry_agent_id,status)`。
+
+### `agent_schedule`、`agent_schedule_fire`、`runner_schedule_snapshot`
+
+- `agent_schedule`：`id PK`、`tenant_id`、`account_id`、`user_id`、`agent_id`、`name`、`prompt`、`context_mode new_session|continue_session`、`source_session_id NULL`、`created_by_tool_invocation_id UNIQUE NULL`、`schedule_type once|cron|interval`、`run_at|cron_expression|interval_seconds` 三选一、`timezone`、`next_fire_at UTC`、`end_at NULL`、`version_policy latest_published|pinned`、`pinned_agent_version_id NULL`、`overlap_policy skip|queue_one|allow`、`misfire_policy skip|fire_once`、`misfire_grace_seconds`、`status active|paused|completed|disabled`、执行计数/最近错误、lease 三元组、`version`；到期索引 `(status,next_fire_at,id)`；
+- `agent_schedule_fire`：`id PK`、任务/tenant/account FK、`trigger_kind scheduled|manual`、`operation_key`、`scheduled_for UTC`、`status queued|deferred|dispatching|running|succeeded|failed|skipped|cancelled`、任务版本及 prompt/timezone/context-mode/source-session/version-policy 快照、AgentVersion/Session/Message/Run/Runner FK、终态与未读通知时间、错误和分派 lease；唯一 `(schedule_id,operation_key)`、`run_id`、`runner_id`；
+- `runner_schedule_snapshot`：`runner_id PK`、`fire_id UNIQUE`、`schedule_id`、`schedule_version`、`scheduled_for`、`timezone`、`prompt_hash`、`agent_version_id`、`account_auth_revision`、`created_at`，只追加。
+
+调度输入的 Message 固定 `sender_type=system, role=user`，从而进入当前模型任务但不满足用户记忆的来源条件。Scheduler 只能创建普通 Chat Run 和 Runtime Outbox，不能直接执行模型或 Tool。
 
 ### `message`
 
@@ -210,7 +224,8 @@ Plan 模式不创建冻结 DAG 或 PlanExecution lifecycle。`permission_mode=pl
 
 ### `clarification`、`approval`
 
-- `clarification`：`id PK`、`tenant_id FK`、`run_id FK`、`work_item_id FK`、`clarification_type general|reporter_selection`、`target_account_id`、`question`、`allowed_answer_refs_json NULL`、`idempotency_key`、`request_hash`、`status open|answered|cancelled`、`answer_message_id FK NULL`、`deadline_at NULL`、`version`；复合 FK `(tenant_id,target_account_id) → platform_account(tenant_id,id)`，唯一 `(work_item_id,idempotency_key)`；
+- `message_mention`：`id PK`、`message_id FK`、`tenant_id FK`、`target_account_id FK`、`display_name_snapshot`、`handle_snapshot`、`created_at`；唯一 `(message_id,target_account_id)`。账号 ID 由 API 在当前 Agent 可触达成员集合中解析，模型只接收签名 principal reference；
+- `clarification`：`id PK`、`tenant_id FK`、`run_id FK`、`work_item_id FK`、`requester_account_id FK`、`target_account_id FK`、兼容期 `target_user_id`、`target_display_name_snapshot`、`target_handle_snapshot`、`question`、`context_summary NULL`、`idempotency_key`、`status open|answered|cancelled`、`answer_message_id FK NULL`、`deadline_at NULL`、`version`；唯一 `(work_item_id,idempotency_key)`；
 - `approval`：`id PK`、`tenant_id FK`、`run_id FK`、`work_item_id FK`、`approval_type plan_implementation|tool|membership|session_grant`、`target_account_id`、`subject_ref_type`、`subject_ref_id`、`subject_hash`、`idempotency_key`、`request_hash`、`status pending|approved|rejected|cancelled`、`decision_message_id FK NULL`、`deadline_at NULL`、`version`；复合 FK `(tenant_id,target_account_id) → platform_account(tenant_id,id)`，唯一 `(approval_type,subject_ref_type,subject_ref_id,subject_hash)` 和 `(work_item_id,idempotency_key)`。
 
 相同 idempotency key/request hash 返回既有动作；同 key 不同 hash 冲突。结算使用 `id + expected version + current status` CAS，因此同一个 open/pending 动作只能结算一次。
@@ -465,7 +480,8 @@ Trigger 必须版本化进入 Alembic，并有正向和拒绝测试；不能只�
 
 - `work_item.active_runner_id` 必须指向同 WorkItem、同当前 execution_epoch 的唯一非终态 Runner；创建/清除只经过 RunnerCoordinator；
 - Runner/ToolAttempt 写入必须匹配 `status + execution_epoch + lease_token`；条件更新 0 行即 fencing reject；
-- Approval/Clarification 的 target account 必须与 Run 所属 Session account 相同；
+- Clarification requester 必须是 Run 所属 Session account；target account 可以不同，但必须同 Tenant、active 且在创建与回答时均属于当前 Agent 可触达集合。回答 target 不因此获得源 Session 权限；
+- Approval target 可以不同于 Run 所属 Session account，但权限型审批必须由资源策略计算合法 approver，并将 grantor、beneficiary 和精确 subject scope 分离；
 - ExternalIdentity.principal_type 必须与 PlatformAccount.account_type 相同；service account 不能成为自然人 Approval/Clarification 的 target；
 - Group Reporter 必须是本 GroupRun available member；GroupRun 与 Run 必须属于同一 Session 链；
 - Tool/AgentInvocation/Outbox 相同业务 key 的 request hash 不同必须返回冲突；

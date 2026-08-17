@@ -68,6 +68,37 @@ class Message(Base, TimestampMixin):
     operation_key: Mapped[str | None] = mapped_column(String(191))
 
 
+class MessageMention(Base):
+    """An immutable, server-resolved Platform principal mentioned by a user."""
+
+    __tablename__ = "message_mention"
+    __table_args__ = (
+        UniqueConstraint(
+            "message_id", "target_account_id", name="uq_message_mention_account",
+        ),
+        Index(
+            "ix_message_mention_target_created",
+            "target_account_id", "created_at", "message_id",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
+    message_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("message.id"), nullable=False,
+    )
+    tenant_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("tenant.id"), nullable=False,
+    )
+    target_account_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("platform_account.id"), nullable=False,
+    )
+    display_name_snapshot: Mapped[str] = mapped_column(String(200), nullable=False)
+    handle_snapshot: Mapped[str] = mapped_column(String(191), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=False), default=utcnow, nullable=False,
+    )
+
+
 class Run(Base, TimestampMixin, VersionMixin):
     __tablename__ = "run"
     __table_args__ = (
@@ -469,6 +500,10 @@ class Clarification(Base, TimestampMixin, VersionMixin):
         CheckConstraint("status IN ('open','answered','cancelled')", name="ck_clarification_status"),
         UniqueConstraint("work_item_id", "idempotency_key", name="uq_clarification_work_key"),
         Index("ix_clarification_target_status_created", "target_user_id", "status", "created_at"),
+        Index(
+            "ix_clarification_target_account_status_created",
+            "target_account_id", "status", "created_at",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
@@ -480,8 +515,18 @@ class Clarification(Base, TimestampMixin, VersionMixin):
         String(36), ForeignKey("group_membership.id")
     )
     asked_by_agent_id: Mapped[str] = mapped_column(String(36), ForeignKey("agent.id"), nullable=False)
+    tenant_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("tenant.id"))
+    requester_account_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("platform_account.id")
+    )
+    target_account_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("platform_account.id")
+    )
     target_user_id: Mapped[str] = mapped_column(String(191), ForeignKey("user_identity.user_id"), nullable=False)
+    target_display_name_snapshot: Mapped[str | None] = mapped_column(String(200))
+    target_handle_snapshot: Mapped[str | None] = mapped_column(String(191))
     question: Mapped[str] = mapped_column(Text, nullable=False)
+    context_summary: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(20), default="open", nullable=False)
     answer_message_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("message.id"))
     answer_text: Mapped[str | None] = mapped_column(Text)

@@ -784,13 +784,24 @@ async def emerge_group_after_chat(
     user_messages = [item for item in source_messages if item.sender_type == "user"]
     assistant_messages = [item for item in source_messages if item.sender_type == "agent"]
     source_user = user_messages[-1] if user_messages else None
+    source_work = (
+        await db.get(WorkItem, source_run.root_work_item_id)
+        if source_run.root_work_item_id else None
+    )
     source_assistant = (
         await db.get(Message, source_runner.result_message_id)
         if source_runner.result_message_id else None
     )
     if source_assistant is None and assistant_messages:
         source_assistant = assistant_messages[-1]
-    goal = source_user.content if source_user is not None else "Review the completed Chat response"
+    # Scheduled directives use sender_type=system so memory provenance stays
+    # user-only. Their root WorkItem remains the canonical collaboration goal.
+    goal = (
+        source_user.content
+        if source_user is not None
+        else source_work.goal if source_work is not None
+        else "Review the completed Chat response"
+    )
 
     if group is None:
         group = GroupSession(

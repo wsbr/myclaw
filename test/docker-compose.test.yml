@@ -147,6 +147,31 @@ services:
     volumes:
       - myclaw-test-data:/var/lib/myclaw
 
+  scheduler-worker-test:
+    <<: *backend-security
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+      labels:
+        org.opencontainers.image.revision: ${MYCLAW_ACCEPTANCE_COMMIT_SHA:-unbound}
+    command: python -m app.workers.scheduler_worker
+    env_file: .env.test
+    environment:
+      DATABASE_URL: mysql+aiomysql://myclaw:mypassword@mysql-test:3306/myclaw_test
+      REDIS_URL: redis://:redispassword@redis-test:6379/0
+      SCHEDULER_POLL_SECONDS: "0.1"
+      SCHEDULER_WORKER_CONCURRENCY: "2"
+      SCHEDULER_CLAIM_LEASE_SECONDS: "5"
+      OTEL_SERVICE_NAME: myclaw-scheduler-worker-test
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector-test:4318
+    depends_on:
+      api-test:
+        condition: service_healthy
+    profiles:
+      - fullstack
+    volumes:
+      - myclaw-test-data:/var/lib/myclaw
+
   knowledge-worker-test:
     <<: *backend-security
     build:

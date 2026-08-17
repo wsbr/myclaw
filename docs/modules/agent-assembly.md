@@ -99,7 +99,9 @@ Card 中必须区分 Builder 声明与平台证明：description、domain tags�
 private | enterprise
 ```
 
-`private` 只允许 Owner 使用/测试，`enterprise` 表示当前 tenant 内可发现候选；两者仍要经过发布状态、Collaboration Policy、原始账号和环境兼容校验。未来若引入 owner/team/tenant/public-federated 等细粒度 Scope，必须新增版本化 Scope 模型和迁移，不能把这些概念词直接写入当前枚举。
+`private` 默认只允许 Owner 使用；Owner 可以把当前 tenant 的有效普通成员加入 Agent 白名单，使其获得“发现 + 对话/调用”权限。该授权不授予草稿配置、测试、发布、评测、API Key 或白名单管理能力，Owner 也不会被复制成一条成员记录。`enterprise` 表示当前 tenant 的有效成员都可发现和使用。两者仍要经过发布状态、Collaboration Policy、原始账号和环境兼容校验。未来若引入协作者、team 或 public-federated 等细粒度 Scope，必须新增明确的权限模型和迁移，不能把这些概念词直接写入当前枚举。
+
+成员授权是实时治理事实，不冻结进 AgentVersion 或 AgentCard。创建 Session、发送后续消息、Agent Network 发现/调用、Group 成员选择和定时任务分派都调用同一授权边界。撤销只阻止新的运行和分派，不删除成员自己的历史 Session，也不改写已经开始的 Runner 快照。
 
 还可以配置受信候选、组织标签、可用时间和成本提示。这些影响发现，不预设谁必须调用谁，也不创建 Group 模板。
 

@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { Button, Input } from 'antd'
+import { Button, Input, Mentions } from 'antd'
 import { Send, Square } from 'lucide-react'
 
 type Mode = 'chat' | 'plan' | 'group'
@@ -15,6 +15,7 @@ interface Props {
   planCanRevise: boolean
   groupReady: boolean
   accessory?: ReactNode
+  people?: Array<{ account_id: string; handle: string; display_name: string }>
   onChange: (value: string) => void
   onSubmit: () => void
   onStop: () => void
@@ -27,7 +28,7 @@ const modeCopy: Record<Mode, { label: string; hint: string }> = {
 }
 
 export default function SessionComposer({
-  mode, value, disabled, submitting, running, planEntered, hasPlan, planCanRevise, groupReady, accessory,
+  mode, value, disabled, submitting, running, planEntered, hasPlan, planCanRevise, groupReady, accessory, people = [],
   onChange, onSubmit, onStop,
 }: Props) {
   const placeholder = mode === 'plan'
@@ -51,7 +52,28 @@ export default function SessionComposer({
     </div>
     <div className="flex items-end gap-2">
       {accessory}
-      <Input.TextArea
+      {mode === 'chat' ? <Mentions
+        className="session-composer-textarea"
+        value={value}
+        onChange={onChange}
+        autoSize={{ minRows: 1, maxRows: 7 }}
+        placeholder={placeholder}
+        disabled={disabled}
+        aria-label="消息输入"
+        prefix="@"
+        options={people.map(person => ({
+          key: person.account_id,
+          value: person.handle,
+          label: `${person.display_name} · @${person.handle}`,
+        }))}
+        notFoundContent="没有可联系的智能体成员"
+        onPressEnter={event => {
+          if (!event.shiftKey && !event.nativeEvent.isComposing) {
+            event.preventDefault()
+            if (value.trim() && !disabled) onSubmit()
+          }
+        }}
+      /> : <Input.TextArea
         className="session-composer-textarea"
         value={value}
         onChange={event => onChange(event.target.value)}
@@ -65,7 +87,7 @@ export default function SessionComposer({
             if (value.trim() && !disabled) onSubmit()
           }
         }}
-      />
+      />}
       {running ? <Button
         danger
         className="h-10 shrink-0"

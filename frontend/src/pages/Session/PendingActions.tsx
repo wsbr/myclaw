@@ -1,6 +1,7 @@
 import { Input, Button, Tag } from 'antd'
 import { CircleHelp, ShieldCheck } from 'lucide-react'
 import type { ApprovalAction, ClarificationAction, ToolConfirmation } from '@/api/sessions'
+import { displayLabel } from '@/lib/presentation'
 
 interface Props {
   toolActions: Array<ApprovalAction | ToolConfirmation>
@@ -25,7 +26,11 @@ export default function PendingActions({
       <Tag color="orange">{toolActions.length + clarifications.length}</Tag>
     </div>
 
-    {toolActions.map(action => <div key={action.id} className="overflow-hidden rounded-2xl border border-amber-300/70 bg-amber-50/70 shadow-sm dark:bg-amber-950/15">
+    {toolActions.map(action => {
+      const presentation = 'presentation' in action ? action.presentation : null
+      const title = presentation?.title || (action.tool_key ? displayLabel(action.tool_key) : '') || '受保护操作'
+      const summary = presentation?.summary || '智能体请求执行以下精确参数。批准只对本次参数哈希有效。'
+      return <div key={action.id} className="overflow-hidden rounded-2xl border border-amber-300/70 bg-amber-50/70 shadow-sm dark:bg-amber-950/15">
       <div className="flex items-start gap-3 p-4">
         <div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300">
           <ShieldCheck className="size-4" />
@@ -33,10 +38,10 @@ export default function PendingActions({
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <Tag color="warning">需要确认</Tag>
-            <span className="font-medium">{action.tool_key || ('presentation' in action ? action.presentation.title : '') || '受保护操作'}</span>
+            <span className="font-medium">{title}</span>
           </div>
           <p className="mt-2 text-sm leading-6 text-muted-foreground">
-            智能体请求执行以下精确参数。批准只对本次参数哈希有效。
+            {summary}
           </p>
           {action.arguments && <details className="mt-3 rounded-xl border bg-background/70">
             <summary className="cursor-pointer px-3 py-2 text-xs font-medium text-muted-foreground">查看请求参数</summary>
@@ -48,7 +53,7 @@ export default function PendingActions({
           </div>
         </div>
       </div>
-    </div>)}
+    </div>})}
 
     {clarifications.map(action => <div key={action.id} className="overflow-hidden rounded-2xl border border-blue-300/70 bg-blue-50/60 shadow-sm dark:bg-blue-950/15">
       <div className="flex items-start gap-3 p-4">

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class AgentDraftInput(BaseModel):
@@ -152,6 +152,42 @@ class AgentApiKeyResponse(BaseModel):
     version: int
     created_at: datetime
     secret: str | None = None
+
+
+class AgentMemberReplaceRequest(BaseModel):
+    account_ids: list[str] = Field(default_factory=list, max_length=200)
+
+    @field_validator("account_ids")
+    @classmethod
+    def account_ids_are_unique(cls, value: list[str]) -> list[str]:
+        normalized = [item.strip() for item in value]
+        if any(not item for item in normalized):
+            raise ValueError("account_ids cannot contain empty values")
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("account_ids must be unique")
+        return normalized
+
+
+class AgentMemberAccountResponse(BaseModel):
+    account_id: str
+    user_id: str
+    email: str | None
+    display_name: str
+    selected: bool
+    granted_at: datetime | None = None
+
+
+class AgentMembersResponse(BaseModel):
+    agent_id: str
+    agent_version: int
+    members: list[AgentMemberAccountResponse] = Field(default_factory=list)
+    candidates: list[AgentMemberAccountResponse] = Field(default_factory=list)
+
+
+class AgentPersonResponse(BaseModel):
+    account_id: str
+    handle: str
+    display_name: str
 
 
 class DraftTestRunRequest(BaseModel):

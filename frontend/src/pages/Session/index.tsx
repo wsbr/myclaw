@@ -48,6 +48,11 @@ export default function SessionPage() {
   const { data: agent } = useQuery({
     queryKey: ['agent-summary', agentId], queryFn: () => agentsApi.getSummary(agentId!), enabled: !!agentId,
   })
+  const { data: agentPeople = [] } = useQuery({
+    queryKey: ['agent-people', agentId],
+    queryFn: () => agentsApi.listPeople(agentId!),
+    enabled: !!agentId,
+  })
   const { data: allSessions = [] } = useQuery({ queryKey: ['sessions'], queryFn: sessionsApi.list })
   const sessions = useMemo(
     () => allSessions.filter(item => item.entry_agent_id === agentId),
@@ -342,7 +347,10 @@ export default function SessionPage() {
   const send = useMutation({
     mutationFn: async (content: string) => {
       const id = await ensureSession()
-      return sessionsApi.sendMessage(id, content)
+      const mentionedAccountIds = agentPeople
+        .filter(person => content.includes(`@${person.handle}`))
+        .map(person => person.account_id)
+      return sessionsApi.sendMessage(id, content, mentionedAccountIds)
     },
     onSuccess: result => {
       setActiveRunId(result.run.id)
@@ -748,6 +756,7 @@ export default function SessionPage() {
                   ]}
                   aria-label="群组接收智能体"
                 /> : undefined}
+                people={agentPeople}
                 onChange={setInput}
                 onSubmit={submitComposer}
                 onStop={requestCancel}

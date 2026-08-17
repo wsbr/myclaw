@@ -76,6 +76,12 @@ def clarification_continuation(clarification: Clarification) -> list[dict]:
         data={
             "clarification_id": clarification.id,
             "answer": clarification.answer_text or "",
+            "answered_by_account_id": clarification.target_account_id,
+            "answered_by": (
+                clarification.target_display_name_snapshot
+                or clarification.target_handle_snapshot
+                or clarification.target_user_id
+            ),
         },
     ).model_dump(mode="json"))]
 

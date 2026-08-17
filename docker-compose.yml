@@ -104,6 +104,35 @@ services:
     volumes:
       - myclaw_data:/var/lib/myclaw
 
+  scheduler-worker:
+    <<: *backend-security
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: python -m app.workers.scheduler_worker
+    env_file: ${MYCLAW_ENV_FILE:-.env}
+    environment:
+      - MYCLAW_ENVIRONMENT=${MYCLAW_ENVIRONMENT:-development}
+      - DATABASE_URL=${DATABASE_URL}
+      - DATABASE_POOL_SIZE=${SCHEDULER_DATABASE_POOL_SIZE:-4}
+      - DATABASE_MAX_OVERFLOW=${SCHEDULER_DATABASE_MAX_OVERFLOW:-4}
+      - REDIS_URL=${REDIS_URL}
+      - SECRET_KEY=${SECRET_KEY}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
+      - SCHEDULER_POLL_SECONDS=${SCHEDULER_POLL_SECONDS:-0.5}
+      - SCHEDULER_WORKER_CONCURRENCY=${SCHEDULER_WORKER_CONCURRENCY:-4}
+      - SCHEDULER_CLAIM_LEASE_SECONDS=${SCHEDULER_CLAIM_LEASE_SECONDS:-30}
+      - OTEL_SERVICE_NAME=myclaw-scheduler-worker
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      - OTEL_EXPORTER_OTLP_HEADERS=${OTEL_EXPORTER_OTLP_HEADERS:-}
+      - MYCLAW_RELEASE=${MYCLAW_RELEASE:-development}
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    volumes:
+      - myclaw_data:/var/lib/myclaw
+
   knowledge-worker:
     <<: *backend-security
     build:

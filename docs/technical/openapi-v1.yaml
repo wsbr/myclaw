@@ -32,6 +32,7 @@ tags:
   - name: Agents
   - name: Registry
   - name: Sessions
+  - name: Schedules
   - name: Runs
   - name: Plans
   - name: Network
@@ -393,6 +394,46 @@ paths:
         '200':
           description: Agent.
           content: {application/json: {schema: {$ref: '#/components/schemas/Agent'}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /agents/{agent_id}/members:
+    get:
+      tags: [Agents]
+      operationId: listAgentMembers
+      parameters: [{$ref: '#/components/parameters/AgentId'}]
+      responses:
+        '200':
+          description: Active private-Agent grants and eligible Tenant member candidates. Owner/admin only.
+          content: {application/json: {schema: {$ref: '#/components/schemas/AgentMembers'}}}
+        default: {$ref: '#/components/responses/Error'}
+    put:
+      tags: [Agents]
+      operationId: replaceAgentMembers
+      parameters:
+        - {$ref: '#/components/parameters/AgentId'}
+        - {$ref: '#/components/parameters/IfMatch'}
+        - {$ref: '#/components/parameters/IdempotencyKey'}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/AgentMemberReplaceRequest'}}}
+      responses:
+        '200':
+          description: Entire private-Agent use whitelist replaced atomically.
+          content: {application/json: {schema: {$ref: '#/components/schemas/AgentMembers'}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /agents/{agent_id}/people:
+    get:
+      tags: [Agents]
+      operationId: listAgentContactablePeople
+      parameters:
+        - {$ref: '#/components/parameters/AgentId'}
+        - {name: query, in: query, schema: {type: string, maxLength: 200}}
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200':
+          description: Active same-Tenant people the current account may contact through this Agent.
+          content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/AgentPerson'}}}}
         default: {$ref: '#/components/responses/Error'}
 
   /agents/{agent_id}/draft:
@@ -950,6 +991,123 @@ paths:
       parameters: [{$ref: '#/components/parameters/Limit'}, {$ref: '#/components/parameters/Cursor'}]
       responses:
         '200': {description: Sandbox profile page., content: {application/json: {schema: {$ref: '#/components/schemas/SandboxProfilePage'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /schedules:
+    get:
+      tags: [Schedules]
+      operationId: listAgentSchedules
+      security: [{webSession: []}, {enterpriseBearer: []}]
+      responses:
+        '200': {description: Current account schedules., content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/AgentSchedule'}}}}}
+        default: {$ref: '#/components/responses/Error'}
+    post:
+      tags: [Schedules]
+      operationId: createAgentSchedule
+      security: [{webSession: []}, {enterpriseBearer: []}]
+      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/AgentScheduleCreate'}}}
+      responses:
+        '201': {description: Schedule created., content: {application/json: {schema: {$ref: '#/components/schemas/AgentSchedule'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /schedules/{schedule_id}:
+    parameters: [{$ref: '#/components/parameters/ScheduleId'}]
+    get:
+      tags: [Schedules]
+      operationId: getAgentSchedule
+      security: [{webSession: []}, {enterpriseBearer: []}]
+      responses:
+        '200': {description: Schedule., content: {application/json: {schema: {$ref: '#/components/schemas/AgentSchedule'}}}}
+        default: {$ref: '#/components/responses/Error'}
+    patch:
+      tags: [Schedules]
+      operationId: updateAgentSchedule
+      security: [{webSession: []}, {enterpriseBearer: []}]
+      parameters: [{$ref: '#/components/parameters/IfMatch'}]
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: '#/components/schemas/AgentSchedulePatch'}}}
+      responses:
+        '200': {description: Schedule updated., content: {application/json: {schema: {$ref: '#/components/schemas/AgentSchedule'}}}}
+        default: {$ref: '#/components/responses/Error'}
+    delete:
+      tags: [Schedules]
+      operationId: disableAgentSchedule
+      security: [{webSession: []}, {enterpriseBearer: []}]
+      parameters: [{$ref: '#/components/parameters/IfMatch'}]
+      responses:
+        '204': {description: Schedule disabled; execution history retained.}
+        default: {$ref: '#/components/responses/Error'}
+
+  /schedules/{schedule_id}/pause:
+    post:
+      tags: [Schedules]
+      operationId: pauseAgentSchedule
+      security: [{webSession: []}, {enterpriseBearer: []}]
+      parameters: [{$ref: '#/components/parameters/ScheduleId'}, {$ref: '#/components/parameters/IfMatch'}]
+      responses:
+        '200': {description: Schedule paused., content: {application/json: {schema: {$ref: '#/components/schemas/AgentSchedule'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /schedules/{schedule_id}/resume:
+    post:
+      tags: [Schedules]
+      operationId: resumeAgentSchedule
+      security: [{webSession: []}, {enterpriseBearer: []}]
+      parameters: [{$ref: '#/components/parameters/ScheduleId'}, {$ref: '#/components/parameters/IfMatch'}]
+      responses:
+        '200': {description: Schedule resumed from a newly computed future occurrence., content: {application/json: {schema: {$ref: '#/components/schemas/AgentSchedule'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /schedules/{schedule_id}/run-now:
+    post:
+      tags: [Schedules]
+      operationId: runAgentScheduleNow
+      security: [{webSession: []}, {enterpriseBearer: []}]
+      parameters: [{$ref: '#/components/parameters/ScheduleId'}, {$ref: '#/components/parameters/IdempotencyKey'}]
+      responses:
+        '202': {description: Manual Fire queued., content: {application/json: {schema: {$ref: '#/components/schemas/AgentScheduleFire'}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /schedules/{schedule_id}/fires:
+    get:
+      tags: [Schedules]
+      operationId: listAgentScheduleFires
+      security: [{webSession: []}, {enterpriseBearer: []}]
+      parameters: [{$ref: '#/components/parameters/ScheduleId'}, {$ref: '#/components/parameters/Limit'}]
+      responses:
+        '200': {description: Fire history., content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/AgentScheduleFire'}}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /schedules/notifications/unread:
+    get:
+      tags: [Schedules]
+      operationId: listUnreadScheduleNotifications
+      security: [{webSession: []}, {enterpriseBearer: []}]
+      responses:
+        '200': {description: Unread terminal Fire projections., content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/AgentScheduleFire'}}}}}
+        default: {$ref: '#/components/responses/Error'}
+
+  /schedules/notifications/{fire_id}/read:
+    post:
+      tags: [Schedules]
+      operationId: markScheduleNotificationRead
+      security: [{webSession: []}, {enterpriseBearer: []}]
+      parameters: [{$ref: '#/components/parameters/ScheduleFireId'}]
+      responses:
+        '204': {description: Notification marked read.}
+        default: {$ref: '#/components/responses/Error'}
+
+  /schedules/notifications/read-all:
+    post:
+      tags: [Schedules]
+      operationId: markAllScheduleNotificationsRead
+      security: [{webSession: []}, {enterpriseBearer: []}]
+      responses:
+        '204': {description: All terminal Fire projections marked read.}
         default: {$ref: '#/components/responses/Error'}
 
   /sessions:
@@ -1963,6 +2121,8 @@ components:
     ExternalIdentityId: {name: external_identity_id, in: path, required: true, schema: {type: string, format: uuid}}
     AgentId: {name: agent_id, in: path, required: true, schema: {type: string, format: uuid}}
     AgentVersionId: {name: agent_version_id, in: path, required: true, schema: {type: string, format: uuid}}
+    ScheduleId: {name: schedule_id, in: path, required: true, schema: {type: string, format: uuid}}
+    ScheduleFireId: {name: fire_id, in: path, required: true, schema: {type: string, format: uuid}}
     ModelId: {name: model_id, in: path, required: true, schema: {type: string, format: uuid}}
     ModelVersionId: {name: model_version_id, in: path, required: true, schema: {type: string, format: uuid}}
     ToolId: {name: tool_id, in: path, required: true, schema: {type: string, format: uuid}}
@@ -2044,6 +2204,91 @@ components:
     Visibility: {type: string, enum: [private, direct, group, user]}
     WorkItemStatus: {type: string, enum: [queued, running, waiting_user, waiting_approval, waiting_tool, waiting_agent, waiting_resource, succeeded, failed, cancelled, timed_out, blocked]}
     RunnerStatus: {type: string, enum: [queued, running, succeeded, failed, cancelled, lost]}
+    AgentScheduleCreate:
+      type: object
+      additionalProperties: false
+      required: [agent_id, name, prompt, schedule_type, timezone]
+      properties:
+        agent_id: {$ref: '#/components/schemas/Uuid'}
+        name: {type: string, minLength: 1, maxLength: 200}
+        prompt: {type: string, minLength: 1, maxLength: 16000}
+        schedule_type: {type: string, enum: [once, cron, interval]}
+        run_at: {type: [string, 'null'], format: date-time}
+        cron_expression: {type: [string, 'null'], maxLength: 191}
+        interval_seconds: {type: [integer, 'null'], minimum: 60, maximum: 31536000}
+        timezone: {type: string, minLength: 1, maxLength: 100, description: IANA timezone name.}
+        end_at: {type: [string, 'null'], format: date-time}
+        version_policy: {type: string, enum: [latest_published, pinned], default: latest_published}
+        pinned_agent_version_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        overlap_policy: {type: string, enum: [skip, queue_one, allow], default: skip}
+        misfire_policy: {type: string, enum: [skip, fire_once], default: fire_once}
+        misfire_grace_seconds: {type: integer, minimum: 0, maximum: 86400, default: 300}
+    AgentSchedulePatch:
+      type: object
+      additionalProperties: false
+      minProperties: 1
+      properties:
+        name: {type: string, minLength: 1, maxLength: 200}
+        prompt: {type: string, minLength: 1, maxLength: 16000}
+        schedule_type: {type: string, enum: [once, cron, interval]}
+        run_at: {type: [string, 'null'], format: date-time}
+        cron_expression: {type: [string, 'null'], maxLength: 191}
+        interval_seconds: {type: [integer, 'null'], minimum: 60, maximum: 31536000}
+        timezone: {type: string, minLength: 1, maxLength: 100}
+        end_at: {type: [string, 'null'], format: date-time}
+        version_policy: {type: string, enum: [latest_published, pinned]}
+        pinned_agent_version_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        overlap_policy: {type: string, enum: [skip, queue_one, allow]}
+        misfire_policy: {type: string, enum: [skip, fire_once]}
+        misfire_grace_seconds: {type: integer, minimum: 0, maximum: 86400}
+    AgentSchedule:
+      allOf:
+        - {$ref: '#/components/schemas/AgentScheduleCreate'}
+        - type: object
+          required: [id, agent_name, status, total_fire_count, version, created_at, updated_at]
+          properties:
+            id: {$ref: '#/components/schemas/Uuid'}
+            agent_name: {type: string}
+            context_mode: {type: string, enum: [new_session, continue_session]}
+            source_session_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+            next_fire_at: {type: [string, 'null'], format: date-time}
+            next_fire_local: {type: [string, 'null']}
+            status: {type: string, enum: [active, paused, completed, disabled]}
+            total_fire_count: {type: integer, format: int64, minimum: 0}
+            last_scheduled_for: {type: [string, 'null'], format: date-time}
+            last_fired_at: {type: [string, 'null'], format: date-time}
+            last_error_code: {type: [string, 'null']}
+            last_error_detail: {type: [string, 'null']}
+            version: {type: integer, format: int64, minimum: 1}
+            created_at: {$ref: '#/components/schemas/Timestamp'}
+            updated_at: {$ref: '#/components/schemas/Timestamp'}
+    AgentScheduleFire:
+      type: object
+      required: [id, schedule_id, schedule_name, agent_id, agent_name, trigger_kind, context_mode, scheduled_for, scheduled_for_local, status, created_at, updated_at]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        schedule_id: {$ref: '#/components/schemas/Uuid'}
+        schedule_name: {type: string}
+        agent_id: {$ref: '#/components/schemas/Uuid'}
+        agent_name: {type: string}
+        trigger_kind: {type: string, enum: [scheduled, manual]}
+        context_mode: {type: string, enum: [new_session, continue_session]}
+        scheduled_for: {$ref: '#/components/schemas/Timestamp'}
+        scheduled_for_local: {type: string}
+        status: {type: string, enum: [queued, deferred, dispatching, running, succeeded, failed, skipped, cancelled]}
+        reason_code: {type: [string, 'null']}
+        agent_version_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        session_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        run_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        runner_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        result_preview: {type: [string, 'null']}
+        fired_at: {type: [string, 'null'], format: date-time}
+        completed_at: {type: [string, 'null'], format: date-time}
+        notification_read_at: {type: [string, 'null'], format: date-time}
+        error_code: {type: [string, 'null']}
+        error_detail: {type: [string, 'null']}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        updated_at: {$ref: '#/components/schemas/Timestamp'}
     RequiredActionType: {type: string, enum: [plan_implementation, tool, membership, session_grant, reporter_selection, clarification]}
     RequiredActionStatus: {type: string, enum: [pending, approved, rejected, answered, cancelled]}
     EventType:
@@ -2280,6 +2525,44 @@ components:
       additionalProperties: false
       required: [name, visibility]
       properties: {name: {type: string, minLength: 1, maxLength: 191}, visibility: {$ref: '#/components/schemas/AgentVisibility'}}
+    AgentMemberReplaceRequest:
+      type: object
+      additionalProperties: false
+      required: [account_ids]
+      properties:
+        account_ids:
+          type: array
+          maxItems: 200
+          uniqueItems: true
+          items: {$ref: '#/components/schemas/Uuid'}
+    AgentMemberAccount:
+      type: object
+      additionalProperties: false
+      required: [account_id, user_id, email, display_name, selected, granted_at]
+      properties:
+        account_id: {$ref: '#/components/schemas/Uuid'}
+        user_id: {type: string, minLength: 1, maxLength: 191}
+        email: {type: [string, 'null'], format: email}
+        display_name: {type: string, minLength: 1, maxLength: 200}
+        selected: {type: boolean}
+        granted_at: {oneOf: [{$ref: '#/components/schemas/Timestamp'}, {type: 'null'}]}
+    AgentMembers:
+      type: object
+      additionalProperties: false
+      required: [agent_id, agent_version, members, candidates]
+      properties:
+        agent_id: {$ref: '#/components/schemas/Uuid'}
+        agent_version: {type: integer, format: int64, minimum: 1}
+        members: {type: array, items: {$ref: '#/components/schemas/AgentMemberAccount'}}
+        candidates: {type: array, items: {$ref: '#/components/schemas/AgentMemberAccount'}}
+    AgentPerson:
+      type: object
+      additionalProperties: false
+      required: [account_id, handle, display_name]
+      properties:
+        account_id: {$ref: '#/components/schemas/Uuid'}
+        handle: {type: string, minLength: 1, maxLength: 191}
+        display_name: {type: string, minLength: 1, maxLength: 200}
     AgentDraft:
       type: object
       additionalProperties: false
@@ -2912,7 +3195,17 @@ components:
       type: object
       additionalProperties: false
       required: [content]
-      properties: {content: {type: string, minLength: 1}, recipient_agent_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}}
+      properties:
+        content: {type: string, minLength: 1}
+        recipient_agent_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        mentions:
+          type: array
+          maxItems: 20
+          items:
+            type: object
+            additionalProperties: false
+            required: [account_id]
+            properties: {account_id: {$ref: '#/components/schemas/Uuid'}}
     MessagePage:
       type: object
       additionalProperties: false

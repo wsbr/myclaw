@@ -129,6 +129,12 @@ class Settings(BaseSettings):
     # The model must select a bounded subset from that complete catalog.
     emergent_group_max_members: int = Field(default=64, ge=2, le=500)
 
+    # Durable user schedules only decide *when* a normal Agent Run is created.
+    # Model and Tool work remains owned by Runtime/Sandbox workers.
+    scheduler_poll_seconds: float = Field(default=0.5, gt=0)
+    scheduler_worker_concurrency: int = Field(default=4, ge=1, le=32)
+    scheduler_claim_lease_seconds: int = Field(default=30, gt=0)
+
     # Retention maintenance. Authoritative Session/Run/Event/Artifact rows are
     # not deleted by this job; only disposable operational records are pruned.
     maintenance_poll_seconds: int = Field(default=3600, gt=0)

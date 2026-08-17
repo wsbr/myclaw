@@ -11,6 +11,7 @@ from sqlalchemy import (
     Computed,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     JSON,
@@ -51,6 +52,49 @@ class AgentBlueprint(Base, TimestampMixin, VersionMixin):
     draft_version_id: Mapped[str | None] = mapped_column(String(36))
     current_published_version_id: Mapped[str | None] = mapped_column(String(36))
     next_version_no: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+
+
+class AgentMember(Base, TimestampMixin, VersionMixin):
+    """A revocable use grant for one private Agent.
+
+    Ownership remains on ``AgentBlueprint``.  This record grants discovery and
+    execution only; it is never consulted by Agent management endpoints.
+    """
+
+    __tablename__ = "agent_member"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('active','revoked')", name="ck_agent_member_status"
+        ),
+        UniqueConstraint("agent_id", "account_id", name="uq_agent_member_account"),
+        ForeignKeyConstraint(
+            ["agent_id", "tenant_id"], ["agent.id", "agent.tenant_id"],
+            name="fk_agent_member_agent_tenant",
+        ),
+        ForeignKeyConstraint(
+            ["account_id", "tenant_id"],
+            ["platform_account.id", "platform_account.tenant_id"],
+            name="fk_agent_member_account_tenant",
+        ),
+        ForeignKeyConstraint(
+            ["granted_by_account_id", "tenant_id"],
+            ["platform_account.id", "platform_account.tenant_id"],
+            name="fk_agent_member_grantor_tenant",
+        ),
+        Index("ix_agent_member_account_status", "account_id", "status", "agent_id"),
+        Index("ix_agent_member_agent_status", "agent_id", "status", "account_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
+    tenant_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("tenant.id"), nullable=False
+    )
+    agent_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    account_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="active", nullable=False)
+    granted_by_account_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    granted_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
 
 
 class AgentAssemblyVersion(Base, TimestampMixin, VersionMixin):

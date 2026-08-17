@@ -45,6 +45,7 @@ from app.services.web_tool_service import (
     WebToolError, _public_address, _trusted_synthetic_address, _validate_url,
 )
 from app.runtime.coordination_tools import dispatch_coordination_tool
+from app.runtime.action_dispatcher import _approval_presentation
 from app.runtime.snapshot_resolver import _eager_platform_tool_keys
 from app.services.browser_worker_service import BrowserOutcomeUnknown, BrowserWorkerError
 from app.services.registry_reconcile import builtin_tool_specs
@@ -63,6 +64,29 @@ def test_every_builtin_tool_has_an_intentional_chinese_display_name():
     assert {spec.tool_key for spec in specs} == set(BUILTIN_TOOLS)
     assert all(spec.display_name_zh for spec in specs)
     assert all(any("\u3400" <= char <= "\u9fff" for char in spec.display_name_zh) for spec in specs)
+
+
+def test_schedule_tool_is_eager_durable_and_mutations_require_exact_confirmation():
+    spec = next(item for item in builtin_tool_specs() if item.tool_key == "schedule_task")
+    assert spec.annotations["eager"] is True
+    assert spec.execution_mode == "durable_async"
+    assert spec.side_effect == "idempotent"
+    assert spec.initial_confirmation_policy == "never"
+    assert spec.initial_platform_config["risk_rules"] == [{
+        "when": {
+            "argument": "operation",
+            "in": ["create", "update", "pause", "resume", "delete", "run_now"],
+        },
+        "confirmation": "per_call",
+    }]
+    presentation = _approval_presentation(
+        tool_name="schedule_task",
+        arguments={"operation": "create", "name": "每日摘要"},
+        confirmation_policy="per_call", dynamic_risk={"reasons": []},
+        force_text_redaction=False,
+    )
+    assert presentation["title"] == "确认创建定时任务"
+    assert "时间、内容和上下文" in presentation["summary"]
 
 
 def test_mcp_chinese_display_name_does_not_copy_unknown_english_titles():

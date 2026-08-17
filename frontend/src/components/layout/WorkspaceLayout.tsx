@@ -5,6 +5,7 @@ import {
   Bot,
   Brain,
   BookOpen,
+  CalendarClock,
   Coins,
   ChevronRight,
   Cpu,
@@ -41,6 +42,7 @@ const MemoriesPage = lazy(() => import('@/pages/Memories'))
 const KnowledgePage = lazy(() => import('@/pages/Knowledge'))
 const AccountPage = lazy(() => import('@/pages/Account'))
 const AgentNetworkPage = lazy(() => import('@/pages/AgentNetwork'))
+const SchedulesPage = lazy(() => import('@/pages/Schedules'))
 
 const SIDEBAR_KEY = 'myclaw_sidebar_collapsed'
 
@@ -51,6 +53,7 @@ const navSections: Array<{ label: string; items: NavItem[] }> = [
     { key: '/agents', label: '智能体', icon: Bot },
     { key: '/network', label: '协作网络', icon: Network },
     { key: '/knowledge', label: '知识库', icon: BookOpen },
+    { key: '/schedules', label: '定时任务', icon: CalendarClock },
   ] },
   { label: '个人空间', items: [
     { key: '/memories', label: '记忆', icon: Brain },
@@ -75,6 +78,7 @@ const breadcrumbMap: Record<string, string> = {
   '/network': '协作网络',
   '/memories': '记忆',
   '/knowledge': '知识库',
+  '/schedules': '定时任务',
   '/account': '我的账号',
   '/users': '用户管理',
   '/tools': '工具管理',
@@ -252,6 +256,7 @@ export default function WorkspaceLayout() {
               <Route path="/agents/:agentId/chat/:sessionId?" element={<SessionPage />} />
               <Route path="/memories" element={<MemoriesPage />} />
               <Route path="/knowledge" element={<KnowledgePage />} />
+              <Route path="/schedules" element={<SchedulesPage />} />
               <Route path="/account" element={<AccountPage />} />
               <Route path="/users" element={<UsersPage />} />
               <Route path="/tools" element={<ToolsPage />} />

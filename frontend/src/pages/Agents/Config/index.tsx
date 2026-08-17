@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Alert, Button, Card, Form, Input, InputNumber, Modal, Radio, Select, Space, Spin, Switch, Table, Tabs, Tag, Typography, message } from 'antd'
-import { ArrowLeftOutlined, CloudUploadOutlined, ExperimentOutlined, KeyOutlined, PauseCircleOutlined, PlayCircleOutlined, PlusOutlined, SaveOutlined } from '@ant-design/icons'
+import { ArrowLeftOutlined, CloudUploadOutlined, ExperimentOutlined, KeyOutlined, PauseCircleOutlined, PlayCircleOutlined, PlusOutlined, SaveOutlined, UserAddOutlined } from '@ant-design/icons'
 import { agentsApi, AgentApiKey, AgentDraft, AgentEvalRun, AgentEvalSuite, AgentOption, AgentPublishedVersion } from '@/api/agents'
 import PromptEditor from '@/components/PromptEditor'
 import { displayLabel } from '@/lib/presentation'
@@ -22,6 +22,7 @@ export default function AgentConfigPage() {
   const [evalOpen, setEvalOpen] = useState(false)
   const [editingSuite, setEditingSuite] = useState<AgentEvalSuite | null>(null)
   const [evalForm] = Form.useForm()
+  const [memberIds, setMemberIds] = useState<string[]>([])
 
   const { data: detail, isLoading } = useQuery({
     queryKey: ['agent', id], queryFn: () => agentsApi.get(id!), enabled: !isNew,
@@ -110,6 +111,36 @@ export default function AgentConfigPage() {
     queryKey: ['agent-eval-runs', id], queryFn: () => agentsApi.listEvalRuns(id!),
     enabled: !isNew,
     refetchInterval: query => query.state.data?.some(run => ['queued', 'running'].includes(run.status)) ? 3000 : false,
+  })
+  const agentMembers = useQuery({
+    queryKey: ['agent-members', id], queryFn: () => agentsApi.getMembers(id!),
+    enabled: !isNew && detail?.agent.visibility === 'private',
+  })
+  useEffect(() => {
+    if (agentMembers.data) {
+      setMemberIds(agentMembers.data.members.map(item => item.account_id))
+    }
+  }, [agentMembers.data])
+  const saveMembers = useMutation({
+    mutationFn: () => agentsApi.replaceMembers(
+      id!, agentMembers.data!.agent_version, memberIds,
+    ),
+    onSuccess: result => {
+      setMemberIds(result.members.map(item => item.account_id))
+      message.success('成员白名单已更新')
+      queryClient.invalidateQueries({ queryKey: ['agent-members', id] })
+      queryClient.invalidateQueries({ queryKey: ['agent', id] })
+      queryClient.invalidateQueries({ queryKey: ['agents'] })
+    },
+    onError: (error: any) => {
+      if (error?.response?.status === 409) {
+        queryClient.invalidateQueries({ queryKey: ['agent-members', id] })
+        queryClient.invalidateQueries({ queryKey: ['agent', id] })
+        message.error('智能体访问配置已更新，请确认后重新保存')
+      } else {
+        message.error(error?.response?.data?.error?.message || '成员白名单保存失败')
+      }
+    },
   })
   const openEvalDefinition = (suite?: AgentEvalSuite) => {
     const selected = suite ?? null
@@ -261,7 +292,7 @@ export default function AgentConfigPage() {
             <Typography.Text type="secondary">采样参数由平台模型注册表统一治理。</Typography.Text>
           </Card> },
           { key: 'capabilities', label: '能力装配', children: <Card>
-            <Form.Item name="tool_ids" label="平台工具"><Select mode="multiple" options={options(tools)} optionFilterProp="label" /></Form.Item>
+            <Form.Item name="tool_ids" label="平台工具" extra="按智能体显式装配；例如选中“定时任务”后，用户即可在普通对话中用自然语言创建和管理任务。"><Select mode="multiple" options={options(tools)} optionFilterProp="label" /></Form.Item>
             <Form.Item name="skill_ids" label="技能"><Select mode="multiple" options={options(skills)} optionFilterProp="label" /></Form.Item>
           </Card> },
           { key: 'context', label: '上下文与记忆', children: <Card>
@@ -273,7 +304,38 @@ export default function AgentConfigPage() {
           { key: 'collaboration', label: '协作与访问', children: <Card>
             <Form.Item name="bound_agent_ids" label="可调用智能体"><Select mode="multiple" options={options(boundAgents.filter(item => item.id !== id))} optionFilterProp="label" /></Form.Item>
             <Form.Item name="group_enabled" label="允许加入群组协作" valuePropName="checked"><Switch /></Form.Item>
-            <Typography.Text type="secondary">绑定只授予发现与调用范围，不提升原始用户权限。</Typography.Text>
+            <Typography.Paragraph type="secondary">绑定只授予发现与调用范围，不提升原始用户权限。</Typography.Paragraph>
+            {isNew ? <Alert showIcon type="info" message="创建私有智能体后即可配置成员白名单" />
+              : detail?.agent.visibility === 'private' ? <Card size="small" title="私有智能体成员白名单">
+                <Alert className="mb-4" showIcon type="info"
+                  message="白名单成员只能发现和使用这个智能体"
+                  description="成员可以在智能体列表中看到它、发起对话，并在对话中使用已装配能力；不会获得草稿配置、测试、发布、评测、访问密钥或成员管理权限。移出后历史对话仍可查看，但不能再发送新消息。" />
+                <Space direction="vertical" className="w-full">
+                  <Select
+                    mode="multiple"
+                    allowClear
+                    showSearch
+                    optionFilterProp="label"
+                    loading={agentMembers.isLoading}
+                    value={memberIds}
+                    onChange={setMemberIds}
+                    placeholder="选择可使用此智能体的 Tenant 成员"
+                    options={(agentMembers.data?.candidates ?? []).map(account => ({
+                      value: account.account_id,
+                      label: `${account.display_name} · ${account.email || account.user_id}`,
+                    }))}
+                    className="w-full"
+                  />
+                  <Button
+                    icon={<UserAddOutlined />}
+                    loading={saveMembers.isPending}
+                    disabled={!agentMembers.data}
+                    onClick={() => saveMembers.mutate()}
+                  >保存成员白名单</Button>
+                </Space>
+              </Card> : <Alert showIcon type="success"
+                message="企业智能体已向 Tenant 全体有效成员开放"
+                description="无需维护单独白名单；成员只有使用权限，管理权限仍属于 Owner。" />}
           </Card> },
           ...(!isNew ? [{ key: 'versions', label: '版本历史', children: <Card>
             <Table rowKey="id" loading={versions.isLoading} dataSource={versions.data ?? []} pagination={false}

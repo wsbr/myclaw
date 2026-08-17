@@ -298,6 +298,9 @@ async def reconcile_platform_tools(
             changed_fields.append("current_version_id")
         governance = await db.get(ToolGovernance, tool.id)
         if governance is None:
+            initial_risk_rules = list(
+                spec.initial_platform_config.get("risk_rules") or []
+            )
             governance = ToolGovernance(
                 tool_definition_id=tool.id, enabled=True,
                 confirmation_policy=(
@@ -307,9 +310,9 @@ async def reconcile_platform_tools(
                 network_policy=dict(spec.initial_platform_config.get("network_policy") or {}),
                 workspace_policy={
                     key: value for key, value in spec.initial_platform_config.items()
-                    if key != "network_policy"
+                    if key not in {"network_policy", "risk_rules"}
                 },
-                risk_rules=[],
+                risk_rules=initial_risk_rules,
             )
             db.add(governance)
             changed_fields.append("governance")
@@ -377,6 +380,15 @@ def builtin_tool_specs() -> list[CodeToolSpec]:
         "memory_search": ("never", {}, "inline", "none"),
         "memory_propose": ("never", {}, "inline", "idempotent"),
         "knowledge_search": ("never", {}, "inline", "none"),
+        "schedule_task": ("never", {
+            "risk_rules": [{
+                "when": {
+                    "argument": "operation",
+                    "in": ["create", "update", "pause", "resume", "delete", "run_now"],
+                },
+                "confirmation": "per_call",
+            }],
+        }, "durable_async", "idempotent"),
         "web_search": ("never", {"network_policy": {"egress": "configured_provider_only"}}, "durable_async", "none"),
         "web_fetch": ("never", {"network_policy": {"egress": "public_http_https"}}, "durable_async", "none"),
         "browser_navigate": ("never", {"network_policy": {"egress": "public_http_https"}}, "durable_async", "idempotent"),
@@ -400,6 +412,7 @@ def builtin_tool_specs() -> list[CodeToolSpec]:
             ],
             annotations={
                 "untrusted_external_content": tool.name.startswith(("web_", "browser_")),
+                **({"eager": True} if tool.name == "schedule_task" else {}),
                 **({
                     "retrieval_profile": "balanced",
                     "model_visible_total_tokens": 12_000,
@@ -427,6 +440,8 @@ def builtin_tool_specs() -> list[CodeToolSpec]:
                 if tool.name == "browser_interact"
                 else "platform-tools.v3.browser-screenshot-2"
                 if tool.name == "browser_screenshot"
+                else "platform-tools.v4.schedule-task-1"
+                if tool.name == "schedule_task"
                 else "platform-tools.v3"
             ),
             execution_mode=governance[tool.name][2],

@@ -5,8 +5,8 @@ import hashlib
 import json
 from datetime import timedelta
 
-from fastapi import APIRouter, Depends, Header, HTTPException
-from sqlalchemy import or_, select
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
@@ -15,13 +15,15 @@ from app.models.agent_v1 import (
     AgentAssemblyVersion,
     AgentBlueprint,
     AgentCard,
+    AgentMember,
     AgentVersionBinding,
     AgentVersionSkill,
     AgentVersionTool,
 )
 from app.models.common import utcnow, uuid7
-from app.models.foundation import IdempotencyRecord
+from app.models.foundation import IdempotencyRecord, PlatformAccount
 from app.models.foundation import AgentApiKey
+from app.models.tenant_v1 import TenantMembership
 from app.persistence.reliable_writes import PlatformAuditWriter
 from app.schemas.agent_v1 import (
     AgentCreateV1,
@@ -38,6 +40,10 @@ from app.schemas.agent_v1 import (
     AgentApiKeyResponse,
     DraftTestRunRequest,
     CapabilityCheckResponse,
+    AgentMemberReplaceRequest,
+    AgentMemberAccountResponse,
+    AgentMembersResponse,
+    AgentPersonResponse,
 )
 from app.services.agent_assembly_service import (
     AgentDraftConflict,
@@ -52,6 +58,8 @@ from app.services.agent_assembly_service import (
 )
 from app.services.agent_eval_gate_service import agent_eval_gate_issues
 from app.services.agent_api_key_service import create_api_key, revoke_api_key
+from app.services.agent_access_service import agent_use_filter, has_agent_use_access
+from app.services.agent_people_service import list_agent_people
 from app.services.chat_service import create_user_session, enqueue_chat_message
 from app.services.cursor_service import SortKey, paginate_scalars
 from app.models.foundation import UserSession
@@ -206,13 +214,51 @@ async def _get_accessible_agent(
     ))
     if agent is None:
         raise HTTPException(status_code=404, detail="Agent not found")
-    if (
-        agent.owner_account_id != current.account.id
-        and "admin" not in current.roles
-        and not (agent.visibility == "enterprise" and agent.status == "published")
+    if not await has_agent_use_access(
+        db, agent=agent, account_id=current.account.id, roles=current.roles,
     ):
         raise HTTPException(status_code=403, detail="Access denied")
     return agent
+
+
+async def _members_response(
+    db: AsyncSession, agent: AgentBlueprint,
+) -> AgentMembersResponse:
+    rows = list((await db.execute(
+        select(PlatformAccount, AgentMember)
+        .join(TenantMembership, and_(
+            TenantMembership.account_id == PlatformAccount.id,
+            TenantMembership.tenant_id == PlatformAccount.tenant_id,
+            TenantMembership.status == "active",
+        ))
+        .outerjoin(AgentMember, and_(
+            AgentMember.agent_id == agent.id,
+            AgentMember.tenant_id == agent.tenant_id,
+            AgentMember.account_id == PlatformAccount.id,
+        ))
+        .where(
+            PlatformAccount.tenant_id == agent.tenant_id,
+            PlatformAccount.status == "active",
+            PlatformAccount.id != agent.owner_account_id,
+        )
+        .order_by(PlatformAccount.display_name, PlatformAccount.user_id)
+    )).all())
+    candidates = [AgentMemberAccountResponse(
+        account_id=account.id,
+        user_id=account.user_id,
+        email=account.email,
+        display_name=account.display_name,
+        selected=grant is not None and grant.status == "active",
+        granted_at=(
+            grant.granted_at if grant is not None and grant.status == "active" else None
+        ),
+    ) for account, grant in rows]
+    return AgentMembersResponse(
+        agent_id=agent.id,
+        agent_version=agent.version,
+        members=[item for item in candidates if item.selected],
+        candidates=candidates,
+    )
 
 
 def _api_key_response(key: AgentApiKey, secret: str | None = None) -> AgentApiKeyResponse:
@@ -264,17 +310,11 @@ async def list_agents(
         AgentBlueprint.tenant_id == current.tenant_id,
     )
     if "admin" not in current.roles and "builder" in current.roles:
-        statement = statement.where(or_(
-            AgentBlueprint.owner_account_id == current.account.id,
-            (AgentBlueprint.visibility == "enterprise") & (AgentBlueprint.status == "published"),
-        ))
+        statement = statement.where(agent_use_filter(current.account.id))
     elif "admin" not in current.roles:
         statement = statement.where(
             AgentBlueprint.status == "published",
-            or_(
-                AgentBlueprint.owner_account_id == current.account.id,
-                AgentBlueprint.visibility == "enterprise",
-            ),
+            agent_use_filter(current.account.id),
         )
     if status:
         statement = statement.where(AgentBlueprint.status == status)
@@ -328,6 +368,166 @@ async def get_agent_summary(
 @router.get("/{agent_id}", response_model=AgentDetailV1)
 async def get_agent(agent_id: str, db: AsyncSession = Depends(get_db), current: CurrentAccount = Depends(get_current_builder)):
     return await _detail(db, await _get_owned_agent(db, agent_id, current))
+
+
+@router.get("/{agent_id}/members", response_model=AgentMembersResponse)
+async def list_agent_members(
+    agent_id: str,
+    db: AsyncSession = Depends(get_db),
+    current: CurrentAccount = Depends(get_current_builder),
+):
+    return await _members_response(
+        db, await _get_owned_agent(db, agent_id, current),
+    )
+
+
+@router.get("/{agent_id}/people", response_model=list[AgentPersonResponse])
+async def list_agent_contactable_people(
+    agent_id: str,
+    query: str = Query(default="", max_length=200),
+    limit: int = Query(default=20, ge=1, le=50),
+    db: AsyncSession = Depends(get_db),
+    current: CurrentAccount = Depends(get_current_account),
+):
+    agent = await _get_accessible_agent(db, agent_id, current)
+    people = await list_agent_people(
+        db, tenant_id=agent.tenant_id, agent_id=agent.id,
+        requester_account_id=current.account.id,
+        query=query, limit=limit, exclude_requester=True,
+    )
+    return [AgentPersonResponse(
+        account_id=item.account_id,
+        handle=item.handle,
+        display_name=item.display_name,
+    ) for item in people]
+
+
+@router.put("/{agent_id}/members", response_model=AgentMembersResponse)
+async def replace_agent_members(
+    agent_id: str,
+    body: AgentMemberReplaceRequest,
+    if_match: str | None = Header(default=None, alias="If-Match"),
+    idempotency_key: str = Header(alias="Idempotency-Key"),
+    db: AsyncSession = Depends(get_db),
+    current: CurrentAccount = Depends(get_current_builder),
+):
+    await _get_owned_agent(db, agent_id, current)
+    expected_version = _if_match_revision(if_match)
+    desired_ids = set(body.account_ids)
+    record, replay = await _idempotency_record(
+        db, current=current, operation="replace_agent_members", key=idempotency_key,
+        request={
+            "agent_id": agent_id,
+            "expected_agent_version": expected_version,
+            "account_ids": sorted(desired_ids),
+        },
+    )
+    if replay and record.response_snapshot:
+        return AgentMembersResponse.model_validate(record.response_snapshot)
+
+    agent = await db.scalar(
+        select(AgentBlueprint).where(
+            AgentBlueprint.id == agent_id,
+            AgentBlueprint.tenant_id == current.tenant_id,
+        ).execution_options(populate_existing=True).with_for_update()
+    )
+    if agent is None:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    if agent.owner_account_id != current.account.id and "admin" not in current.roles:
+        raise HTTPException(status_code=403, detail="Access denied")
+    if agent.version != expected_version:
+        raise HTTPException(status_code=409, detail={
+            "code": "agent_version_conflict", "current_version": agent.version,
+        })
+    if agent.visibility != "private":
+        raise HTTPException(status_code=409, detail={
+            "code": "agent_members_not_applicable",
+            "message": "Enterprise Agents are already available to active Tenant members",
+        })
+    if agent.owner_account_id in desired_ids:
+        raise HTTPException(status_code=422, detail={
+            "code": "agent_owner_cannot_be_member",
+        })
+
+    valid_ids = set(await db.scalars(
+        select(PlatformAccount.id)
+        .join(TenantMembership, and_(
+            TenantMembership.account_id == PlatformAccount.id,
+            TenantMembership.tenant_id == PlatformAccount.tenant_id,
+            TenantMembership.status == "active",
+        ))
+        .where(
+            PlatformAccount.tenant_id == current.tenant_id,
+            PlatformAccount.status == "active",
+            PlatformAccount.id.in_(desired_ids),
+        )
+    )) if desired_ids else set()
+    if valid_ids != desired_ids:
+        raise HTTPException(status_code=422, detail={
+            "code": "invalid_agent_member_accounts",
+            "message": "Every member must be an active account in the current Tenant",
+        })
+
+    grants = {
+        item.account_id: item for item in await db.scalars(
+            select(AgentMember).where(
+                AgentMember.agent_id == agent.id,
+                AgentMember.tenant_id == agent.tenant_id,
+            ).with_for_update()
+        )
+    }
+    active_ids = {
+        account_id for account_id, grant in grants.items()
+        if grant.status == "active"
+    }
+    added_ids = sorted(desired_ids - active_ids)
+    removed_ids = sorted(active_ids - desired_ids)
+    now = utcnow()
+    for account_id in added_ids:
+        grant = grants.get(account_id)
+        if grant is None:
+            db.add(AgentMember(
+                id=uuid7(), tenant_id=agent.tenant_id, agent_id=agent.id,
+                account_id=account_id, status="active",
+                granted_by_account_id=current.account.id,
+                granted_at=now, revoked_at=None,
+            ))
+        else:
+            grant.status = "active"
+            grant.granted_by_account_id = current.account.id
+            grant.granted_at = now
+            grant.revoked_at = None
+            grant.version += 1
+    for account_id in removed_ids:
+        grant = grants[account_id]
+        grant.status = "revoked"
+        grant.revoked_at = now
+        grant.version += 1
+
+    if added_ids or removed_ids:
+        agent.version += 1
+        await db.flush()
+        await PlatformAuditWriter(db).append(
+            category="agent", action="agent.members_replaced",
+            actor_type="account", actor_id=current.account.id,
+            actor_user_id=current.account.user_id,
+            resource_type="agent", resource_id=agent.id,
+            resource_version=agent.version, outcome="succeeded",
+            summary="Private Agent member whitelist updated",
+            changes={
+                "added_account_ids": added_ids,
+                "removed_account_ids": removed_ids,
+                "active_member_count": len(desired_ids),
+            },
+            dedupe_key=f"audit:agent.members_replaced:{record.id}",
+        )
+    response = await _members_response(db, agent)
+    record.resource_type = "agent"
+    record.resource_id = agent.id
+    record.http_status = 200
+    record.response_snapshot = response.model_dump(mode="json")
+    await db.commit()
+    return response
 
 
 @router.get("/{agent_id}/draft", response_model=AgentDraftResponse)

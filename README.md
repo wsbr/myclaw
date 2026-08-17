@@ -67,6 +67,8 @@ flowchart TB
     API --> DB[("MySQL authority")]
     API --> REDIS[("Redis provisional stream")]
     DB --> OUTBOX["Transactional Outbox"]
+    DB --> SCHEDULER["Durable Scheduler leases / Fire ledger"]
+    SCHEDULER --> OUTBOX
     OUTBOX --> RUNTIME["Bounded Runtime Runner pool"]
     OUTBOX --> SANDBOX["Sandbox / Tool workers"]
     RUNTIME --> PROVIDERS["Reusable Provider connection pools"]

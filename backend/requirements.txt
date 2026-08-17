@@ -45,6 +45,7 @@ cryptography==44.0.0
 python-dotenv==1.0.1
 PyMySQL==1.1.1
 PyYAML==6.0.3
+croniter==6.2.4
 
 # OpenTelemetry (optional OTLP export is enabled by OTEL_* environment variables)
 opentelemetry-sdk==1.44.0

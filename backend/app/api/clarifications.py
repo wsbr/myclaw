@@ -5,10 +5,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.runs import _expected_version
-from app.api.sessions import _idempotency, _owned_session
+from app.api.sessions import _idempotency
 from app.database import get_db
 from app.deps import SessionActor, get_session_actor
 from app.models.common import uuid7
+from app.models.agent_v1 import AgentBlueprint
 from app.models.foundation import UserSession
 from app.models.runtime_v1 import Clarification, DurableRunner, Message, Run, WorkItem
 from app.persistence.reliable_writes import ExecutionEventWriter
@@ -16,6 +17,7 @@ from app.services.runtime_resume_service import (
     clarification_continuation, queue_work_item_resume,
 )
 from app.schemas.runtime_v1 import ClarificationAnswerRequest, ClarificationResponse
+from app.services.agent_access_service import has_agent_use_access
 
 router = APIRouter(tags=["clarifications"])
 
@@ -29,6 +31,8 @@ async def answer_clarification(
     db: AsyncSession = Depends(get_db),
     actor: SessionActor = Depends(get_session_actor),
 ):
+    if actor.account is None:
+        raise HTTPException(status_code=403, detail={"code": "identity_mapping_required"})
     answer = body.answer.strip()
     if not answer:
         raise HTTPException(status_code=422, detail={"code": "answer_required"})
@@ -42,9 +46,29 @@ async def answer_clarification(
     clarification = await db.scalar(select(Clarification).where(
         Clarification.id == clarification_id,
     ).with_for_update())
-    if clarification is None or clarification.target_user_id != actor.account.user_id:
+    if clarification is None or not (
+        clarification.target_account_id == actor.account.id
+        or (
+            clarification.target_account_id is None
+            and clarification.target_user_id == actor.account.user_id
+        )
+    ):
         raise HTTPException(status_code=404, detail="Clarification not found")
-    await _owned_session(db, clarification.session_id, actor)
+    source_session = await db.scalar(select(UserSession).where(
+        UserSession.id == clarification.session_id,
+    ).with_for_update())
+    if source_session is None or source_session.tenant_id != actor.account.tenant_id:
+        raise HTTPException(status_code=404, detail="Clarification not found")
+    source_agent = await db.scalar(select(AgentBlueprint).where(
+        AgentBlueprint.id == clarification.asked_by_agent_id,
+        AgentBlueprint.tenant_id == source_session.tenant_id,
+    ))
+    if source_agent is None or not await has_agent_use_access(
+        db, agent=source_agent, account_id=actor.account.id, roles=actor.roles,
+    ):
+        raise HTTPException(status_code=403, detail={
+            "code": "clarification_target_access_revoked",
+        })
     if clarification.version != _expected_version(if_match):
         raise HTTPException(status_code=409, detail={
             "code": "version_conflict", "current_version": clarification.version,
@@ -54,9 +78,6 @@ async def answer_clarification(
             "code": "action_already_resolved", "status": clarification.status,
         })
 
-    await db.scalar(select(UserSession).where(
-        UserSession.id == clarification.session_id,
-    ).with_for_update())
     run = await db.scalar(select(Run).where(
         Run.id == clarification.run_id,
     ).with_for_update())
@@ -83,7 +104,7 @@ async def answer_clarification(
         scope_type="group" if clarification.group_session_id else "chat",
         group_session_id=clarification.group_session_id,
         group_run_id=work.group_run_id,
-        sender_type="user", sender_user_id=run.user_id,
+        sender_type="user", sender_user_id=actor.account.user_id,
         recipient_type="group_membership" if clarification.group_membership_id else "session",
         recipient_membership_id=clarification.group_membership_id,
         role="user", content=answer, content_format="markdown", status="committed",
@@ -104,7 +125,8 @@ async def answer_clarification(
         group_session_id=clarification.group_session_id, group_run_id=work.group_run_id,
         event_type="message.created",
         event_dedupe_key=f"command:answer_clarification:{record.id}:message",
-        actor_type="user", actor_id=run.user_id, entity_type="message", entity_id=message.id,
+        actor_type="user", actor_id=actor.account.user_id,
+        entity_type="message", entity_id=message.id,
         visibility="user", summary="Clarification answer created",
         payload={"message_id": message.id, "clarification_id": clarification.id},
         correlation_id=run.id,
@@ -115,10 +137,14 @@ async def answer_clarification(
         group_session_id=clarification.group_session_id, group_run_id=work.group_run_id,
         event_type="clarification.answered",
         event_dedupe_key=f"command:answer_clarification:{record.id}:answer",
-        actor_type="user", actor_id=run.user_id, entity_type="clarification",
+        actor_type="user", actor_id=actor.account.user_id,
+        entity_type="clarification",
         entity_id=clarification.id, entity_version=clarification.version,
         visibility="user", summary="Clarification answered",
-        payload={"answer_message_id": message.id, "work_item_id": work.id},
+        payload={
+            "answer_message_id": message.id, "work_item_id": work.id,
+            "answered_by_account_id": actor.account.id,
+        },
         correlation_id=run.id, caused_by_event_id=message_event.id,
     )
     await queue_work_item_resume(

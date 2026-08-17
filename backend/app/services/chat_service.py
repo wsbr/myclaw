@@ -11,10 +11,13 @@ from app.models.agent_v1 import AgentAssemblyVersion, AgentBlueprint
 from app.models.common import utcnow, uuid7
 from app.models.foundation import UserSession
 from app.models.registry import SandboxProfile
-from app.models.runtime_v1 import DurableRunner, Message, Run, SessionSandbox, Workspace, WorkItem
+from app.models.runtime_v1 import (
+    DurableRunner, Message, MessageMention, Run, SessionSandbox, Workspace, WorkItem,
+)
 from app.persistence.reliable_writes import ExecutionEventWriter, OutboxWriter
 from app.persistence.runtime_graph import persist_new_work_runner
 from app.services.run_reliability_service import default_run_budget, deadline_from_budget
+from app.services.agent_access_service import has_agent_use_access
 
 
 class AgentUnavailable(RuntimeError):
@@ -30,9 +33,12 @@ async def create_user_session(
     entry_agent_id: str,
     origin_type: str = "web",
     origin_api_key_id: str | None = None,
+    origin_schedule_id: str | None = None,
     title: str | None = None,
     allow_unpublished: bool = False,
     agent_version_id: str | None = None,
+    actor_type: str = "user",
+    actor_id: str | None = None,
 ) -> UserSession:
     agent = await db.scalar(select(AgentBlueprint).where(
         AgentBlueprint.id == entry_agent_id,
@@ -43,12 +49,21 @@ async def create_user_session(
         and (agent.status != "published" or agent.current_published_version_id is None)
     ):
         raise AgentUnavailable("Agent is not available for new sessions")
+    if (
+        not allow_unpublished
+        and origin_api_key_id is None
+        and not await has_agent_use_access(
+            db, agent=agent, account_id=account_id,
+        )
+    ):
+        raise AgentUnavailable("Agent is not authorized for this account")
     session = UserSession(
         id=uuid7(), tenant_id=tenant_id,
         user_id=user_id, account_id=account_id,
         entry_agent_id=entry_agent_id,
         status="active", title=title, origin_type=origin_type,
-        origin_api_key_id=origin_api_key_id, next_event_sequence=1,
+        origin_api_key_id=origin_api_key_id,
+        origin_schedule_id=origin_schedule_id, next_event_sequence=1,
         permission_mode="direct", permission_revision=1,
         interaction_mode="chat", interaction_revision=1,
     )
@@ -57,7 +72,8 @@ async def create_user_session(
     created = await ExecutionEventWriter(db).append(
         session_id=session.id, event_type="session.created",
         event_dedupe_key=f"transition:user_session:{session.id}:0:1:create",
-        actor_type="user", actor_id=user_id, entity_type="user_session",
+        actor_type=actor_type, actor_id=actor_id or user_id,
+        entity_type="user_session",
         entity_id=session.id, entity_version=session.version, visibility="user",
         summary="Session created", payload={"origin_type": origin_type},
         correlation_id=session.id,
@@ -105,6 +121,12 @@ async def enqueue_chat_message(
     agent_version_id: str | None = None,
     execution_kind: str = "normal",
     mode: str | None = None,
+    sender_type: str = "user",
+    actor_type: str = "user",
+    actor_id: str | None = None,
+    authentication_source: str | None = None,
+    input_metadata: dict | None = None,
+    resolved_mentions: list[dict] | None = None,
 ) -> tuple[Message, Run, WorkItem, DurableRunner]:
     content = content.strip()
     if not content:
@@ -122,12 +144,37 @@ async def enqueue_chat_message(
     ))
     if agent is None:
         raise AgentUnavailable("Agent no longer exists")
+    if (
+        execution_kind in {"normal", "scheduled"}
+        and session.origin_api_key_id is None
+        and not await has_agent_use_access(
+            db, agent=agent, account_id=session.account_id,
+        )
+    ):
+        raise AgentUnavailable("Agent is not authorized for this account")
     if execution_kind == "normal":
         if agent.status != "published" or agent.current_published_version_id is None:
             raise AgentUnavailable("Agent is not available for new runs")
         agent_version_id = agent.current_published_version_id
+    elif execution_kind == "scheduled":
+        if agent.status != "published" or agent.current_published_version_id is None:
+            raise AgentUnavailable("Agent is not available for scheduled runs")
+        if agent_version_id is None:
+            raise ValueError("scheduled runs require a resolved Agent version")
+        selected_version = await db.get(AgentAssemblyVersion, agent_version_id)
+        if (
+            selected_version is None
+            or selected_version.agent_id != agent.id
+            or selected_version.publication_status != "published"
+        ):
+            raise AgentUnavailable("Scheduled Agent version is unavailable")
     elif agent_version_id is None:
         raise ValueError("draft test requires a fixed Agent version")
+
+    if sender_type not in {"user", "system"}:
+        raise ValueError("chat directive sender must be user or system")
+    if execution_kind == "scheduled" and sender_type != "system":
+        raise ValueError("scheduled directives must be platform-authored")
 
     resolved_mode = mode or (
         "plan" if session.permission_mode == "plan_readonly" else "chat"
@@ -137,7 +184,9 @@ async def enqueue_chat_message(
 
     message = Message(
         id=uuid7(), session_id=session.id, user_id=user_id, scope_type="chat",
-        sender_type="user", sender_user_id=user_id, recipient_type="session",
+        sender_type=sender_type,
+        sender_user_id=user_id if sender_type == "user" else None,
+        recipient_type="session",
         role="user", content=content, content_format="markdown", status="committed",
     )
     run_budget = default_run_budget(resolved_mode)
@@ -166,12 +215,17 @@ async def enqueue_chat_message(
             "session_id": session.id,
             "permission_revision": session.permission_revision,
             "authentication_source": (
-                "agent_api_key" if session.origin_type == "api" else "web_session"
+                authentication_source
+                or ("agent_api_key" if session.origin_type == "api" else "web_session")
             ),
             "entry_agent_id": agent.id, "current_agent_id": agent.id,
             "mode": resolved_mode, "delegation_chain": [],
         }, assembly_snapshot={"agent_version_id": agent_version_id},
-        prompt_manifest={}, input_snapshot={"message_id": message.id, "content": content},
+        prompt_manifest={}, input_snapshot={
+            "message_id": message.id, "content": content,
+            "resolved_user_mentions": list(resolved_mentions or []),
+            **dict(input_metadata or {}),
+        },
     )
     message.run_id = run.id
     message.work_item_id = work.id
@@ -186,20 +240,32 @@ async def enqueue_chat_message(
     run.root_work_item_id = work.id
     db.add(message)
     await db.flush()
+    for mention in resolved_mentions or []:
+        db.add(MessageMention(
+            id=uuid7(), message_id=message.id, tenant_id=session.tenant_id,
+            target_account_id=mention["account_id"],
+            display_name_snapshot=mention["display_name"],
+            handle_snapshot=mention["handle"],
+        ))
+    await db.flush()
 
     events = ExecutionEventWriter(db)
     message_event = await events.append(
         session_id=session.id, run_id=run.id, event_type="message.created",
         event_dedupe_key=f"command:create_{resolved_mode}_run:{idempotency_record_id}:message",
-        actor_type="user", actor_id=user_id, entity_type="message", entity_id=message.id,
-        visibility="user", summary="User message created", payload={"message_id": message.id},
+        actor_type=actor_type, actor_id=actor_id or user_id,
+        entity_type="message", entity_id=message.id,
+        visibility="user",
+        summary=("Scheduled instruction created" if sender_type == "system" else "User message created"),
+        payload={"message_id": message.id, "sender_type": sender_type},
         correlation_id=run.id,
     )
     message.caused_by_event_id = message_event.id
     await events.append(
         session_id=session.id, run_id=run.id, event_type="run.created",
         event_dedupe_key=f"command:create_{resolved_mode}_run:{idempotency_record_id}:run",
-        actor_type="user", actor_id=user_id, entity_type="run", entity_id=run.id,
+        actor_type=actor_type, actor_id=actor_id or user_id,
+        entity_type="run", entity_id=run.id,
         entity_version=run.version, visibility="user",
         summary=f"{resolved_mode.title()} run created",
         payload={"mode": resolved_mode}, correlation_id=run.id,

@@ -4,14 +4,15 @@ import hashlib
 import json
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.runs import _expected_version, _idempotency
 from app.database import get_db
 from app.deps import CurrentAccount, SessionActor, get_current_account, get_session_actor
 from app.models.common import utcnow, uuid7
-from app.models.foundation import UserSession
+from app.models.agent_v1 import AgentAssemblyVersion, AgentBlueprint
+from app.models.foundation import PlatformAccount, UserSession
 from app.models.runtime_v1 import (
     Approval, Clarification, DurableRunner, Run, SessionGrant,
     ToolConfirmation, ToolInvocation, WorkItem,
@@ -98,21 +99,53 @@ async def list_required_actions(
     items = []
     clarification_status = "open" if status == "pending" else status
     clarifications = list(await db.scalars(select(Clarification).where(
-        Clarification.target_user_id == current.account.user_id,
+        or_(
+            Clarification.target_account_id == current.account.id,
+            (
+                Clarification.target_account_id.is_(None)
+                & (Clarification.target_user_id == current.account.user_id)
+            ),
+        ),
         Clarification.status == clarification_status,
     ).order_by(Clarification.created_at, Clarification.id)))
-    items.extend({
-        "id": item.id, "type": "clarification",
-        "status": "pending" if item.status == "open" else item.status,
-        "session_id": item.session_id, "run_id": item.run_id,
-        "work_item_id": item.work_item_id, "version": item.version,
-        "created_at": item.created_at.isoformat(), "expires_at": None,
-        "presentation": {"title": "Agent needs your input", "summary": item.question},
-        "action": {"method": "POST", "href": f"/api/v1/clarifications/{item.id}/answer",
-                   "required_fields": ["answer"]},
-        "question": item.question, "asked_by_agent_id": item.asked_by_agent_id,
-        "group_session_id": item.group_session_id, "group_membership_id": item.group_membership_id,
-    } for item in clarifications)
+    for item in clarifications:
+        requester = (
+            await db.get(PlatformAccount, item.requester_account_id)
+            if item.requester_account_id else None
+        )
+        source_agent = await db.get(AgentBlueprint, item.asked_by_agent_id)
+        source_version = (
+            await db.get(AgentAssemblyVersion, source_agent.current_published_version_id)
+            if source_agent and source_agent.current_published_version_id else None
+        )
+        items.append({
+            "id": item.id, "type": "clarification",
+            "status": "pending" if item.status == "open" else item.status,
+            "session_id": item.session_id, "run_id": item.run_id,
+            "work_item_id": item.work_item_id, "version": item.version,
+            "created_at": item.created_at.isoformat(),
+            "expires_at": item.deadline_at.isoformat() if item.deadline_at else None,
+            "presentation": {
+                "title": "智能体需要你的补充信息",
+                "summary": item.question,
+            },
+            "action": {
+                "method": "POST",
+                "href": f"/api/v1/clarifications/{item.id}/answer",
+                "required_fields": ["answer"],
+            },
+            "question": item.question,
+            "context_summary": item.context_summary,
+            "asked_by_agent_id": item.asked_by_agent_id,
+            "asked_by_agent_name": source_version.name if source_version else None,
+            "requester_account_id": item.requester_account_id,
+            "requester_display_name": requester.display_name if requester else None,
+            "target_account_id": item.target_account_id,
+            "target_display_name": item.target_display_name_snapshot,
+            "source_session_owned": item.requester_account_id in {None, current.account.id},
+            "group_session_id": item.group_session_id,
+            "group_membership_id": item.group_membership_id,
+        })
     approvals = list(await db.scalars(select(Approval).where(
         Approval.target_account_id == current.account.id,
         Approval.status == status,

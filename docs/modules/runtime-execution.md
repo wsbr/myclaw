@@ -354,6 +354,8 @@ Delegation 与 Group 复用这条路径；Group 只额外校验 Membership、vis
 
 Clarification 用于缺失信息或用户判断，Approval 用于精确副作用、Plan 实施或成员加入等权限变化。二者都是持久等待对象，具有稳定 ID、请求者、作用域和版本。
 
+Clarification 可以面向源 Session owner，也可以面向 `find_agent_user` 或结构化 `@` mention 解析出的同 Tenant Agent 用户。目标账号通过签名 principal reference 传递；回答权限只来自 `target_account_id`，不要求也不产生源 Session 读取权限。跨用户答案作为原 `ask_user` Tool continuation 恢复源 WorkItem，源 Run/Runner 的执行账号始终不变。
+
 用户回答或批准后：
 
 1. 事务提交结果和 ExecutionEvent；
@@ -361,7 +363,7 @@ Clarification 用于缺失信息或用户判断，Approval 用于精确副作用
 3. 新 Context 明确包含问题、回答/决定和相关 Action；
 4. 旧 Runner 不恢复，迟到写入被拒绝。
 
-不能把 Tool Confirmation 当成通用业务审批，也不能把模型问句字符串解析成 Clarification。
+不能把 Tool Confirmation 当成通用业务审批，不能从显示名推导账号权限，也不能把模型问句字符串解析成 Clarification。
 
 ## Plan 与 Group 在 Runtime 中的实现
 

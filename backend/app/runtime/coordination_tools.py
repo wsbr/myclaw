@@ -25,6 +25,10 @@ from app.models.runtime_v1 import (
 from app.persistence.reliable_writes import ExecutionEventWriter
 from app.services.working_plan_service import WorkingPlanConflict, update_working_plan
 from app.services.agent_directory_service import agent_card_view, discover_agent_cards
+from app.services.agent_people_service import list_agent_people, resolve_agent_person
+from app.services.principal_ref_service import (
+    InvalidPrincipalRef, decode_account_ref, encode_account_ref,
+)
 from app.services.agent_invocation_service import (
     AgentInvocationRejected, dispatch_agent_invocation,
     persist_rejected_agent_invocation,
@@ -89,15 +93,41 @@ RUNTIME_COORDINATION_DEFINITIONS = ({
     },
     "source": "runtime",
 }, {
+    "name": "find_agent_user",
+    "description": (
+        "WHEN: the user identifies another Platform person by name or handle but no resolved "
+        "mention reference is available. Search only people this Agent may contact. WHEN NOT: "
+        "do not enumerate people without a concrete collaboration need and do not guess among "
+        "multiple matches. RETURNS: a small candidate list with opaque principal_ref values. "
+        "RECOVERY: ask the requesting user to choose when resolution is ambiguous."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "minLength": 1, "maxLength": 200},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5},
+        },
+        "required": ["query"],
+        "additionalProperties": False,
+    },
+    "source": "runtime",
+}, {
     "name": "ask_user",
     "description": (
-        "WHEN: one essential user decision is missing. WHEN NOT: do not ask for discoverable facts. "
-        "RETURNS: a durable clarification wait. RECOVERY: continue only after the user's committed answer."
+        "WHEN: one essential human answer is missing. Omit target_ref to ask the requesting "
+        "Session owner; to ask another Platform user, use only an opaque principal_ref from an "
+        "explicit resolved @mention or find_agent_user. WHEN NOT: do not ask for discoverable "
+        "facts, secrets, passwords, or credentials, and never guess among multiple people. "
+        "RETURNS: a durable clarification wait. RECOVERY: continue only after the target user's "
+        "committed answer."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
             "question": {"type": "string", "minLength": 1, "maxLength": 8000},
+            "target_ref": {"type": "string", "minLength": 1, "maxLength": 2000},
+            "reason": {"type": "string", "maxLength": 2000},
+            "context_summary": {"type": "string", "maxLength": 4000},
         },
         "required": ["question"],
         "additionalProperties": False,
@@ -332,6 +362,38 @@ async def dispatch_coordination_tool(
         return ToolResult(
             status="succeeded", summary=f"Working plan revision {view['revision']} saved",
             data={"working_plan": view},
+        ), False, None
+
+    if name == "find_agent_user":
+        if not context.account_id:
+            return ToolResult(
+                status="failed", summary="A Platform account is required for person search",
+                error_code="platform_account_required",
+                error="A Platform account is required for person search",
+                error_category="authorization",
+            ), False, None
+        people = await list_agent_people(
+            db, tenant_id=context.tenant_id, agent_id=context.agent_id,
+            requester_account_id=context.account_id,
+            query=str(arguments.get("query") or ""),
+            limit=int(arguments.get("limit") or 5), exclude_requester=True,
+        )
+        candidates = [{
+            "principal_ref": encode_account_ref(
+                tenant_id=context.tenant_id, agent_id=context.agent_id,
+                account_id=item.account_id,
+            ),
+            "display_name": item.display_name,
+            "handle": item.handle,
+        } for item in people]
+        resolution = "none" if not candidates else "unique" if len(candidates) == 1 else "ambiguous"
+        return ToolResult(
+            status="succeeded",
+            summary=f"Found {len(candidates)} contactable Platform user candidate(s)",
+            data={"candidates": candidates, "resolution": resolution},
+            content_blocks=[{"type": "json", "value": {
+                "candidates": candidates, "resolution": resolution,
+            }}],
         ), False, None
 
     if name == "discover_agents":
@@ -635,12 +697,49 @@ async def dispatch_coordination_tool(
             status="succeeded", summary="Waiting for user clarification",
             data={"clarification_id": existing.id, "status": "waiting_user"},
         ), existing.status == "open", "clarification" if existing.status == "open" else None
-    question = str(arguments["question"]).strip()
     owning_run = await db.get(Run, run_id)
+    if owning_run is None or not context.account_id:
+        return ToolResult(
+            status="failed", summary="Cross-user clarification authority is unavailable",
+            error_code="clarification_authority_unavailable",
+            error="Cross-user clarification authority is unavailable",
+            error_category="authorization",
+        ), False, None
+    target_ref = str(arguments.get("target_ref") or "").strip()
+    target_account_id = context.account_id
+    if target_ref:
+        try:
+            target_account_id = decode_account_ref(
+                target_ref, tenant_id=context.tenant_id, agent_id=context.agent_id,
+            )
+        except InvalidPrincipalRef as error:
+            return ToolResult(
+                status="failed", summary=str(error),
+                error_code="invalid_platform_user_reference", error=str(error),
+                error_category="authorization",
+            ), False, None
+    target = await resolve_agent_person(
+        db, tenant_id=context.tenant_id, agent_id=context.agent_id,
+        requester_account_id=context.account_id,
+        target_account_id=target_account_id,
+    )
+    if target is None:
+        return ToolResult(
+            status="failed", summary="The target user is not contactable by this Agent",
+            error_code="platform_user_not_contactable",
+            error="The target user is not contactable by this Agent",
+            error_category="authorization",
+        ), False, None
+    question = str(arguments["question"]).strip()
+    context_summary = str(arguments.get("context_summary") or "").strip() or None
     clarification = Clarification(
         id=uuid7(), work_item_id=work_item_id, run_id=run_id,
         session_id=context.session_id, asked_by_agent_id=context.agent_id,
-        target_user_id=context.user_id, question=question, status="open",
+        tenant_id=context.tenant_id, requester_account_id=context.account_id,
+        target_account_id=target.account_id, target_user_id=target.user_id,
+        target_display_name_snapshot=target.display_name,
+        target_handle_snapshot=target.handle,
+        question=question, context_summary=context_summary, status="open",
         idempotency_key=operation_key, source_turn_id=source_turn_id,
         provider_tool_call_id=provider_call_id,
         deadline_at=owning_run.deadline_at if owning_run else None,
@@ -648,7 +747,9 @@ async def dispatch_coordination_tool(
     message = Message(
         id=uuid7(), session_id=context.session_id, user_id=context.user_id,
         scope_type="chat", sender_type="agent", sender_agent_id=context.agent_id,
-        recipient_type="session", role="assistant", content=question,
+        recipient_type=(
+            "session" if target.account_id == context.account_id else "platform_account"
+        ), role="assistant", content=question,
         content_format="markdown", status="committed", run_id=run_id,
         work_item_id=work_item_id, clarification_id=clarification.id,
     )
@@ -661,8 +762,12 @@ async def dispatch_coordination_tool(
         event_dedupe_key=f"clarification:{clarification.id}:message",
         actor_type="agent", actor_id=context.agent_id,
         entity_type="message", entity_id=message.id, visibility="user",
-        summary="Agent asked for clarification",
-        payload={"message_id": message.id, "clarification_id": clarification.id},
+        summary=f"Agent asked {target.display_name} for clarification",
+        payload={
+            "message_id": message.id, "clarification_id": clarification.id,
+            "target_account_id": target.account_id,
+            "target_display_name": target.display_name,
+        },
         correlation_id=run_id,
     )
     message.caused_by_event_id = created.id
@@ -673,14 +778,20 @@ async def dispatch_coordination_tool(
         actor_type="agent", actor_id=context.agent_id,
         entity_type="clarification", entity_id=clarification.id,
         entity_version=clarification.version, visibility="user",
-        summary="User clarification required",
+        summary=f"Clarification requested from {target.display_name}",
         payload={
             "clarification_id": clarification.id,
             "work_item_id": work_item_id, "question": question,
+            "target_account_id": target.account_id,
+            "target_display_name": target.display_name,
+            "reason": str(arguments.get("reason") or "").strip() or None,
         },
         correlation_id=run_id, caused_by_event_id=created.id,
     )
     return ToolResult(
         status="succeeded", summary="Waiting for user clarification",
-        data={"clarification_id": clarification.id, "status": "waiting_user"},
+        data={
+            "clarification_id": clarification.id, "status": "waiting_user",
+            "target_display_name": target.display_name,
+        },
     ), True, "clarification"

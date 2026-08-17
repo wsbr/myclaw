@@ -30,6 +30,9 @@ x-app-environment: &app-environment
   RUNTIME_OUTBOX_CLAIM_LEASE_SECONDS: ${RUNTIME_OUTBOX_CLAIM_LEASE_SECONDS:-30}
   RUNTIME_RUNNER_LEASE_SECONDS: ${RUNTIME_RUNNER_LEASE_SECONDS:-30}
   RUNTIME_RUNNER_HEARTBEAT_SECONDS: ${RUNTIME_RUNNER_HEARTBEAT_SECONDS:-10}
+  SCHEDULER_POLL_SECONDS: ${SCHEDULER_POLL_SECONDS:-0.5}
+  SCHEDULER_WORKER_CONCURRENCY: ${SCHEDULER_WORKER_CONCURRENCY:-4}
+  SCHEDULER_CLAIM_LEASE_SECONDS: ${SCHEDULER_CLAIM_LEASE_SECONDS:-30}
   SANDBOX_WORKER_POLL_SECONDS: ${SANDBOX_WORKER_POLL_SECONDS:-0.5}
   SANDBOX_OUTBOX_CLAIM_LEASE_SECONDS: ${SANDBOX_OUTBOX_CLAIM_LEASE_SECONDS:-30}
   SANDBOX_ATTEMPT_STALE_SECONDS: ${SANDBOX_ATTEMPT_STALE_SECONDS:-60}
@@ -121,6 +124,17 @@ services:
     environment:
       <<: *app-environment
       OTEL_SERVICE_NAME: myclaw-uat-single-node-runtime-worker
+    depends_on:
+      api: {condition: service_healthy}
+
+  scheduler-worker:
+    <<: *backend-common
+    command: python -m app.workers.scheduler_worker
+    environment:
+      <<: *app-environment
+      DATABASE_POOL_SIZE: ${SCHEDULER_DATABASE_POOL_SIZE:-4}
+      DATABASE_MAX_OVERFLOW: ${SCHEDULER_DATABASE_MAX_OVERFLOW:-4}
+      OTEL_SERVICE_NAME: myclaw-uat-single-node-scheduler-worker
     depends_on:
       api: {condition: service_healthy}
 

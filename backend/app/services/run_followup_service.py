@@ -18,7 +18,10 @@ async def enqueue_run_terminal_followups(db, *, run, runner, completion_event) -
     )
     if runner is None:
         return
-    if run.mode == "chat" and run.status == "completed":
+    is_scheduled = (
+        (runner.principal_snapshot or {}).get("authentication_source") == "schedule"
+    )
+    if run.mode == "chat" and run.status == "completed" and not is_scheduled:
         await OutboxWriter(db).enqueue(
             topic="runtime.control",
             action="emerge_group_after_chat",
@@ -33,6 +36,10 @@ async def enqueue_run_terminal_followups(db, *, run, runner, completion_event) -
                 "completion_event_id": completion_event.id,
             },
         )
+    # Scheduled directives are platform-authored input, not normal user Chat.
+    # They neither trigger post-Chat Group emergence nor become user-memory evidence.
+    if is_scheduled:
+        return
     version = await db.get(AgentAssemblyVersion, runner.agent_version_id)
     policy = await db.get(
         PolicyDefinition, version.memory_write_policy_id,

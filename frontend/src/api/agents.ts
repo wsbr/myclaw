@@ -72,6 +72,28 @@ export interface AgentApiKey {
   secret?: string | null
 }
 
+export interface AgentMemberAccount {
+  account_id: string
+  user_id: string
+  email: string | null
+  display_name: string
+  selected: boolean
+  granted_at: string | null
+}
+
+export interface AgentMembers {
+  agent_id: string
+  agent_version: number
+  members: AgentMemberAccount[]
+  candidates: AgentMemberAccount[]
+}
+
+export interface AgentPerson {
+  account_id: string
+  handle: string
+  display_name: string
+}
+
 export interface AgentCard {
   agent_id: string
   agent_version_id: string
@@ -219,6 +241,17 @@ export const agentsApi = {
   listEvalRuns: (id: string) =>
     client.get<{ items: AgentEvalRun[] }>(`/agents/${id}/eval-runs`).then(r => r.data.items),
   listApiKeys: (id: string) => client.get<{ items: AgentApiKey[] }>(`/agents/${id}/api-keys`).then(r => r.data.items),
+  getMembers: (id: string) => client.get<AgentMembers>(`/agents/${id}/members`).then(r => r.data),
+  listPeople: (id: string, query = '', limit = 50) => client.get<AgentPerson[]>(
+    `/agents/${id}/people`, { params: { query, limit } },
+  ).then(r => r.data),
+  replaceMembers: (id: string, version: number, accountIds: string[]) =>
+    client.put<AgentMembers>(`/agents/${id}/members`, { account_ids: accountIds }, {
+      headers: {
+        'If-Match': `W/"${version}"`,
+        'Idempotency-Key': crypto.randomUUID(),
+      },
+    }).then(r => r.data),
   createApiKey: (id: string, values: { name: string; caller_label: string; expires_at?: string | null }) =>
     client.post<AgentApiKey>(`/agents/${id}/api-keys`, values, {
       headers: { 'Idempotency-Key': crypto.randomUUID() },

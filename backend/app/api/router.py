@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from app.api import accounts, agent_evals, agent_network, artifacts, audit, auth, agents, agent_options, clarifications, groups, identity, knowledge, memories, plan_mode, registries_v1, model_registry_v2, required_actions, runtime_console, skills, sessions, runs, admin, notifications, usage, working_plans
+from app.api import accounts, agent_evals, agent_network, artifacts, audit, auth, agents, agent_options, clarifications, groups, identity, knowledge, memories, plan_mode, registries_v1, model_registry_v2, required_actions, runtime_console, schedules, skills, sessions, runs, admin, notifications, usage, working_plans
 
 api_router = APIRouter(prefix="/api/v1")
 
@@ -19,6 +19,7 @@ api_router.include_router(agent_options.router)
 api_router.include_router(registries_v1.router)
 api_router.include_router(model_registry_v2.router)
 api_router.include_router(required_actions.router)
+api_router.include_router(schedules.router)
 api_router.include_router(clarifications.router)
 api_router.include_router(skills.router)
 api_router.include_router(sessions.router)

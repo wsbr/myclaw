@@ -82,10 +82,13 @@ API Key 创建响应只在 201 时返回一次明文 secret；后续只显示 pr
 
 - `GET /agents?status=&visibility=&owner=&cursor=`、`POST /agents`；
 - `GET /agents/{id}`、`GET/PATCH /agents/{id}/draft`；
+- `GET /agents/{id}/members`、`PUT /agents/{id}/members`：Owner/管理员读取候选 Tenant 成员，并以 Agent `If-Match` + `Idempotency-Key` 原子替换 private Agent 使用白名单；
 - `POST /agents/{id}/publish` body `{"expected_draft_revision":7}`；
 - `POST /agents/{id}/deactivate|reactivate`；
 - `GET /agents/{id}/versions`、`GET /agents/{id}/versions/{version_id}`；
 - `POST /agents/{id}/draft/test-runs`。
+
+成员白名单只授权 private Agent 的发现和运行，不开放上述管理接口。普通成员获得授权后，Agent 会出现在 `/agents` 和 Agent Network 中，可建立 Session 并对话；撤销后历史 Session/Message 仍可读，但新 Session、新消息、AgentInvocation/Group 选择和定时分派返回无权或不可用。enterprise Agent 已对 Tenant 有效成员开放，不接受单独白名单配置。
 
 Draft PATCH 可以选择逻辑 `skill_ids`；响应同时返回当前解析预览。Publish 响应必须返回不可变依赖：
 

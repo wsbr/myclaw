@@ -142,7 +142,7 @@ class UserSession(Base, TimestampMixin, VersionMixin):
     __tablename__ = "user_session"
     __table_args__ = (
         CheckConstraint("status IN ('active','closed','archived')", name="ck_user_session_status"),
-        CheckConstraint("origin_type IN ('web','api','channel')", name="ck_user_session_origin"),
+        CheckConstraint("origin_type IN ('web','api','channel','schedule')", name="ck_user_session_origin"),
         CheckConstraint(
             "interaction_mode IN ('chat','plan')",
             name="ck_user_session_interaction_mode",
@@ -172,6 +172,9 @@ class UserSession(Base, TimestampMixin, VersionMixin):
     origin_api_key_id: Mapped[str | None] = mapped_column(String(36))
     origin_channel_account_id: Mapped[str | None] = mapped_column(String(36))
     origin_external_conversation_id: Mapped[str | None] = mapped_column(String(500))
+    origin_schedule_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("agent_schedule.id")
+    )
     next_event_sequence: Mapped[int] = mapped_column(BigInteger, default=1, nullable=False)
     permission_mode: Mapped[str] = mapped_column(
         String(32), default="direct", nullable=False
