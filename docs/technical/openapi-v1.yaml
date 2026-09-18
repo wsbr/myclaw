@@ -1001,18 +1001,6 @@ paths:
       responses:
         '200': {description: Current account schedules., content: {application/json: {schema: {type: array, items: {$ref: '#/components/schemas/AgentSchedule'}}}}}
         default: {$ref: '#/components/responses/Error'}
-    post:
-      tags: [Schedules]
-      operationId: createAgentSchedule
-      security: [{webSession: []}, {enterpriseBearer: []}]
-      parameters: [{$ref: '#/components/parameters/IdempotencyKey'}]
-      requestBody:
-        required: true
-        content: {application/json: {schema: {$ref: '#/components/schemas/AgentScheduleCreate'}}}
-      responses:
-        '201': {description: Schedule created., content: {application/json: {schema: {$ref: '#/components/schemas/AgentSchedule'}}}}
-        default: {$ref: '#/components/responses/Error'}
-
   /schedules/{schedule_id}:
     parameters: [{$ref: '#/components/parameters/ScheduleId'}]
     get:
@@ -2204,64 +2192,57 @@ components:
     Visibility: {type: string, enum: [private, direct, group, user]}
     WorkItemStatus: {type: string, enum: [queued, running, waiting_user, waiting_approval, waiting_tool, waiting_agent, waiting_resource, succeeded, failed, cancelled, timed_out, blocked]}
     RunnerStatus: {type: string, enum: [queued, running, succeeded, failed, cancelled, lost]}
-    AgentScheduleCreate:
-      type: object
-      additionalProperties: false
-      required: [agent_id, name, prompt, schedule_type, timezone]
-      properties:
-        agent_id: {$ref: '#/components/schemas/Uuid'}
-        name: {type: string, minLength: 1, maxLength: 200}
-        prompt: {type: string, minLength: 1, maxLength: 16000}
-        schedule_type: {type: string, enum: [once, cron, interval]}
-        run_at: {type: [string, 'null'], format: date-time}
-        cron_expression: {type: [string, 'null'], maxLength: 191}
-        interval_seconds: {type: [integer, 'null'], minimum: 60, maximum: 31536000}
-        timezone: {type: string, minLength: 1, maxLength: 100, description: IANA timezone name.}
-        end_at: {type: [string, 'null'], format: date-time}
-        version_policy: {type: string, enum: [latest_published, pinned], default: latest_published}
-        pinned_agent_version_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
-        overlap_policy: {type: string, enum: [skip, queue_one, allow], default: skip}
-        misfire_policy: {type: string, enum: [skip, fire_once], default: fire_once}
-        misfire_grace_seconds: {type: integer, minimum: 0, maximum: 86400, default: 300}
     AgentSchedulePatch:
       type: object
       additionalProperties: false
       minProperties: 1
       properties:
-        name: {type: string, minLength: 1, maxLength: 200}
-        prompt: {type: string, minLength: 1, maxLength: 16000}
         schedule_type: {type: string, enum: [once, cron, interval]}
         run_at: {type: [string, 'null'], format: date-time}
         cron_expression: {type: [string, 'null'], maxLength: 191}
         interval_seconds: {type: [integer, 'null'], minimum: 60, maximum: 31536000}
         timezone: {type: string, minLength: 1, maxLength: 100}
         end_at: {type: [string, 'null'], format: date-time}
-        version_policy: {type: string, enum: [latest_published, pinned]}
-        pinned_agent_version_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        max_occurrences: {type: [integer, 'null'], minimum: 1}
         overlap_policy: {type: string, enum: [skip, queue_one, allow]}
         misfire_policy: {type: string, enum: [skip, fire_once]}
         misfire_grace_seconds: {type: integer, minimum: 0, maximum: 86400}
     AgentSchedule:
-      allOf:
-        - {$ref: '#/components/schemas/AgentScheduleCreate'}
-        - type: object
-          required: [id, agent_name, status, total_fire_count, version, created_at, updated_at]
-          properties:
-            id: {$ref: '#/components/schemas/Uuid'}
-            agent_name: {type: string}
-            context_mode: {type: string, enum: [new_session, continue_session]}
-            source_session_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
-            next_fire_at: {type: [string, 'null'], format: date-time}
-            next_fire_local: {type: [string, 'null']}
-            status: {type: string, enum: [active, paused, completed, disabled]}
-            total_fire_count: {type: integer, format: int64, minimum: 0}
-            last_scheduled_for: {type: [string, 'null'], format: date-time}
-            last_fired_at: {type: [string, 'null'], format: date-time}
-            last_error_code: {type: [string, 'null']}
-            last_error_detail: {type: [string, 'null']}
-            version: {type: integer, format: int64, minimum: 1}
-            created_at: {$ref: '#/components/schemas/Timestamp'}
-            updated_at: {$ref: '#/components/schemas/Timestamp'}
+      type: object
+      required: [id, agent_id, agent_name, name, prompt, context_mode, schedule_type, timezone, status, occurrence_count, total_fire_count, version, created_at, updated_at]
+      properties:
+        id: {$ref: '#/components/schemas/Uuid'}
+        definition_tool_invocation_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        agent_id: {$ref: '#/components/schemas/Uuid'}
+        agent_name: {type: string}
+        name: {type: string}
+        prompt: {type: string}
+        context_mode: {type: string, enum: [new_session, continue_session]}
+        source_session_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        schedule_type: {type: string, enum: [once, cron, interval]}
+        run_at: {type: [string, 'null'], format: date-time}
+        cron_expression: {type: [string, 'null']}
+        interval_seconds: {type: [integer, 'null']}
+        timezone: {type: string}
+        next_fire_at: {type: [string, 'null'], format: date-time}
+        next_fire_local: {type: [string, 'null']}
+        end_at: {type: [string, 'null'], format: date-time}
+        version_policy: {type: string, enum: [latest_published, pinned]}
+        pinned_agent_version_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        overlap_policy: {type: string, enum: [skip, queue_one, allow]}
+        misfire_policy: {type: string, enum: [skip, fire_once]}
+        misfire_grace_seconds: {type: integer}
+        status: {type: string, enum: [active, paused, completed, disabled]}
+        max_occurrences: {type: [integer, 'null'], minimum: 1}
+        occurrence_count: {type: integer, format: int64, minimum: 0}
+        total_fire_count: {type: integer, format: int64, minimum: 0}
+        last_scheduled_for: {type: [string, 'null'], format: date-time}
+        last_fired_at: {type: [string, 'null'], format: date-time}
+        last_error_code: {type: [string, 'null']}
+        last_error_detail: {type: [string, 'null']}
+        version: {type: integer, format: int64, minimum: 1}
+        created_at: {$ref: '#/components/schemas/Timestamp'}
+        updated_at: {$ref: '#/components/schemas/Timestamp'}
     AgentScheduleFire:
       type: object
       required: [id, schedule_id, schedule_name, agent_id, agent_name, trigger_kind, context_mode, scheduled_for, scheduled_for_local, status, created_at, updated_at]
@@ -2272,6 +2253,9 @@ components:
         agent_id: {$ref: '#/components/schemas/Uuid'}
         agent_name: {type: string}
         trigger_kind: {type: string, enum: [scheduled, manual]}
+        definition_tool_invocation_id: {oneOf: [{$ref: '#/components/schemas/Uuid'}, {type: 'null'}]}
+        definition_hash: {type: [string, 'null']}
+        occurrence_no: {type: [integer, 'null'], minimum: 1}
         context_mode: {type: string, enum: [new_session, continue_session]}
         scheduled_for: {$ref: '#/components/schemas/Timestamp'}
         scheduled_for_local: {type: string}

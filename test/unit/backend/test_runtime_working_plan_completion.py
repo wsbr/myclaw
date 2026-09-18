@@ -120,7 +120,10 @@ async def test_unfinished_plan_queues_replacement_and_only_completed_revision_pu
             )
         ]
         assert len(notices) == 1
-        assert "second" in notices[0]["content"]
+        # User/Agent-authored plan text stays in the separately assembled
+        # WorkingPlan data; the platform notice carries only trusted rules.
+        assert "second" not in notices[0]["content"]
+        assert "WorkingPlan data" in notices[0]["content"]
         assert command.status == "pending"
         replacement_id = replacement.id
 

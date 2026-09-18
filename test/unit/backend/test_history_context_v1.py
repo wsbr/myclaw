@@ -147,6 +147,10 @@ async def test_group_history_is_membership_scoped_and_summary_is_namespaced():
             "policy_version_id": policy_version.id,
             "model_id": model_id,
             "model_version_id": "summary-model-version",
+            "source_contract": "rolling_prefix_v1",
+            "source_message_count": 2,
+            "covered_message_count": 2,
+            "parent_summary": None,
         }
     await engine.dispose()
 

@@ -1,11 +1,14 @@
 """Provider stop reasons are enforced before any partial output is published."""
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.core.model_hub.base import BaseLLM, LLMChunk, LLMResponse, TokenUsage, ToolCall
 from app.core.tool_registry.base import RuntimeContext
 from app.database import Base
+from app.models.foundation import UserSession
+from app.models.runtime_v1 import AgentTurn
 from app.runtime.action_dispatcher import ActionDispatcher
 from app.runtime.agent_loop_coordinator import (
     AgentLoopCoordinator, AgentLoopError, LoopIdentity,
@@ -60,6 +63,33 @@ class _TransactionProbeProvider(_StoppedProvider):
         self.transaction_states.append(("stream", self.db.in_transaction()))
         async for chunk in super().stream(messages, tools, params):
             yield chunk
+
+
+class _RepeatedInvalidTypedToolProvider(BaseLLM):
+    def __init__(self) -> None:
+        self.calls = 0
+        self.messages = []
+
+    async def chat(self, messages, tools, params):
+        raise NotImplementedError
+
+    async def stream(self, messages, tools, params):
+        self.calls += 1
+        self.messages.append(messages)
+        yield LLMChunk(
+            type="tool_call_delta", item_index=0,
+            tool_call=ToolCall(
+                id=f"invalid-{self.calls}", name="typed_tool",
+                arguments={"count": "10"},
+            ),
+        )
+        yield LLMChunk(
+            type="done", stop_reason="tool_calls", model="test",
+            usage=TokenUsage(input_tokens=7, output_tokens=3),
+        )
+
+    async def count_tokens(self, messages, tools=None, params=None):
+        return 1
 
 
 def _context() -> ContextPackage:
@@ -220,4 +250,90 @@ async def test_provider_io_never_runs_inside_agent_loop_database_transaction():
 
     assert result.status == "completed"
     assert provider.transaction_states == [("count", False), ("stream", False)]
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_schema_repair_exhaustion_is_typed_and_feedback_is_actionable():
+    provider = _RepeatedInvalidTypedToolProvider()
+    definition = {
+        "name": "typed_tool",
+        "description": "Accept an integer count.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"count": {"type": "integer"}},
+            "required": ["count"],
+            "additionalProperties": False,
+        },
+        "output_schema": {}, "side_effect": "none",
+        "confirmation_policy": "never", "execution_mode": "inline",
+    }
+    coordinator = AgentLoopCoordinator(
+        ModelAdapter(provider), ActionDispatcher([definition]),
+        max_schema_repairs=1,
+    )
+
+    with pytest.raises(AgentLoopError) as raised:
+        await coordinator.run(
+            context=_context(), tool_definitions=[definition],
+            capability_snapshot={
+                "id": "snapshot", "effective_tool_keys": ["typed_tool"],
+            },
+            runtime_context=_runtime_context(), model_parameters={},
+        )
+
+    assert raised.value.code == "tool_schema_repair_exhausted"
+    assert provider.calls == 2
+    repair_payload = provider.messages[1][-1]["content"]
+    assert "Do not repeat the unchanged arguments" in repair_payload
+    assert "use 10 rather than \\\"10\\\"" in repair_payload
+
+
+@pytest.mark.asyncio
+async def test_persisted_schema_exhaustion_writes_terminal_turn_once():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    async with factory.begin() as db:
+        db.add(UserSession(
+            id="session", tenant_id="test-tenant", account_id="account-1",
+            user_id="user", entry_agent_id="agent", status="active",
+            origin_type="web", permission_mode="direct", permission_revision=1,
+        ))
+    provider = _RepeatedInvalidTypedToolProvider()
+    definition = {
+        "name": "typed_tool", "description": "Accept an integer count.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"count": {"type": "integer"}},
+            "required": ["count"], "additionalProperties": False,
+        },
+        "output_schema": {}, "side_effect": "none",
+        "confirmation_policy": "never", "execution_mode": "inline",
+    }
+    coordinator = AgentLoopCoordinator(
+        ModelAdapter(provider), ActionDispatcher([definition]),
+        max_schema_repairs=1,
+    )
+
+    async with factory() as db:
+        with pytest.raises(AgentLoopError) as raised:
+            await coordinator.run(
+                context=_context(), tool_definitions=[definition],
+                capability_snapshot={
+                    "id": "snapshot", "effective_tool_keys": ["typed_tool"],
+                },
+                runtime_context=_runtime_context(), model_parameters={}, db=db,
+                identity=LoopIdentity(
+                    runner_id="runner", work_item_id="work", run_id="run",
+                    agent_version_id="agent-version",
+                    model_version_id="model-version", provider="test",
+                ),
+            )
+        turns = list(await db.scalars(select(AgentTurn).order_by(AgentTurn.turn_no)))
+
+    assert raised.value.code == "tool_schema_repair_exhausted"
+    assert [turn.status for turn in turns] == ["completed", "failed"]
+    assert turns[-1].error_code == "tool_schema_repair_exhausted"
     await engine.dispose()

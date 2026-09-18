@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -14,27 +14,29 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.tool_registry.base import RuntimeContext
 from app.models.common import utcnow, uuid7
 from app.models.runtime_v1 import (
-    AgentTurn, CapabilitySnapshot, DurableRunner, ProviderAttempt, RunnerCheckpoint,
+    AgentTurn, CapabilitySnapshot, DurableRunner, RunnerCheckpoint,
 )
 from app.runtime.action_dispatcher import ActionDispatcher, DispatchResult
-from app.runtime.context_assembler import ContextPackage
+from app.runtime.context_assembler import ContextPackage, request_manifest
 from app.runtime.model_adapter import ModelAdapter
 from app.runtime.protocol import (
     AssistantMessageItem,
     NormalizedTurnResult,
-    ProviderAttemptEvent,
     ProviderError,
     ProviderRequest,
     StreamEvent,
     StopReason,
 )
-from app.runtime.token_counting import count_provider_request
-from app.runtime.web_result_projection import project_web_messages
+from app.runtime.context_budget import fit_context_budget
+from app.runtime.hard_compaction import HardCompactionError
+from app.runtime.compaction_recorder import (
+    bind_compaction_scope, compaction_invoker, validate_compaction_owner,
+)
 from app.services.run_reliability_service import (
     BudgetExceeded, assert_post_provider_budget, assert_turn_budget,
     record_progress,
 )
-from app.services.usage_ledger_service import record_provider_attempt_usage
+from app.runtime.provider_attempt_recorder import TurnRecorder as _TurnRecorder
 
 
 class AgentLoopError(RuntimeError):
@@ -52,6 +54,7 @@ class LoopIdentity:
     model_version_id: str
     provider: str
     execution_epoch: int = 1
+    lease_token: str | None = None
 
 
 @dataclass(frozen=True)
@@ -62,74 +65,12 @@ class AgentLoopResult:
     dispatches: tuple[DispatchResult, ...]
     messages: tuple[dict[str, Any], ...]
     final_stream_id: str | None = None
+    continuation_messages: tuple[dict[str, Any], ...] | None = None
+    loaded_tool_version_ids: tuple[str, ...] = ()
+    hard_compactions: tuple[dict, ...] = ()
 
 
 TurnStreamObserver = Callable[[str, StreamEvent], Awaitable[None] | None]
-
-
-class _TurnRecorder:
-    def __init__(
-        self, db: AsyncSession, turn: AgentTurn, identity: LoopIdentity,
-        *, usage_ledger_enabled: bool,
-    ) -> None:
-        self.db = db
-        self.turn = turn
-        self.identity = identity
-        self.usage_ledger_enabled = usage_ledger_enabled
-        self.attempts: dict[int, ProviderAttempt] = {}
-
-    async def observe(self, event: ProviderAttemptEvent) -> None:
-        if event.phase == "started":
-            attempt = ProviderAttempt(
-                id=uuid7(), agent_turn_id=self.turn.id,
-                model_version_id=self.identity.model_version_id,
-                attempt_no=event.attempt_no, provider=self.identity.provider,
-                status="running", request_hash=event.request_hash,
-                received_payload=False, tool_call_observed=False,
-                side_effect_committed=False, usage={}, started_at=utcnow(),
-            )
-            self.attempts[event.attempt_no] = attempt
-            self.db.add(attempt)
-            # Provider I/O must never inherit this transaction. Persist the
-            # attempt start as a short fact transaction, then release the
-            # connection before the SDK begins waiting for response bytes.
-            await self.db.commit()
-            return
-        attempt = self.attempts[event.attempt_no]
-        if event.phase == "payload":
-            attempt.received_payload = True
-            if attempt.first_payload_at is None:
-                attempt.first_payload_at = utcnow()
-            await self.db.commit()
-            return
-        attempt.received_payload = event.received_payload
-        attempt.ended_at = utcnow()
-        if event.phase == "succeeded" and event.result is not None:
-            attempt.status = "succeeded"
-            attempt.tool_call_observed = bool(event.result.tool_calls)
-            attempt.stop_reason = event.result.stop_reason.value
-            attempt.usage = event.result.usage.as_dict()
-            attempt.provider_request_id = event.result.provider_request_id
-            attempt.provider_state_ref = event.result.provider_state_ref
-        else:
-            error = event.error
-            # Any provider payload makes transparent replay unsafe. Preserve
-            # that uncertainty instead of disguising it as a clean transport
-            # failure.
-            attempt.status = "outcome_unknown" if event.received_payload else "failed"
-            attempt.error_code = getattr(error, "code", type(error).__name__)
-            attempt.error_detail = str(error)
-        if self.usage_ledger_enabled:
-            await record_provider_attempt_usage(
-                self.db,
-                attempt=attempt,
-                turn=self.turn,
-                runner_id=self.identity.runner_id,
-                work_item_id=self.identity.work_item_id,
-                run_id=self.identity.run_id,
-                agent_version_id=self.identity.agent_version_id,
-            )
-        await self.db.commit()
 
 
 class AgentLoopCoordinator:
@@ -162,7 +103,17 @@ class AgentLoopCoordinator:
         db: AsyncSession | None = None,
         identity: LoopIdentity | None = None,
     ) -> AgentLoopResult:
-        messages = [dict(item) for item in context.messages]
+        messages = [dict(item) for item in (context.source_messages or context.messages)]
+        source_manifest = request_manifest(messages, context.source_manifest or context.manifest)
+        message_manifest = list(source_manifest)
+        omitted_sections = list((context.compaction or {}).get("omitted_sections") or [])
+        request_compaction = dict(context.compaction or {})
+        invoke_summary = compaction_invoker(
+            provider=self.adapter.provider, db=db, identity=identity,
+            capability_id=(capability_snapshot.id if isinstance(capability_snapshot, CapabilitySnapshot)
+                           else capability_snapshot["id"]),
+            reliability_enabled=self.reliability_enabled,
+        ) if db is not None and identity is not None else None
         presented_definitions = [dict(item) for item in tool_definitions]
         loaded_tool_version_ids = {
             item.get("tool_version_id") for item in presented_definitions
@@ -174,6 +125,7 @@ class AgentLoopCoordinator:
         turns: list[NormalizedTurnResult] = []
         dispatches: list[DispatchResult] = []
         schema_repairs = 0
+        context_recovery_attempted = False
         for turn_index in range(1, self.max_turns + 1):
             persisted_turn = None
             recorder = None
@@ -197,46 +149,79 @@ class AgentLoopCoordinator:
                         provider_remaining,
                     )
             request_count = None
+            turn_web_projection = []
+            turn_tool_projection = []
+            turn_count_calls = 0
+            source_manifest = request_manifest(messages, source_manifest)
+            message_manifest = list(source_manifest)
+            request_messages = messages
             history_before_count = history_count
             if db is not None and db.in_transaction():
-                # Anthropic token counting can itself be a Provider request.
-                # Commit prior Tool/Turn facts before any remote count call.
+                # Token counting may call the Provider. Release the transaction.
                 await db.commit()
             if context.hard_input_limit is not None:
-                messages, turn_web_projection = project_web_messages(
-                    messages, hard_input_limit=context.hard_input_limit,
-                )
                 provider_type = (
                     identity.provider if identity is not None
                     else type(self.adapter.provider).__name__.removesuffix("LLM").lower()
                 )
-                request_count = await count_provider_request(
-                    self.adapter.provider, provider_type=provider_type,
-                    messages=messages, tools=presented_definitions,
-                    parameters=model_parameters,
-                )
-                while (
-                    context.soft_input_target is not None
-                    and request_count.tokens > context.soft_input_target
-                    and history_count > 0
-                ):
-                    messages.pop(history_start)
-                    history_count -= 1
-                    request_count = await count_provider_request(
-                        self.adapter.provider, provider_type=provider_type,
-                        messages=messages, tools=presented_definitions,
-                        parameters=model_parameters,
+                try:
+                    budgeted = await fit_context_budget(
+                        replace(context, messages=tuple(messages), manifest=tuple(source_manifest),
+                                source_messages=None, source_manifest=None,
+                                history_count=history_count, compaction=request_compaction or None),
+                        provider=self.adapter.provider, provider_type=provider_type,
+                        tools=presented_definitions, parameters=model_parameters,
+                        invoke_summary=invoke_summary,
                     )
+                except HardCompactionError as error:
+                    raise AgentLoopError(str(error), code=error.code) from error
+                request_count = budgeted.count
+                turn_count_calls = budgeted.count_calls
+                view = bind_compaction_scope(budgeted.context, identity)
+                request_messages = list(view.messages)
+                messages = list(view.source_messages)
+                source_manifest = list(view.source_manifest)
+                message_manifest = list(view.manifest)
+                history_count = view.history_count
+                continuation_start -= history_before_count - history_count
+                request_compaction = dict(view.compaction or {})
+                omitted_sections = list(request_compaction.get("omitted_sections") or [])
+                turn_web_projection = budgeted.web_projection
+                turn_tool_projection = budgeted.tool_projection
                 if request_count.tokens > context.hard_input_limit:
                     raise AgentLoopError(
-                        "The immutable request exceeds the model Context Window",
+                        "Protected request content exceeds the model Context Window after budget reductions",
                         code="context_window_exceeded",
                     )
             if turn_index == 1:
                 continuation_start = len(messages)
             if db is not None:
+                if self.reliability_enabled and request_compaction.get("hard_compactions"):
+                    try:
+                        budget_state = await assert_turn_budget(db, identity.run_id)
+                    except BudgetExceeded as error:
+                        raise AgentLoopError(str(error), code=error.code) from error
+                    self.adapter.max_zero_payload_retries = min(
+                        self._configured_transport_retries,
+                        budget_state.remaining_transport_retries,
+                        max(0, int(budget_state.limits["max_provider_attempts"])
+                            - int(budget_state.usage["provider_attempts"]) - 1),
+                    )
+                active_runner = await db.get(DurableRunner, identity.runner_id)
+                if active_runner is not None:
+                    if request_compaction.get("hard_compactions") and self.reliability_enabled:
+                        await validate_compaction_owner(db, identity, lock=True)
+                    active_runner.input_snapshot = {
+                        **dict(active_runner.input_snapshot or {}),
+                        "hard_compactions": list(request_compaction.get("hard_compactions") or []),
+                    }
+                    active_runner.prompt_manifest = {
+                        **dict(active_runner.prompt_manifest or {}),
+                        "sections": list(message_manifest),
+                        "omitted_sections": list(omitted_sections),
+                        "compaction": request_compaction or None,
+                    }
                 if request_count is not None:
-                    active_runner = await db.get(DurableRunner, identity.runner_id)
                     if active_runner is not None:
                         prompt_manifest = dict(active_runner.prompt_manifest or {})
                         prompt_manifest.update({
@@ -245,14 +230,15 @@ class AgentLoopCoordinator:
                             "soft_input_target": context.soft_input_target,
                             "hard_input_limit": context.hard_input_limit,
                             "pre_call_count": request_count.tokens,
+                            "count_calls": turn_count_calls,
                             "compaction_reason": (
-                                "provider_count_above_soft_target"
-                                if history_count < history_before_count
-                                else prompt_manifest.get("compaction_reason")
+                                request_compaction.get("reason")
+                                or prompt_manifest.get("compaction_reason")
                             ),
                             **({
                                 "web_projection_latest": turn_web_projection,
-                            } if turn_web_projection else {}),
+                                "tool_projection_latest": turn_tool_projection,
+                            } if turn_web_projection or turn_tool_projection else {}),
                         })
                         active_runner.prompt_manifest = prompt_manifest
                 previous = await db.scalar(select(func.max(AgentTurn.turn_no)).where(
@@ -277,11 +263,14 @@ class AgentLoopCoordinator:
                         for item in presented_definitions
                     ], ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
                     context_manifest=[
-                        *list(context.manifest),
+                        *list(message_manifest),
+                        *([{"source": "context_omissions", "sections": list(omitted_sections)}]
+                          if omitted_sections else []),
                         *([{
                             "source": "request_token_count",
                             "count_method": request_count.method,
                             "pre_call_count": request_count.tokens,
+                            "count_calls": turn_count_calls,
                             "soft_input_target": context.soft_input_target,
                             "hard_input_limit": context.hard_input_limit,
                             "degraded": request_count.degraded,
@@ -292,7 +281,7 @@ class AgentLoopCoordinator:
                         }] if request_count is not None else []),
                     ],
                     input_hash=hashlib.sha256(json.dumps(
-                        messages, ensure_ascii=False, sort_keys=True, default=str
+                        request_messages, ensure_ascii=False, sort_keys=True, default=str
                     ).encode()).hexdigest(),
                     turn_items=[], usage={}, started_at=utcnow(),
                 )
@@ -314,7 +303,7 @@ class AgentLoopCoordinator:
 
                 result = await self.adapter.invoke(
                     ProviderRequest(
-                        messages=tuple(messages), tools=tuple(presented_definitions),
+                        messages=tuple(request_messages), tools=tuple(presented_definitions),
                         parameters=model_parameters,
                     ),
                     attempt_observer=recorder.observe if recorder else None,
@@ -340,6 +329,32 @@ class AgentLoopCoordinator:
                             reason_code="provider_error",
                         )
                     await db.flush()
+                # A provider can reject a request despite a local token count.
+                # Retry once before payload, after a validated semantic reduction.
+                # Summary failure never replays committed Tool actions.
+                if (
+                    error.code == "provider_context_length"
+                    and not error.received_payload
+                    and not context_recovery_attempted
+                    and turn_index < self.max_turns
+                    and context.hard_input_limit is not None
+                ):
+                    context_recovery_attempted = True
+                    if db is not None and db.in_transaction():
+                        await db.commit()
+                    try:
+                        recovery = await fit_context_budget(
+                            replace(context, messages=tuple(messages), manifest=tuple(source_manifest),
+                                    source_messages=None, source_manifest=None,
+                                    history_count=history_count, compaction=request_compaction or None),
+                            provider=self.adapter.provider, provider_type=provider_type,
+                            tools=presented_definitions, parameters=model_parameters,
+                            invoke_summary=invoke_summary, force_compaction=True,
+                        )
+                    except HardCompactionError as compact_error:
+                        raise AgentLoopError(str(compact_error), code=compact_error.code) from compact_error
+                    request_compaction = dict(bind_compaction_scope(recovery.context, identity).compaction or {})
+                    continue
                 raise AgentLoopError(
                     f"Provider call failed: {error.code}", code=error.code,
                 ) from error
@@ -437,6 +452,7 @@ class AgentLoopCoordinator:
                         "input": call.arguments,
                     } for call in tool_calls],
                 })
+                source_manifest = request_manifest(messages, source_manifest)
                 waiting = False
                 turn_schema_repairs = 0
                 turn_dispatches: list[DispatchResult] = []
@@ -487,14 +503,28 @@ class AgentLoopCoordinator:
                             wait_reason=dispatched.wait_reason,
                         )
                     if not dispatched.durable_wait:
-                        messages.append(provider_dispatch.provider_message())
+                        messages.append(provider_dispatch.provider_message(project=False))
+                        source_manifest.append({
+                            "source": "continuation", "visibility": "private",
+                            "tool_call_id": call.call_id,
+                            "tool_invocation_id": dispatched.invocation_id,
+                        })
                     waiting = waiting or dispatched.durable_wait
                     if dispatched.schema_error:
                         schema_repairs += 1
                         turn_schema_repairs += 1
+                repair_exhausted = schema_repairs > self.max_schema_repairs
                 if persisted_turn is not None:
                     persisted_turn.schema_repair_count = turn_schema_repairs
-                    persisted_turn.status = "waiting_actions" if waiting else "completed"
+                    persisted_turn.status = (
+                        "failed" if repair_exhausted
+                        else "waiting_actions" if waiting
+                        else "completed"
+                    )
+                    persisted_turn.error_code = (
+                        "tool_schema_repair_exhausted"
+                        if repair_exhausted else None
+                    )
                     persisted_turn.ended_at = utcnow()
                     progress = None
                     if self.reliability_enabled:
@@ -525,22 +555,36 @@ class AgentLoopCoordinator:
                                 ],
                             },
                             reason_code=(
-                                "authoritative_action"
-                                if any(
-                                    item.invocation_id is not None
-                                    or (item.result.success and not item.schema_error)
-                                    for item in turn_dispatches
-                                ) else "no_authoritative_change"
+                                "tool_schema_repair_exhausted"
+                                if repair_exhausted
+                                else (
+                                    "authoritative_action"
+                                    if any(
+                                        item.invocation_id is not None
+                                        or (
+                                            item.result.success
+                                            and not item.schema_error
+                                        )
+                                        for item in turn_dispatches
+                                    )
+                                    else "no_authoritative_change"
+                                )
                             ),
                         )
                     await db.flush()
-                if schema_repairs > self.max_schema_repairs:
-                    raise AgentLoopError("Tool schema repair budget exhausted")
+                if repair_exhausted:
+                    raise AgentLoopError(
+                        "Tool schema repair budget exhausted",
+                        code="tool_schema_repair_exhausted",
+                    )
                 if waiting:
                     return AgentLoopResult(
                         status="waiting_actions", final_message=None,
                         turns=tuple(turns), dispatches=tuple(dispatches),
                         messages=tuple(messages), final_stream_id=None,
+                        continuation_messages=tuple(messages[continuation_start:]),
+                        loaded_tool_version_ids=tuple(sorted(loaded_tool_version_ids)),
+                        hard_compactions=tuple(request_compaction.get("hard_compactions") or []),
                     )
                 if db is not None and identity is not None:
                     previous_checkpoint = await db.scalar(select(
@@ -553,6 +597,7 @@ class AgentLoopCoordinator:
                         "pending_results": continuation_messages,
                         "last_agent_turn_id": persisted_turn.id if persisted_turn else None,
                         "loaded_tool_version_ids": sorted(loaded_tool_version_ids),
+                        "hard_compactions": list(request_compaction.get("hard_compactions") or []),
                     }
                     presented_hash = hashlib.sha256(json.dumps([
                         {
@@ -578,8 +623,12 @@ class AgentLoopCoordinator:
                             if isinstance(capability_snapshot, CapabilitySnapshot)
                             else capability_snapshot.get("id")
                         ),
-                        context_manifest={"sections": list(context.manifest)},
-                        compaction_ref=(context.compaction or {}).get("content_hash"),
+                        context_manifest={
+                            "sections": list(message_manifest),
+                            "omitted_sections": list(omitted_sections),
+                            "compaction": request_compaction or None,
+                        },
+                        compaction_ref=request_compaction.get("content_hash"),
                         result_cursor={"agent_turn_id": persisted_turn.id if persisted_turn else None},
                         pending_refs={
                             "tool_invocation_ids": [
@@ -642,6 +691,7 @@ class AgentLoopCoordinator:
                     turns=tuple(turns), dispatches=tuple(dispatches),
                     messages=tuple(messages),
                     final_stream_id=persisted_turn.id if persisted_turn else None,
+                    hard_compactions=tuple(request_compaction.get("hard_compactions") or []),
                 )
             raise AgentLoopError(
                 "Provider returned no Tool Call and no assistant message",

@@ -1,4 +1,4 @@
-"""Fixed `context.standard` assembly with bounded, explainable sections."""
+"""Policy-controlled context assembly with bounded, explainable sections."""
 
 from __future__ import annotations
 
@@ -13,9 +13,7 @@ from app.models.foundation import UserSession
 from app.models.registry import PolicyDefinition, PolicyVersion
 from app.models.runtime_v1 import DurableRunner, Run, RunnerCheckpoint, WorkItem
 from app.services.history_service import estimate_tokens
-
-
-DEFAULT_CONTEXT_PARAMETERS = {"token_budget": 8_000, "max_artifacts": 20}
+from app.services.context_policy_service import resolve_context_parameters
 
 
 @dataclass(frozen=True)
@@ -29,11 +27,9 @@ async def assemble_standard_context(
     parameters: dict | None, policy_version: PolicyVersion | None = None,
 ) -> ContextSelection:
     policy_key = policy.policy_key if policy and policy.enabled else "context.standard"
-    if policy_key != "context.standard":
-        raise RuntimeError(f"unsupported Context Policy: {policy_key}")
-    merged = {**DEFAULT_CONTEXT_PARAMETERS, **dict(parameters or {})}
-    budget = max(1, min(int(merged["token_budget"]), 32_000))
-    max_artifacts = max(0, min(int(merged["max_artifacts"]), 100))
+    merged = resolve_context_parameters(policy_key, parameters, frozen=policy_version is not None)
+    budget = merged["token_budget"]
+    max_artifacts = merged["max_artifacts"]
     session = await db.get(UserSession, run.session_id)
     work = await db.get(WorkItem, runner.work_item_id)
     if session is None or work is None or session.user_id != run.user_id:
@@ -82,7 +78,7 @@ async def assemble_standard_context(
         content = json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
         token_estimate = estimate_tokens(content)
     if token_estimate > budget:
-        raise RuntimeError("prompt_too_large: context.standard exceeds its token budget")
+        raise RuntimeError(f"prompt_too_large: {policy_key} exceeds its token budget")
     return ContextSelection(content=content, manifest={
         "policy_key": policy_key,
         "policy_definition_id": policy.id if policy else None,

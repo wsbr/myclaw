@@ -7,6 +7,8 @@ Start with the repository [README](../README.md). It contains the supported loca
 - [Product overview](../PRODUCT.md): user experience and product semantics.
 - [Roadmap](../ROADMAP.md): dependency-ordered delivery record through `v0.4.1`.
 - [Design philosophy](DESIGN_PHILOSOPHY.md): principles that constrain every module.
+- [Runtime evolution assessment](RUNTIME_EVOLUTION.md): necessity, deferral, and Codex Harness comparison for the next runtime iteration.
+- [Project assessment and optimization plan](GPT6_PROJECT_ASSESSMENT.md): current-worktree findings, validation limits, and prioritized implementation plan.
 - [Technical overview](../TECH.md): runtime architecture and deployment boundaries.
 - [Validation](VALIDATION.md): CI, local release gates, real-model acceptance, and evidence policy.
 

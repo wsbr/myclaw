@@ -18,7 +18,6 @@ from app.models.runtime_v1 import DurableRunner, Message
 from app.models.schedule_v1 import AgentSchedule, AgentScheduleFire
 from app.persistence.reliable_writes import PlatformAuditWriter
 from app.schemas.schedule_v1 import (
-    AgentScheduleCreate,
     AgentScheduleFireResponse,
     AgentSchedulePatch,
     AgentScheduleResponse,
@@ -33,6 +32,7 @@ from app.services.schedule_service import (
     zone,
 )
 from app.services.agent_access_service import has_agent_use_access
+from app.services.schedule_definition_service import load_schedule_definition
 
 
 router = APIRouter(prefix="/schedules", tags=["agent-schedules"])
@@ -122,22 +122,33 @@ async def _agent_name(db: AsyncSession, agent: AgentBlueprint) -> str:
 
 
 async def _schedule_view(db: AsyncSession, item: AgentSchedule) -> AgentScheduleResponse:
-    agent = await db.get(AgentBlueprint, item.agent_id)
-    name = await _agent_name(db, agent) if agent else item.agent_id
+    try:
+        definition = await load_schedule_definition(db, item)
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail={
+            "code": "schedule_definition_unavailable", "message": str(error),
+        })
+    agent = await db.get(AgentBlueprint, definition.agent_id)
+    name = await _agent_name(db, agent) if agent else definition.agent_id
     return AgentScheduleResponse(
-        id=item.id, agent_id=item.agent_id, agent_name=name,
-        name=item.name, prompt=item.prompt, context_mode=item.context_mode,
-        source_session_id=item.source_session_id,
+        id=item.id,
+        definition_tool_invocation_id=definition.tool_invocation_id,
+        agent_id=definition.agent_id, agent_name=name,
+        name=definition.name, prompt=definition.instruction,
+        context_mode=definition.context_mode,
+        source_session_id=definition.source_session_id,
         schedule_type=item.schedule_type,
         cron_expression=item.cron_expression, interval_seconds=item.interval_seconds,
         run_at=item.run_at, timezone=item.timezone, next_fire_at=item.next_fire_at,
         next_fire_local=(
             local_iso(item.next_fire_at, item.timezone) if item.next_fire_at else None
         ),
-        end_at=item.end_at, version_policy=item.version_policy,
-        pinned_agent_version_id=item.pinned_agent_version_id,
+        end_at=item.end_at, version_policy=definition.version_policy,
+        pinned_agent_version_id=definition.pinned_agent_version_id,
         overlap_policy=item.overlap_policy, misfire_policy=item.misfire_policy,
         misfire_grace_seconds=item.misfire_grace_seconds, status=item.status,
+        max_occurrences=item.max_occurrences,
+        occurrence_count=item.occurrence_count,
         total_fire_count=item.total_fire_count,
         last_scheduled_for=item.last_scheduled_for, last_fired_at=item.last_fired_at,
         last_error_code=item.last_error_code,
@@ -148,7 +159,11 @@ async def _schedule_view(db: AsyncSession, item: AgentSchedule) -> AgentSchedule
 
 async def _fire_view(db: AsyncSession, fire: AgentScheduleFire) -> AgentScheduleFireResponse:
     schedule = await db.get(AgentSchedule, fire.schedule_id)
-    agent = await db.get(AgentBlueprint, schedule.agent_id) if schedule else None
+    definition = (
+        await load_schedule_definition(db, schedule, fire=fire)
+        if schedule else None
+    )
+    agent = await db.get(AgentBlueprint, definition.agent_id) if definition else None
     agent_name = await _agent_name(db, agent) if agent else "未知智能体"
     result_preview = None
     if fire.runner_id:
@@ -157,9 +172,12 @@ async def _fire_view(db: AsyncSession, fire: AgentScheduleFire) -> AgentSchedule
         result_preview = result.content[:500] if result else None
     return AgentScheduleFireResponse(
         id=fire.id, schedule_id=fire.schedule_id,
-        schedule_name=schedule.name if schedule else "已删除任务",
-        agent_id=schedule.agent_id if schedule else "", agent_name=agent_name,
-        trigger_kind=fire.trigger_kind, context_mode=fire.context_mode_snapshot,
+        schedule_name=definition.name if definition else "已删除任务",
+        agent_id=definition.agent_id if definition else "", agent_name=agent_name,
+        trigger_kind=fire.trigger_kind,
+        definition_tool_invocation_id=fire.definition_tool_invocation_id,
+        definition_hash=fire.definition_hash, occurrence_no=fire.occurrence_no,
+        context_mode=definition.context_mode if definition else "new_session",
         scheduled_for=fire.scheduled_for,
         scheduled_for_local=local_iso(fire.scheduled_for, fire.timezone_snapshot),
         status=fire.status, reason_code=fire.reason_code,
@@ -173,7 +191,7 @@ async def _fire_view(db: AsyncSession, fire: AgentScheduleFire) -> AgentSchedule
     )
 
 
-def _shape(body: AgentScheduleCreate | AgentSchedulePatch, existing=None) -> dict:
+def _shape(body: AgentSchedulePatch, existing: AgentSchedule) -> dict:
     values = {
         "schedule_type": getattr(body, "schedule_type", None) or existing.schedule_type,
         "run_at": getattr(body, "run_at", None),
@@ -216,77 +234,6 @@ async def list_schedules(
     return [await _schedule_view(db, item) for item in rows]
 
 
-@router.post("", response_model=AgentScheduleResponse, status_code=201)
-async def create_schedule(
-    body: AgentScheduleCreate,
-    idempotency_key: str = Header(alias="Idempotency-Key"),
-    db: AsyncSession = Depends(get_db),
-    current: CurrentAccount = Depends(get_current_account),
-):
-    record, replay = await _idempotency(
-        db, current=current, operation="create_agent_schedule", key=idempotency_key,
-        request=body.model_dump(mode="json"),
-    )
-    if replay and record.resource_id:
-        return await _schedule_view(
-            db, await _owned_schedule(db, record.resource_id, current)
-        )
-    agent = await _visible_agent(db, body.agent_id, current)
-    now = utcnow()
-    try:
-        values = _shape(body)
-        next_at = initial_fire_at(
-            schedule_type=values["schedule_type"],
-            timezone_name=values["timezone"], now=now,
-            run_at=values["run_at"], cron_expression=values["cron_expression"],
-            interval_seconds=values["interval_seconds"],
-        )
-    except ValueError as error:
-        raise HTTPException(status_code=422, detail={"code": "invalid_schedule", "message": str(error)})
-    end_at = utc_naive(body.end_at) if body.end_at else None
-    if end_at is not None and end_at < next_at:
-        raise HTTPException(status_code=422, detail={"code": "end_before_first_fire"})
-    pinned_id = body.pinned_agent_version_id
-    if body.version_policy == "pinned":
-        pinned_id = pinned_id or agent.current_published_version_id
-        version = await db.get(AgentAssemblyVersion, pinned_id)
-        if (
-            version is None or version.agent_id != agent.id
-            or version.publication_status != "published"
-        ):
-            raise HTTPException(status_code=422, detail={"code": "invalid_pinned_version"})
-    item = AgentSchedule(
-        id=uuid7(), tenant_id=current.tenant_id, account_id=current.account.id,
-        user_id=current.account.user_id, agent_id=agent.id,
-        name=body.name, prompt=body.prompt,
-        schedule_type=values["schedule_type"], run_at=(
-            utc_naive(values["run_at"]) if values["run_at"] else None
-        ), cron_expression=values["cron_expression"],
-        interval_seconds=values["interval_seconds"], timezone=values["timezone"],
-        next_fire_at=next_at, end_at=end_at,
-        version_policy=body.version_policy, pinned_agent_version_id=pinned_id,
-        overlap_policy=body.overlap_policy, misfire_policy=body.misfire_policy,
-        misfire_grace_seconds=body.misfire_grace_seconds,
-        status="active", total_fire_count=0,
-    )
-    db.add(item)
-    await db.flush()
-    await PlatformAuditWriter(db).append(
-        category="configuration", action="schedule.created",
-        actor_type="account", actor_id=current.account.id,
-        actor_user_id=current.account.user_id,
-        resource_type="agent_schedule", resource_id=item.id,
-        resource_version=item.version, outcome="succeeded",
-        summary="Agent schedule created",
-        dedupe_key=f"schedule:create:{record.id}", tenant_id=current.tenant_id,
-        changes={"schedule_type": item.schedule_type, "agent_id": item.agent_id},
-    )
-    record.resource_type, record.resource_id, record.http_status = "agent_schedule", item.id, 201
-    record.response_snapshot = {"id": item.id}
-    await db.commit()
-    return await _schedule_view(db, item)
-
-
 @router.get("/{schedule_id}", response_model=AgentScheduleResponse)
 async def get_schedule(
     schedule_id: str, db: AsyncSession = Depends(get_db),
@@ -327,9 +274,11 @@ async def update_schedule(
         item.cron_expression = values["cron_expression"]
         item.interval_seconds = values["interval_seconds"]
         item.timezone = values["timezone"]
+        if item.schedule_type == "once":
+            item.max_occurrences = 1
         if item.status == "completed":
             item.status = "paused"
-    for name in ("name", "prompt", "overlap_policy", "misfire_policy", "misfire_grace_seconds"):
+    for name in ("overlap_policy", "misfire_policy", "misfire_grace_seconds"):
         if name in body.model_fields_set:
             value = getattr(body, name)
             if value is None:
@@ -337,20 +286,17 @@ async def update_schedule(
             setattr(item, name, value)
     if "end_at" in body.model_fields_set:
         item.end_at = utc_naive(body.end_at) if body.end_at else None
-    if "version_policy" in body.model_fields_set or "pinned_agent_version_id" in body.model_fields_set:
-        policy = body.version_policy or item.version_policy
-        pinned = body.pinned_agent_version_id if "pinned_agent_version_id" in body.model_fields_set else item.pinned_agent_version_id
-        agent = await _visible_agent(db, item.agent_id, current)
-        if policy == "pinned":
-            pinned = pinned or agent.current_published_version_id
-            version = await db.get(AgentAssemblyVersion, pinned)
-            if version is None or version.agent_id != agent.id or version.publication_status != "published":
-                raise HTTPException(status_code=422, detail={"code": "invalid_pinned_version"})
-        else:
-            pinned = None
-        item.version_policy, item.pinned_agent_version_id = policy, pinned
+    if "max_occurrences" in body.model_fields_set:
+        if item.schedule_type == "once" and body.max_occurrences not in (None, 1):
+            raise HTTPException(status_code=422, detail={"code": "once_occurrence_limit"})
+        item.max_occurrences = (
+            1 if item.schedule_type == "once" else body.max_occurrences
+        )
     if item.end_at and item.next_fire_at and item.end_at < item.next_fire_at:
         raise HTTPException(status_code=422, detail={"code": "end_before_next_fire"})
+    if item.max_occurrences is not None and item.occurrence_count >= item.max_occurrences:
+        item.next_fire_at = None
+        item.status = "completed"
     old_version = item.version
     item.version += 1
     await PlatformAuditWriter(db).append(
@@ -408,7 +354,10 @@ async def resume_schedule(
         raise HTTPException(status_code=409, detail={"code": "version_conflict", "current_version": item.version})
     if item.status == "disabled":
         raise HTTPException(status_code=409, detail={"code": "schedule_disabled"})
-    await _visible_agent(db, item.agent_id, current)
+    definition = await load_schedule_definition(db, item)
+    await _visible_agent(db, definition.agent_id, current)
+    if item.max_occurrences is not None and item.occurrence_count >= item.max_occurrences:
+        raise HTTPException(status_code=409, detail={"code": "occurrence_limit_reached"})
     try:
         item.next_fire_at = initial_fire_at(
             schedule_type=item.schedule_type, timezone_name=item.timezone,
@@ -445,7 +394,8 @@ async def run_schedule_now(
     item = await _owned_schedule(db, schedule_id, current, lock=True)
     if item.status == "disabled":
         raise HTTPException(status_code=409, detail={"code": "schedule_disabled"})
-    await _visible_agent(db, item.agent_id, current)
+    definition = await load_schedule_definition(db, item)
+    await _visible_agent(db, definition.agent_id, current)
     record, replay = await _idempotency(
         db, current=current, operation="run_agent_schedule_now", key=idempotency_key,
         request={"schedule_id": schedule_id},

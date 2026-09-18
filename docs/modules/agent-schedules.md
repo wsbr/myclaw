@@ -1,12 +1,13 @@
 # Agent 定时任务
 
-定时任务只负责在指定时间创建一次标准 Chat Run，不引入第二套 Agent 执行引擎。任务可由管理页面创建，也可由显式绑定了平台 `schedule_task` 工具的 Agent 在普通对话中创建。模型根据用户自然语言选择操作、触发规则和上下文方式，平台在逐次确认后持久化；到点后 `scheduler-worker` 写入唯一触发账本，并把工作交给现有 `runtime-worker`。因此模型版本、工具治理、审批、Sandbox、审计和用量账本都沿用普通执行链路；平台定时唤醒不是用户发起的普通 Chat，不触发 Chat 后的 Group 语义涌现。
+定时任务只负责在指定时间创建一次标准 Chat Run，不引入第二套 Agent 执行引擎，也不引入 WorkDirective。任务只能由显式绑定了平台 `schedule_task` 工具的 Agent 在普通对话中创建：来源 WorkItem 的 AgentTurn 产生 ToolInvocation，Schedule 只引用这次调用并保存触发状态；到点后 `scheduler-worker` 写入唯一触发账本，再创建全新的 Run、WorkItem、Runner 和 AgentTurn。因此模型版本、工具治理、审批、Sandbox、审计和用量账本都沿用普通执行链路；平台定时唤醒不是用户发起的普通 Chat，不触发 Chat 后的 Group 语义涌现。
 
 ## 领域对象
 
-- `agent_schedule` 保存用户拥有的任务定义、IANA 时区、UTC `next_fire_at`、版本/重叠/误点策略、`new_session|continue_session` 上下文方式、来源 Session、创建 ToolInvocation 和短租约；
-- `agent_schedule_fire` 是每个计划时刻或“立即执行”的不可重复账本，唯一键为 `schedule_id + operation_key`；它冻结上下文方式和来源 Session，记录跳过、延后、分派、运行与终态，并关联实际 Session、Run 和 Runner；
-- `runner_schedule_snapshot` 冻结触发时采用的任务 revision、提示词 hash、AgentVersion、时区和账号授权 revision，便于复盘；
+- `tool_invocation.authorization_snapshot.agent_schedule_definition_v1` 保存规范化任务语义：Agent、名称、指令、上下文、版本策略和已解析的平台参与人；
+- `agent_schedule` 只保存定义 ToolInvocation 引用、IANA 时区、UTC `next_fire_at`、次数上限/计数、重叠/误点策略和短租约；
+- `agent_schedule_fire` 是每个计划时刻或“立即执行”的不可重复账本，唯一键为 `schedule_id + operation_key`；它冻结定义引用/hash 和 occurrence number，记录跳过、延后、分派、运行与终态，并关联实际 Session、Run 和 Runner；
+- `runner_schedule_snapshot` 冻结触发时采用的定义引用/hash、Schedule revision、AgentVersion、时区和账号授权 revision，便于复盘；
 - `user_session.origin_type=schedule` 与 `origin_schedule_id` 让普通会话可以追溯到任务定义。
 
 任务指令以 `Message.role=user + sender_type=system` 落库：模型把它当作当前任务输入，界面显示为“定时任务”，记忆系统不会把平台触发内容误认成用户亲口陈述。`new_session` 创建可独立通知和追溯的新会话；`continue_session` 仅适用于当前入口 Agent，并把平台指令回灌原会话，以便继续使用对话材料。Runtime 会把本次触发指令标成唯一有效的当前请求，历史对话只作为背景，避免模型重新执行历史里的“创建定时任务”诉求。
@@ -19,7 +20,9 @@
 - 相对时间使用 `delay_seconds`，由工具按真正执行时间计算；绝对时间必须包含 UTC offset，Cron 必须附 IANA 时区；歧义时间必须先问用户；
 - `create/update/pause/resume/delete/run_now` 由动态风险规则强制逐次确认，`list` 不确认；
 - 工具只能作用于当前 Tenant、账号、用户和当前 Agent，不能接收任意 `agent_id`；
-- `created_by_tool_invocation_id` 提供创建幂等，立即运行使用 ToolInvocation 派生 operation key；
+- `definition_tool_invocation_id` 同时提供定义来源与创建幂等；语义更新会产生新的 ToolInvocation 定义版本并原子改指针，立即运行使用 ToolInvocation 派生 operation key；
+- `max_occurrences` 是一等触发约束；“持续 10 次”精确物化 10 个计划 occurrence，不再通过模型估算 `end_at`；
+- `principals` 只接受 Runtime 签发的 opaque `principal_ref`。定义保存稳定账号身份，触发前重新校验 Agent 可见边界并签发新引用，不能把过期签名当权限；
 - 由 `authentication_source=schedule` 唤醒的 Run 只能查询，不能递归创建或改写任务；Runtime 不向模型展示该工具的变更能力，Dispatcher 也会在创建 ToolInvocation/Approval 前再次硬拒绝。
 
 ## 触发规则
@@ -44,7 +47,7 @@
 
 ## 用户操作与通知
 
-Web 的“定时任务”页面支持创建、编辑、暂停、恢复、立即执行、停用和查看执行历史，也会标明“独立新对话/继续原对话”。任务完成/失败后，Fire 终态作为站内未读通知进入侧栏铃铛；需要审批或澄清的定时 Run 仍使用统一 Required Action 投影。外部 Channel 投递继续使用 `NotificationDelivery`，不会因为 Web 定时任务制造伪 Channel 消息。
+Web 的“定时任务”页面是管理面，只支持编辑触发时间/次数/运行策略、暂停、恢复、立即执行、停用和查看执行历史；任务语义在智能体对话中创建和修改。任务完成/失败后，Fire 终态作为站内未读通知进入侧栏铃铛；需要审批或澄清的定时 Run 仍使用统一 Required Action 投影。外部 Channel 投递继续使用 `NotificationDelivery`，不会因为 Web 定时任务制造伪 Channel 消息。
 
 关键配置：
 

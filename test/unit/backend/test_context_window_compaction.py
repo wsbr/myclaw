@@ -1,5 +1,8 @@
 """Complete request counting drives soft compaction and hard Context rejection."""
 
+import hashlib
+import json
+
 import pytest
 
 from app.core.model_hub.base import BaseLLM, LLMChunk, LLMResponse, TokenUsage
@@ -8,7 +11,7 @@ from app.runtime.action_dispatcher import ActionDispatcher
 from app.runtime.agent_loop_coordinator import (
     AgentLoopCoordinator, AgentLoopError, LoopIdentity,
 )
-from app.runtime.context_assembler import ContextAssembler, ContextPackage
+from app.runtime.context_assembler import ContextAssembler, ContextPackage, request_manifest
 from app.runtime.model_adapter import ModelAdapter
 from app.runtime.token_counting import conservative_request_tokens, count_provider_request
 
@@ -76,6 +79,41 @@ def test_soft_watermark_trims_only_old_history_without_fake_hash_summary():
     assert any(item.startswith("WorkingPlan:") for item in contents)
     assert {"role": "user", "content": "current request"} in package.messages
     assert pending[0] in package.messages
+    assert len(package.manifest) == len(package.messages)
+    for index, (entry, message) in enumerate(zip(package.manifest, package.messages)):
+        assert entry["message_index"] == index
+        assert entry["role"] == message["role"]
+        assert entry["checksum"] == hashlib.sha256(json.dumps(
+            message, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode()).hexdigest()
+    assert next(item for item in package.messages if item["content"].startswith("WorkingPlan:"))["role"] == "assistant"
+    assert len(package.compaction["omitted_sections"]) == package.compaction["omitted_count"]
+
+
+def test_provider_compaction_keeps_provenance_and_input_objects_unchanged():
+    history = [{"role": "assistant", "content": "original history"}]
+    pending = [{"role": "tool", "tool_call_id": "call-1", "content": "original result"}]
+    original_pending = request_manifest(pending, [{"source": "pending_result"}])
+    assembler = ContextAssembler()
+    package = assembler.assemble(
+        platform_rules="platform", agent_instructions="agent", current_input="current",
+        history=history, history_manifest=[{"source_message_id": "message-1"}],
+        pending_results=[{**pending[0], "content": "excerpt"}],
+        pending_manifest=original_pending, web_result_budget_ratio=0.35,
+    )
+    compacted = assembler.drop_oldest_history(package, reason="provider_count_above_soft_target")
+    assert compacted.history_count == 0
+    assert compacted.web_result_budget_ratio == 0.35
+    assert len(compacted.messages) == len(compacted.manifest)
+    assert compacted.compaction["omitted_sections"][0]["source_message_id"] == "message-1"
+    result_manifest = compacted.manifest[-1]
+    assert result_manifest["source_checksum"] == original_pending[0]["checksum"]
+    assert result_manifest["checksum"] != result_manifest["source_checksum"]
+    assert result_manifest["treatment"] == "projection"
+    assert history == [{"role": "assistant", "content": "original history"}]
+    assert pending[0]["content"] == "original result"
+    assert package.history_count == 1
+    assert package.manifest[package.history_start]["source_message_id"] == "message-1"
 
 
 def test_tool_schema_is_part_of_complete_conservative_request_count():
@@ -117,7 +155,7 @@ async def test_hard_window_rejects_before_generation_and_count_failure_degrades(
             ),
             model_parameters={"model_id": "test"}, identity=identity,
         )
-    assert raised.value.code == "context_window_exceeded"
+    assert raised.value.code == "hard_compaction_no_source"
     assert provider.stream_calls == 0
 
     degraded_provider = _CountingProvider(fail_count=True)

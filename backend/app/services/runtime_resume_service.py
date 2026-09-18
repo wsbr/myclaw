@@ -22,6 +22,24 @@ NON_TERMINAL_TOOL = {
 }
 
 
+def merge_compaction_caches(checkpoint_entries, latest_entries) -> list[dict]:
+    """Retain paid projections newer than a safe checkpoint, newest last.
+
+    Recovery may rewind pending results. The compactor must revalidate every
+    candidate against those canonical results before using it.
+    """
+    entries = {}
+    for entry in [*(checkpoint_entries or []), *(latest_entries or [])]:
+        if not isinstance(entry, dict):
+            continue
+        key = entry.get("id") or entry.get("source_hash")
+        if not key:
+            continue
+        entries.pop(key, None)
+        entries[key] = dict(entry)
+    return list(entries.values())
+
+
 def _tool_message(call_id: str, result: dict) -> dict:
     return {
         "role": "tool", "tool_use_id": call_id, "tool_call_id": call_id,
@@ -106,6 +124,53 @@ async def has_pending_actions(db, *, work_item_id: str) -> bool:
     )
 
 
+def merge_pending_results(existing: list[dict], incoming: list[dict]) -> list[dict]:
+    """Complete the last unfinished batch without duplicating its calls.
+
+    Durable wakeups reconstruct the waiting assistant/tool batch from database
+    facts. Keep its original assistant text and arguments, plus any synchronous
+    results already checkpointed. Only the unfinished trailing batch may merge:
+    a provider may legitimately reuse a call ID in a later, completed turn.
+    """
+
+    merged = [dict(item) for item in existing]
+    incoming = [dict(item) for item in incoming]
+    if not incoming or incoming[0].get("role") != "assistant" or not incoming[0].get("tool_calls"):
+        return [*merged, *incoming]
+    batch_index = next((index for index in range(len(merged) - 1, -1, -1)
+                        if merged[index].get("role") == "assistant" and merged[index].get("tool_calls")), None)
+    if batch_index is None:
+        return [*merged, *incoming]
+    original_calls = list(merged[batch_index]["tool_calls"])
+    call_ids = {str(call["id"]) for call in original_calls if call.get("id")}
+    batch_end = batch_index + 1
+    completed = set()
+    while batch_end < len(merged) and merged[batch_end].get("role") == "tool":
+        message = merged[batch_end]
+        completed.add(str(message.get("tool_call_id") or message.get("tool_use_id") or ""))
+        batch_end += 1
+    incoming_calls = incoming[0]["tool_calls"]
+    incoming_ids = {str(call["id"]) for call in incoming_calls if call.get("id")}
+    if not (call_ids - completed) or not call_ids.intersection(incoming_ids):
+        return [*merged, *incoming]
+    added_calls = [call for call in incoming_calls if str(call.get("id")) not in call_ids]
+    if added_calls:
+        merged[batch_index] = {
+            **merged[batch_index], "tool_calls": [*original_calls, *added_calls],
+        }
+    call_ids.update(incoming_ids)
+    for message in incoming[1:]:
+        call_id = str(message.get("tool_call_id") or message.get("tool_use_id") or "")
+        if message.get("role") == "tool" and call_id in call_ids:
+            if call_id not in completed:
+                merged.insert(batch_end, message)
+                batch_end += 1
+                completed.add(call_id)
+        else:
+            merged.append(message)
+    return merged
+
+
 async def queue_work_item_resume(
     db, *, work: WorkItem, run: Run, source_runner: DurableRunner,
     pending_results: list[dict], reason: str, caused_by_event_id: str,
@@ -131,7 +196,7 @@ async def queue_work_item_resume(
     current_runner_results = list(
         (latest_checkpoint.state_snapshot or {}).get("pending_results") or []
     ) if latest_checkpoint is not None else []
-    cumulative_results = [*prior_results, *current_runner_results]
+    cumulative_results = merge_pending_results(prior_results, current_runner_results)
     if replace_system_notice_prefix:
         cumulative_results = [
             item for item in cumulative_results
@@ -142,7 +207,7 @@ async def queue_work_item_resume(
                 )
             )
         ]
-    cumulative_results.extend(pending_results)
+    cumulative_results = merge_pending_results(cumulative_results, pending_results)
     work.execution_epoch += 1
     work.attempt_no += 1
     work.status = "queued"
@@ -166,6 +231,11 @@ async def queue_work_item_resume(
         input_snapshot={
             **dict(source_runner.input_snapshot or {}),
             "resume_reason": reason, "pending_results": cumulative_results,
+            "hard_compactions": merge_compaction_caches(
+                (latest_checkpoint.state_snapshot or {}).get("hard_compactions", [])
+                if latest_checkpoint is not None else [],
+                (source_runner.input_snapshot or {}).get("hard_compactions", []),
+            ),
             "loaded_tool_version_ids": list(
                 (latest_checkpoint.loaded_tool_version_ids if latest_checkpoint else None)
                 or (source_runner.input_snapshot or {}).get("loaded_tool_version_ids")

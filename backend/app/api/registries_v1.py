@@ -35,6 +35,11 @@ from app.services.tool_connection_service import (
     resolve_connection_revision,
 )
 from app.services.web_tool_service import WebToolError, web_search
+from app.services.context_policy_service import (
+    ContextPolicyValidationError, context_policy_parameter_schema,
+    resolve_context_parameters,
+)
+from app.services.policy_version_service import publish_policy_version
 
 router = APIRouter(tags=["registries"])
 
@@ -687,6 +692,9 @@ def policy_view(policy: PolicyDefinition) -> dict:
     return {"id": policy.id, "policy_key": policy.policy_key, "policy_type": policy.policy_type,
             "name": policy.name, "description": policy.description,
             "default_parameters": policy.default_parameters, "parameter_version": policy.parameter_version,
+            "current_version_id": policy.current_version_id,
+            "parameter_schema": (context_policy_parameter_schema(policy.policy_key)
+                                 if policy.policy_type == "context" else None),
             "enabled": policy.enabled}
 
 
@@ -741,9 +749,24 @@ async def patch_policy(
     if policy.parameter_version != revision(if_match):
         raise HTTPException(status_code=409, detail={"code": "version_conflict", "current_version": policy.parameter_version})
     changes = body.model_dump(exclude_unset=True)
+    if not changes or any(value is None for value in changes.values()):
+        raise HTTPException(status_code=422, detail={"code": "invalid_policy_patch"})
+    if policy.policy_type == "context" and "default_parameters" in changes:
+        try:
+            changes["default_parameters"] = resolve_context_parameters(
+                policy.policy_key, changes["default_parameters"],
+            )
+        except ContextPolicyValidationError as error:
+            raise HTTPException(status_code=422, detail={
+                "code": "invalid_context_policy_parameters", "message": str(error),
+            }) from error
     for field, value in changes.items():
         setattr(policy, field, value)
     policy.parameter_version += 1
+    try:
+        await publish_policy_version(db, policy)
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail={"code": "policy_version_unavailable"}) from error
     await db.flush()
     await PlatformAuditWriter(db).append(
         category="registry", action="policy_definition.updated", actor_type="account",

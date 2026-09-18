@@ -193,9 +193,11 @@ AgentVersion 的四个逻辑 Policy FK 必须分别匹配 policy_type，发布�
 
 ### `agent_schedule`、`agent_schedule_fire`、`runner_schedule_snapshot`
 
-- `agent_schedule`：`id PK`、`tenant_id`、`account_id`、`user_id`、`agent_id`、`name`、`prompt`、`context_mode new_session|continue_session`、`source_session_id NULL`、`created_by_tool_invocation_id UNIQUE NULL`、`schedule_type once|cron|interval`、`run_at|cron_expression|interval_seconds` 三选一、`timezone`、`next_fire_at UTC`、`end_at NULL`、`version_policy latest_published|pinned`、`pinned_agent_version_id NULL`、`overlap_policy skip|queue_one|allow`、`misfire_policy skip|fire_once`、`misfire_grace_seconds`、`status active|paused|completed|disabled`、执行计数/最近错误、lease 三元组、`version`；到期索引 `(status,next_fire_at,id)`；
-- `agent_schedule_fire`：`id PK`、任务/tenant/account FK、`trigger_kind scheduled|manual`、`operation_key`、`scheduled_for UTC`、`status queued|deferred|dispatching|running|succeeded|failed|skipped|cancelled`、任务版本及 prompt/timezone/context-mode/source-session/version-policy 快照、AgentVersion/Session/Message/Run/Runner FK、终态与未读通知时间、错误和分派 lease；唯一 `(schedule_id,operation_key)`、`run_id`、`runner_id`；
-- `runner_schedule_snapshot`：`runner_id PK`、`fire_id UNIQUE`、`schedule_id`、`schedule_version`、`scheduled_for`、`timezone`、`prompt_hash`、`agent_version_id`、`account_auth_revision`、`created_at`，只追加。
+- `agent_schedule`：纯触发器，含 `id PK`、owner tenant/account/user、`definition_tool_invocation_id UNIQUE FK`、`schedule_type once|cron|interval`、`run_at|cron_expression|interval_seconds` 三选一、`timezone`、`next_fire_at UTC`、`end_at NULL`、`max_occurrences NULL`、`occurrence_count`、`overlap_policy skip|queue_one|allow`、`misfire_policy skip|fire_once`、`misfire_grace_seconds`、`status active|paused|completed|disabled`、实际运行计数/最近错误、lease 三元组和 `version`；到期索引 `(status,next_fire_at,id)`。0049 前语义列仅作历史兼容，新记录置空；
+- `agent_schedule_fire`：`id PK`、任务/tenant/account FK、`trigger_kind scheduled|manual`、`operation_key`、`scheduled_for UTC`、`status queued|deferred|dispatching|running|succeeded|failed|skipped|cancelled`、Schedule version、`definition_tool_invocation_id`、`definition_hash`、`occurrence_no`、timezone 快照、AgentVersion/Session/Message/Run/Runner FK、终态与未读通知时间、错误和分派 lease；唯一 `(schedule_id,operation_key)`、`run_id`、`runner_id`；
+- `runner_schedule_snapshot`：`runner_id PK`、`fire_id UNIQUE`、`schedule_id`、`schedule_version`、`scheduled_for`、`timezone`、定义 ToolInvocation/hash、`agent_version_id`、`account_auth_revision`、`created_at`，只追加。
+
+任务名称、指令、上下文方式、来源 Session、Agent 版本策略和参与人保存在既有 `tool_invocation.authorization_snapshot.agent_schedule_definition_v1`。每次 Fire 以引用和 hash 固定定义；每次触发都创建新的 Run → WorkItem → Runner → AgentTurn，绝不复用历史 WorkItem。
 
 调度输入的 Message 固定 `sender_type=system, role=user`，从而进入当前模型任务但不满足用户记忆的来源条件。Scheduler 只能创建普通 Chat Run 和 Runtime Outbox，不能直接执行模型或 Tool。
 

@@ -69,6 +69,7 @@ def test_every_builtin_tool_has_an_intentional_chinese_display_name():
 def test_schedule_tool_is_eager_durable_and_mutations_require_exact_confirmation():
     spec = next(item for item in builtin_tool_specs() if item.tool_key == "schedule_task")
     assert spec.annotations["eager"] is True
+    assert spec.annotations["lossless_argument_normalization"] is True
     assert spec.execution_mode == "durable_async"
     assert spec.side_effect == "idempotent"
     assert spec.initial_confirmation_policy == "never"

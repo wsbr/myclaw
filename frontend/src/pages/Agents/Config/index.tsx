@@ -6,6 +6,7 @@ import { ArrowLeftOutlined, CloudUploadOutlined, ExperimentOutlined, KeyOutlined
 import { agentsApi, AgentApiKey, AgentDraft, AgentEvalRun, AgentEvalSuite, AgentOption, AgentPublishedVersion } from '@/api/agents'
 import PromptEditor from '@/components/PromptEditor'
 import { displayLabel } from '@/lib/presentation'
+import { contextPolicyOptions, contextSelectionChanged, contextSelectionUnavailable, matchContextPreset, resolveContextPresets } from './contextPresets'
 
 const policyTypes = ['context', 'history', 'memory_write', 'memory_recall'] as const
 
@@ -37,6 +38,19 @@ export default function AgentConfigPage() {
   ] })
   const [models, sandboxes, tools, skills, boundAgents, ...policies] = optionQueries.map(q => q.data ?? [])
   const options = (items: AgentOption[]) => items.map(item => ({ label: item.key ? `${item.name} · ${item.key}` : item.name, value: item.id }))
+  const contextPolicyId = Form.useWatch('context_policy_id', { form, preserve: true })
+  const historyPolicyId = Form.useWatch('history_policy_id', { form, preserve: true })
+  const contextPolicyQueries = optionQueries.slice(5, 7)
+  const contextOptionsLoading = contextPolicyQueries.some(query => query.isPending)
+  const contextOptionsFailed = contextPolicyQueries.some(query => query.isError)
+  const contextPresets = resolveContextPresets(policies[0], policies[1])
+  const contextSelection = {
+    context_policy_id: contextPolicyId, history_policy_id: historyPolicyId,
+  }
+  const contextPreset = matchContextPreset(contextSelection, policies[0], policies[1])
+  const hasUnsavedContextChanges = Boolean(detail && contextSelectionChanged(contextSelection, detail.draft))
+  const unavailableSelection = !contextOptionsLoading && !contextOptionsFailed
+    && contextSelectionUnavailable(contextSelection, policies[0], policies[1])
 
   useEffect(() => {
     if (detail) form.setFieldsValue({ ...detail.draft, visibility: detail.agent.visibility })
@@ -255,7 +269,7 @@ export default function AgentConfigPage() {
         </Space>
         <Space>
           <Button icon={<SaveOutlined />} loading={save.isPending} onClick={() => form.validateFields().then(values => save.mutate(values))}>保存草稿</Button>
-          {!isNew && <Button icon={<ExperimentOutlined />} onClick={() => setTestOpen(true)}>测试草稿</Button>}
+          {!isNew && <Button icon={<ExperimentOutlined />} disabled={hasUnsavedContextChanges || unavailableSelection || save.isPending} onClick={() => setTestOpen(true)}>测试草稿</Button>}
           {!isNew && detail?.agent.current_published_version_id && <Button
             danger={detail.agent.status !== 'inactive'}
             icon={detail.agent.status === 'inactive' ? <PlayCircleOutlined /> : <PauseCircleOutlined />}
@@ -267,11 +281,14 @@ export default function AgentConfigPage() {
                 : '将阻止新的对话、规划与群组执行；已固定的运行快照不会被移除。',
               onOk: () => stateChange.mutateAsync(detail.agent.status === 'inactive' ? 'reactivate' : 'deactivate'),
             })}>{detail.agent.status === 'inactive' ? '重新启用' : '停用'}</Button>}
-          {!isNew && <Button type="primary" icon={<CloudUploadOutlined />} loading={publish.isPending} onClick={() => publish.mutate()}>发布版本</Button>}
+          {!isNew && <Button type="primary" icon={<CloudUploadOutlined />} disabled={hasUnsavedContextChanges || unavailableSelection || save.isPending} loading={publish.isPending} onClick={() => publish.mutate()}>发布版本</Button>}
         </Space>
       </div>
 
       <Alert className="mb-4" type="info" showIcon message="新对话使用最新发布版本；已确认的规划与群组不会随草稿变化。" />
+      {hasUnsavedContextChanges && <Alert className="mb-4" type="info" showIcon
+        message="上下文或历史策略已调整，尚未保存"
+        description="先保存草稿，再测试或发布；已有发布版本仍使用原来的策略。" />}
       {!isNew && capabilityCheck.data && <Alert className="mb-4" showIcon
         type={capabilityCheck.data.publishable ? 'success' : 'error'}
         message={capabilityCheck.data.publishable ? '当前已保存草稿通过发布前能力检查' : '当前已保存草稿不可发布'}
@@ -296,8 +313,56 @@ export default function AgentConfigPage() {
             <Form.Item name="skill_ids" label="技能"><Select mode="multiple" options={options(skills)} optionFilterProp="label" /></Form.Item>
           </Card> },
           { key: 'context', label: '上下文与记忆', children: <Card>
-            <Form.Item name="context_policy_id" label="上下文策略" rules={[{ required: true }]}><Select options={options(policies[0])} /></Form.Item>
-            <Form.Item name="history_policy_id" label="历史策略" rules={[{ required: true }]}><Select options={options(policies[1])} /></Form.Item>
+            <Form.Item label="上下文方案" extra="选择方案只填写当前草稿的上下文与历史策略，保存后才能测试或发布；记忆策略单独配置。">
+              <Select
+                aria-label="上下文方案"
+                value={contextOptionsLoading || contextOptionsFailed ? undefined : contextPreset}
+                placeholder={contextOptionsLoading ? '正在加载可用策略…' : '选择方案，或在下方单独配置'}
+                loading={contextOptionsLoading}
+                disabled={contextOptionsLoading || contextOptionsFailed}
+                options={[
+                  ...(contextPreset === 'custom' ? [{ value: 'custom', label: '自定义', disabled: true }] : []),
+                  ...contextPresets.map(preset => ({
+                    value: preset.key,
+                    label: preset.selection ? preset.label : `${preset.label}（不可用）`,
+                    disabled: !preset.selection,
+                    title: preset.unavailableReason || preset.description,
+                  })),
+                ]}
+                onChange={value => {
+                  const selection = contextPresets.find(preset => preset.key === value)?.selection
+                  if (selection) form.setFieldsValue(selection)
+                }}
+              />
+            </Form.Item>
+            {contextOptionsFailed && <Alert className="mb-4" type="error" showIcon
+              message="上下文策略加载失败，已保留当前选择"
+              action={<Button size="small" onClick={() => contextPolicyQueries.forEach(query => { void query.refetch() })}>重试</Button>} />}
+            {unavailableSelection && <Alert className="mb-4" type="warning" showIcon
+              message="已选策略缺失或已停用，当前值仍保留"
+              description="请重新选择可用方案或策略，并在发布前检查依赖。" />}
+            <div className="mb-5 grid gap-3 md:grid-cols-3">
+              {contextPresets.map(preset => <div key={preset.key} className="rounded-lg border p-3">
+                <Typography.Text strong>{preset.label}</Typography.Text>
+                {contextPreset === preset.key && <Tag color="blue" className="ml-2">{hasUnsavedContextChanges ? '待保存' : '草稿方案'}</Tag>}
+                <Typography.Paragraph type="secondary" className="!mb-0 mt-2 text-xs">{preset.description}</Typography.Paragraph>
+                {!contextOptionsLoading && !contextOptionsFailed && preset.unavailableReason && <Typography.Paragraph type="warning" className="!mb-0 mt-2 text-xs">{preset.unavailableReason}</Typography.Paragraph>}
+              </div>)}
+            </div>
+            <Typography.Paragraph type="secondary">
+              方案决定每次请求带入模型的内容，不会删除原始消息或产物；摘要是从可见历史生成的派生信息。
+              原文保留不代表每次全部带入模型，摘要和裁剪可能省略细节。
+            </Typography.Paragraph>
+            <Typography.Paragraph type="secondary">
+              方案名称按策略组合识别，不代表使用默认参数。平台可调整策略参数；保存草稿记录策略选择，发布时冻结当时的实际策略版本与参数。
+              后续草稿或平台参数修改不改变已发布版本。方案沿用已有访问权限和输入上限。
+            </Typography.Paragraph>
+            <Typography.Title level={5}>高级策略</Typography.Title>
+            <Typography.Paragraph type="secondary">可单独组合下面两项策略；未匹配上述组合时显示“自定义”。</Typography.Paragraph>
+            <Form.Item name="context_policy_id" label="上下文策略" rules={[{ required: true }]}><Select options={contextPolicyOptions(policies[0], contextPolicyId)} loading={optionQueries[5].isPending} /></Form.Item>
+            <Form.Item name="history_policy_id" label="历史策略" rules={[{ required: true }]}><Select options={contextPolicyOptions(policies[1], historyPolicyId)} loading={optionQueries[6].isPending} /></Form.Item>
+            <Typography.Title level={5}>记忆策略</Typography.Title>
+            <Typography.Paragraph type="secondary">记忆的写入与召回独立于上下文方案，请按需配置。</Typography.Paragraph>
             <Form.Item name="memory_write_policy_id" label="记忆写入策略" rules={[{ required: true }]}><Select options={options(policies[2])} /></Form.Item>
             <Form.Item name="memory_recall_policy_id" label="记忆召回策略" rules={[{ required: true }]}><Select options={options(policies[3])} /></Form.Item>
           </Card> },
@@ -425,7 +490,7 @@ export default function AgentConfigPage() {
       </Form>
       <Modal title="测试当前草稿" open={testOpen} onCancel={() => setTestOpen(false)}
         okText="创建测试运行" confirmLoading={draftTest.isPending}
-        okButtonProps={{ disabled: !testContent.trim() }} onOk={() => draftTest.mutate()}>
+        okButtonProps={{ disabled: !testContent.trim() || hasUnsavedContextChanges || unavailableSelection || save.isPending }} onOk={() => draftTest.mutate()}>
         <Alert className="mb-3" type="warning" showIcon
           message="平台会复制当前 revision 为不可变测试快照"
           description="后续草稿编辑不会改变本次测试；该运行是私有对话，不能进入规划或群组模式，也不能被其他智能体调用。" />

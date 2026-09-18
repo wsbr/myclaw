@@ -8,7 +8,7 @@ from app.models.agent_v1 import AgentAssemblyVersion, AgentBlueprint
 from app.services.agent_access_service import agent_use_filter
 from app.models.registry import (
     ToolDefinition, ToolGovernance, ToolVersion,
-    PolicyDefinition,
+    PolicyDefinition, PolicyVersion,
     RegisteredModel,
     RegisteredSkill,
     SandboxProfile,
@@ -53,8 +53,12 @@ async def policies(
     policy_type: str = Query(), db: AsyncSession = Depends(get_db),
     _: CurrentAccount = Depends(get_current_builder),
 ):
-    rows = list(await db.scalars(select(PolicyDefinition).where(
-        PolicyDefinition.policy_type == policy_type, PolicyDefinition.enabled.is_(True)
+    rows = list(await db.scalars(select(PolicyDefinition).join(
+        PolicyVersion, PolicyVersion.id == PolicyDefinition.current_version_id,
+    ).where(
+        PolicyDefinition.policy_type == policy_type, PolicyDefinition.enabled.is_(True),
+        PolicyDefinition.status == "active", PolicyVersion.status == "published",
+        PolicyVersion.policy_definition_id == PolicyDefinition.id,
     ).order_by(PolicyDefinition.policy_key)))
     return [{"id": row.id, "key": row.policy_key, "name": row.name, "description": row.description} for row in rows]
 

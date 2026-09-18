@@ -219,7 +219,7 @@ def test_full_web_results_are_projected_under_shared_budget_without_losing_pairi
     fetch_result = json.loads(projected[-1]["content"])
     assert "text" not in fetch_result["data"]
     assert set(fetch_result["data"]) == {
-        "source_id", "title", "url", "retrieved_at", "excerpts", "omitted",
+        "source_id", "title", "url", "retrieved_at", "excerpts", "omitted", "checksum",
     }
     assert "OBJECTIVE-NEEDLE" in json.dumps(fetch_result, ensure_ascii=False)
     assert projected[-1]["tool_call_id"] == "fetch-call"
@@ -280,6 +280,20 @@ def test_four_parallel_full_fetches_share_budget_and_do_not_overflow_old_context
     assert sum(item["projected_tokens"] for item in stats) <= int(28_672 * 0.2)
     assert all("text" not in json.loads(item["content"])["data"] for item in projected[1:])
     assert json.loads(projected[-1]["content"])["data"]["excerpts"]
+
+    concise, concise_stats = project_web_messages(
+        messages, hard_input_limit=28_672, budget_ratio=0.10,
+    )
+    evidence, evidence_stats = project_web_messages(
+        messages, hard_input_limit=28_672, budget_ratio=0.35,
+    )
+    assert sum(item["projected_tokens"] for item in concise_stats) < sum(
+        item["projected_tokens"] for item in evidence_stats
+    )
+    assert [item["tool_call_id"] for item in concise[1:]] == [
+        item["tool_call_id"] for item in evidence[1:]
+    ] == [f"fetch-{index}" for index in range(4)]
+    assert all(json.loads(item["content"])["data"]["text"] == full_text for item in messages[1:])
 
 
 @pytest.mark.asyncio

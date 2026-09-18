@@ -115,7 +115,7 @@ class Settings(BaseSettings):
     sandbox_attempt_heartbeat_seconds: int = Field(default=10, gt=0)
     sandbox_tool_max_attempts: int = Field(default=3, gt=0, le=10)
     outbox_max_delivery_attempts: int = Field(default=12, gt=0, le=100)
-    provider_conformance_suite_version: str = "agent-native-v2.2"
+    provider_conformance_suite_version: str = "agent-native-v2.3"
     embedding_conformance_suite_version: str = "embedding-openai-compatible.v1"
     runtime_release_id: str = "agent-native-v2"
     provider_adapter_version: str = "2"

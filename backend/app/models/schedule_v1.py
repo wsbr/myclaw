@@ -22,7 +22,7 @@ from app.models.common import TimestampMixin, VersionMixin, uuid7
 
 
 class AgentSchedule(Base, TimestampMixin, VersionMixin):
-    """A user-owned definition; ``next_fire_at`` is always naive UTC."""
+    """A pure user-owned trigger; execution meaning lives on ToolInvocation."""
 
     __tablename__ = "agent_schedule"
     __table_args__ = (
@@ -52,6 +52,11 @@ class AgentSchedule(Base, TimestampMixin, VersionMixin):
         ),
         CheckConstraint("misfire_grace_seconds >= 0", name="ck_agent_schedule_misfire_grace"),
         CheckConstraint("total_fire_count >= 0", name="ck_agent_schedule_fire_count"),
+        CheckConstraint("occurrence_count >= 0", name="ck_agent_schedule_occurrence_count"),
+        CheckConstraint(
+            "max_occurrences IS NULL OR max_occurrences >= 1",
+            name="ck_agent_schedule_max_occurrences",
+        ),
         CheckConstraint(
             "(schedule_type = 'once' AND run_at IS NOT NULL AND cron_expression IS NULL AND interval_seconds IS NULL) OR "
             "(schedule_type = 'cron' AND run_at IS NULL AND cron_expression IS NOT NULL AND interval_seconds IS NULL) OR "
@@ -69,8 +74,8 @@ class AgentSchedule(Base, TimestampMixin, VersionMixin):
         Index("ix_agent_schedule_source_session", "source_session_id"),
         Index("ix_agent_schedule_lease", "lease_expires_at", "lease_owner"),
         UniqueConstraint(
-            "created_by_tool_invocation_id",
-            name="uq_agent_schedule_created_by_tool_invocation",
+            "definition_tool_invocation_id",
+            name="uq_agent_schedule_definition_tool_invocation",
         ),
     )
 
@@ -82,17 +87,22 @@ class AgentSchedule(Base, TimestampMixin, VersionMixin):
     user_id: Mapped[str] = mapped_column(
         String(191), ForeignKey("user_identity.user_id"), nullable=False
     )
-    agent_id: Mapped[str] = mapped_column(String(36), ForeignKey("agent.id"), nullable=False)
-    name: Mapped[str] = mapped_column(String(200), nullable=False)
-    prompt: Mapped[str] = mapped_column(Text, nullable=False)
-    context_mode: Mapped[str] = mapped_column(
-        String(24), default="new_session", nullable=False
-    )
-    source_session_id: Mapped[str | None] = mapped_column(
-        String(36), ForeignKey("user_session.id")
-    )
-    created_by_tool_invocation_id: Mapped[str | None] = mapped_column(
+    definition_tool_invocation_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("tool_invocation.id")
+    )
+    # Compatibility-only columns for schedules created before revision 0049.
+    # New definitions are read from the referenced immutable ToolInvocation.
+    legacy_agent_id: Mapped[str | None] = mapped_column(
+        "agent_id", String(36), ForeignKey("agent.id")
+    )
+    legacy_name: Mapped[str | None] = mapped_column("name", String(200))
+    legacy_prompt: Mapped[str | None] = mapped_column("prompt", Text)
+    legacy_context_mode: Mapped[str | None] = mapped_column(
+        "context_mode", String(24)
+    )
+    legacy_source_session_id: Mapped[str | None] = mapped_column(
+        "source_session_id",
+        String(36), ForeignKey("user_session.id")
     )
     schedule_type: Mapped[str] = mapped_column(String(20), nullable=False)
     cron_expression: Mapped[str | None] = mapped_column(String(191))
@@ -101,14 +111,18 @@ class AgentSchedule(Base, TimestampMixin, VersionMixin):
     timezone: Mapped[str] = mapped_column(String(100), nullable=False)
     next_fire_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
     end_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
-    version_policy: Mapped[str] = mapped_column(String(32), nullable=False)
-    pinned_agent_version_id: Mapped[str | None] = mapped_column(
-        String(36), ForeignKey("agent_version.id")
+    legacy_version_policy: Mapped[str | None] = mapped_column(
+        "version_policy", String(32)
+    )
+    legacy_pinned_agent_version_id: Mapped[str | None] = mapped_column(
+        "pinned_agent_version_id", String(36), ForeignKey("agent_version.id")
     )
     overlap_policy: Mapped[str] = mapped_column(String(20), nullable=False)
     misfire_policy: Mapped[str] = mapped_column(String(20), nullable=False)
     misfire_grace_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False)
+    max_occurrences: Mapped[int | None] = mapped_column(BigInteger)
+    occurrence_count: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     total_fire_count: Mapped[int] = mapped_column(BigInteger, default=0, nullable=False)
     last_scheduled_for: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
     last_fired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
@@ -165,16 +179,25 @@ class AgentScheduleFire(Base, TimestampMixin):
     status: Mapped[str] = mapped_column(String(20), nullable=False)
     reason_code: Mapped[str | None] = mapped_column(String(100))
     schedule_version: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    prompt_snapshot: Mapped[str] = mapped_column(Text, nullable=False)
-    prompt_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    timezone_snapshot: Mapped[str] = mapped_column(String(100), nullable=False)
-    context_mode_snapshot: Mapped[str] = mapped_column(
-        String(24), default="new_session", nullable=False
+    definition_tool_invocation_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("tool_invocation.id")
     )
-    source_session_id_snapshot: Mapped[str | None] = mapped_column(
+    definition_hash: Mapped[str | None] = mapped_column(String(64))
+    occurrence_no: Mapped[int | None] = mapped_column(BigInteger)
+    # Compatibility-only immutable snapshots for pre-0049 fires.
+    legacy_prompt_snapshot: Mapped[str | None] = mapped_column("prompt_snapshot", Text)
+    legacy_prompt_hash: Mapped[str | None] = mapped_column("prompt_hash", String(64))
+    timezone_snapshot: Mapped[str] = mapped_column(String(100), nullable=False)
+    legacy_context_mode_snapshot: Mapped[str | None] = mapped_column(
+        "context_mode_snapshot", String(24)
+    )
+    legacy_source_session_id_snapshot: Mapped[str | None] = mapped_column(
+        "source_session_id_snapshot",
         String(36), ForeignKey("user_session.id")
     )
-    version_policy_snapshot: Mapped[str] = mapped_column(String(32), nullable=False)
+    legacy_version_policy_snapshot: Mapped[str | None] = mapped_column(
+        "version_policy_snapshot", String(32)
+    )
     agent_version_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("agent_version.id")
     )
@@ -219,7 +242,11 @@ class RunnerScheduleSnapshot(Base):
     schedule_version: Mapped[int] = mapped_column(BigInteger, nullable=False)
     scheduled_for: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
     timezone: Mapped[str] = mapped_column(String(100), nullable=False)
-    prompt_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    definition_tool_invocation_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("tool_invocation.id")
+    )
+    definition_hash: Mapped[str | None] = mapped_column(String(64))
+    legacy_prompt_hash: Mapped[str | None] = mapped_column("prompt_hash", String(64))
     agent_version_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("agent_version.id"), nullable=False
     )

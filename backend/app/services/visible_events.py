@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
-from sqlalchemy import or_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.foundation import ExecutionEvent, ExecutionEventRecipient, UserSession
@@ -88,12 +89,30 @@ class VisibleEventProjection:
         group_run_id: str | None = None,
         delegated: bool = False,
         hard_limit: int = 1000,
+        after: tuple[datetime, str] | None = None,
+        through: tuple[datetime, str] | None = None,
+        oldest_first: bool = False,
+        message_ids: list[str] | None = None,
     ) -> list[Message]:
         """Return only the Message history directly visible to a Runner scope."""
         session = await self.db.get(UserSession, session_id)
         if session is None or session.user_id != user_id:
             raise LookupError("session not found")
         hard_limit = max(1, min(hard_limit, 2000))
+        bounds = []
+        if after is not None:
+            bounds.append(or_(Message.created_at > after[0], and_(
+                Message.created_at == after[0], Message.id > after[1],
+            )))
+        if through is not None:
+            bounds.append(or_(Message.created_at < through[0], and_(
+                Message.created_at == through[0], Message.id <= through[1],
+            )))
+        if message_ids is not None:
+            bounds.append(Message.id.in_(message_ids[:200]))
+        ordering = (Message.created_at.asc(), Message.id.asc()) if oldest_first else (
+            Message.created_at.desc(), Message.id.desc(),
+        )
         if mode == "group":
             if not group_membership_id or not group_run_id:
                 raise LookupError("group membership and GroupRun are required")
@@ -116,8 +135,9 @@ class VisibleEventProjection:
             visible_run_ids = {group_run_id, *referenced_run_ids}
             group_session_id = group_run.group_session_id
             agent_id = snapshot.agent_id
-            return list(await self.db.scalars(
+            messages = list(await self.db.scalars(
                 select(Message).where(
+                    *bounds,
                     Message.session_id == session_id,
                     Message.scope_type == "group",
                     Message.group_session_id == group_session_id,
@@ -128,19 +148,22 @@ class VisibleEventProjection:
                         Message.recipient_agent_id == agent_id,
                         Message.recipient_membership_id == group_membership_id,
                     ),
-                ).order_by(Message.created_at.desc(), Message.id.desc()).limit(hard_limit)
-            ))[::-1]
+                ).order_by(*ordering).limit(hard_limit)
+            ))
+            return messages if oldest_first else messages[::-1]
         # A delegated Agent receives its explicit AgentInvocation request below;
         # ambient parent Chat/Plan history is not part of that principal's view.
         if delegated:
             return []
-        return list(await self.db.scalars(
+        messages = list(await self.db.scalars(
             select(Message).where(
+                *bounds,
                 Message.session_id == session_id,
                 Message.scope_type == "chat",
                 Message.status == "committed",
-            ).order_by(Message.created_at.desc(), Message.id.desc()).limit(hard_limit)
-        ))[::-1]
+            ).order_by(*ordering).limit(hard_limit)
+        ))
+        return messages if oldest_first else messages[::-1]
 
 
 def event_public_dict(event: ExecutionEvent) -> dict:

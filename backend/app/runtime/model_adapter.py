@@ -47,6 +47,9 @@ def _retryable_transport(error: Exception) -> bool:
 
 def _classify_provider_error(error: Exception, *, received_payload: bool) -> ProviderError:
     if isinstance(error, ProviderError):
+        # SDK wrappers may construct their error before learning that the
+        # stream already delivered text or tool-call payload.
+        error.received_payload = error.received_payload or received_payload
         return error
     status_code = getattr(error, "status_code", None)
     message = str(error)
@@ -57,7 +60,10 @@ def _classify_provider_error(error: Exception, *, received_payload: bool) -> Pro
         code, retryable = "provider_rate_limit", True
     elif status_code == 408 or "timeout" in normalized or "timed out" in normalized:
         code, retryable = "provider_timeout", True
-    elif "context length" in normalized or "context window" in normalized:
+    elif any(marker in normalized for marker in (
+        "context length", "context window", "context_length_exceeded", "prompt is too long",
+        "prompt too long",
+    )):
         code, retryable = "provider_context_length", False
     elif any(marker in normalized for marker in (
         "connection reset", "connection error", "peer closed connection",

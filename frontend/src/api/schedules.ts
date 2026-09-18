@@ -5,6 +5,7 @@ export type ScheduleStatus = 'active' | 'paused' | 'completed' | 'disabled'
 
 export interface AgentSchedule {
   id: string
+  definition_tool_invocation_id: string | null
   agent_id: string
   agent_name: string
   name: string
@@ -25,6 +26,8 @@ export interface AgentSchedule {
   misfire_policy: 'skip' | 'fire_once'
   misfire_grace_seconds: number
   status: ScheduleStatus
+  max_occurrences: number | null
+  occurrence_count: number
   total_fire_count: number
   last_scheduled_for: string | null
   last_fired_at: string | null
@@ -42,6 +45,9 @@ export interface AgentScheduleFire {
   agent_id: string
   agent_name: string
   trigger_kind: 'scheduled' | 'manual'
+  definition_tool_invocation_id: string | null
+  definition_hash: string | null
+  occurrence_no: number | null
   context_mode: 'new_session' | 'continue_session'
   scheduled_for: string
   scheduled_for_local: string
@@ -61,29 +67,22 @@ export interface AgentScheduleFire {
   updated_at: string
 }
 
-export interface AgentScheduleInput {
-  agent_id: string
-  name: string
-  prompt: string
-  schedule_type: ScheduleType
-  run_at: string | null
-  cron_expression: string | null
-  interval_seconds: number | null
-  timezone: string
-  end_at: string | null
-  version_policy: 'latest_published' | 'pinned'
-  pinned_agent_version_id: string | null
-  overlap_policy: 'skip' | 'queue_one' | 'allow'
-  misfire_policy: 'skip' | 'fire_once'
-  misfire_grace_seconds: number
+export interface AgentSchedulePatch {
+  schedule_type?: ScheduleType
+  run_at?: string | null
+  cron_expression?: string | null
+  interval_seconds?: number | null
+  timezone?: string
+  end_at?: string | null
+  max_occurrences?: number | null
+  overlap_policy?: 'skip' | 'queue_one' | 'allow'
+  misfire_policy?: 'skip' | 'fire_once'
+  misfire_grace_seconds?: number
 }
 
 export const schedulesApi = {
   list: () => client.get<AgentSchedule[]>('/schedules').then(r => r.data),
-  create: (input: AgentScheduleInput) => client.post<AgentSchedule>('/schedules', input, {
-    headers: { 'Idempotency-Key': crypto.randomUUID() },
-  }).then(r => r.data),
-  update: (item: AgentSchedule, input: Partial<AgentScheduleInput>) =>
+  update: (item: AgentSchedule, input: AgentSchedulePatch) =>
     client.patch<AgentSchedule>(`/schedules/${item.id}`, input, {
       headers: { 'If-Match': `W/"${item.version}"` },
     }).then(r => r.data),

@@ -4,6 +4,35 @@ All notable changes to MyClaw are documented in this file. The format follows [K
 
 ## [Unreleased]
 
+### Added
+
+- Added selectable concise, continuous-task and evidence-oriented context
+  presets using existing, independently versioned Context and History policies.
+- Added validated Context policy budgets, immutable policy publication and
+  model-request manifests retaining original source checksums and omissions.
+- Added first-class scheduled occurrence limits and stable, revalidated Platform
+  participant bindings for delayed Agent work.
+
+### Changed
+
+- Tune context defaults by workload: continuous tasks retain more recent
+  dialogue and tool steps, while evidence tasks reserve more space per source.
+  Publish new defaults for untouched built-ins and preserve frozen legacy behavior.
+- Advance history summaries with frozen parent summaries and bounded deltas,
+  validating source prefixes and recording pending or failed coverage gaps.
+- Apply the same context budget path at startup and every model turn, preserving
+  recent tool batches, evidence references and canonical resume results.
+- Bound zero-payload context-overflow recovery and prevent testing or publishing
+  an unsaved context preset in the Agent configuration page.
+- Keep every model Turn and settlement checkpoint aligned with the actual
+  compacted request, preserving continuation pairs across later-turn trimming.
+- Reduced `AgentSchedule` to timing and trigger state backed by an immutable
+  `schedule_task` ToolInvocation definition; every fire still creates a fresh
+  Run, WorkItem, Runner and AgentTurn through the normal Chat runtime.
+- Made the Schedule console management-only: task semantics are created and
+  revised through Agent conversation, while the console manages timing,
+  occurrence limits, pause/resume, run-now and history.
+
 ## [0.4.1] - 2026-08-15
 
 ### Added

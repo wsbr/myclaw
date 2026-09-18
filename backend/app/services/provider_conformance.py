@@ -44,6 +44,18 @@ SECOND_PROBE_TOOL = {
     **PROBE_TOOL,
     "name": "myclaw_conformance_echo_second",
 }
+TYPED_REPAIR_PROBE_TOOL = {
+    "name": "myclaw_conformance_typed_repair",
+    "description": (
+        "Record an integer occurrence count for Tool schema repair conformance testing."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"occurrences": {"type": "integer", "minimum": 1}},
+        "required": ["occurrences"],
+        "additionalProperties": False,
+    },
+}
 
 COORDINATION_PROBE_TOOLS = tuple({
     "name": item["name"],
@@ -355,6 +367,61 @@ class ProviderConformanceSuite:
                 and isinstance(repair.tool_calls[0].arguments.get("value"), str)
             ),
             "details": repair.as_dict(),
+        })
+
+        typed_repair = await self.adapter.invoke(ProviderRequest(
+            messages=(
+                {
+                    "role": "user",
+                    "content": (
+                        "Call myclaw_conformance_typed_repair exactly once with "
+                        "occurrences equal to the integer 10."
+                    ),
+                },
+                {
+                    "role": "assistant", "content": "",
+                    "tool_calls": [{
+                        "id": "invalid-typed-call", "type": "tool_use",
+                        "name": TYPED_REPAIR_PROBE_TOOL["name"],
+                        "input": {"occurrences": "10"},
+                    }],
+                },
+                {
+                    "role": "tool", "tool_use_id": "invalid-typed-call",
+                    "content": json.dumps({
+                        "status": "failed",
+                        "summary": "Tool arguments failed schema validation",
+                        "error": {
+                            "code": "tool_arguments_schema_error",
+                            "message": (
+                                "/occurrences must be a native JSON integer. "
+                                "Use 10 rather than the string \"10\" and retry the same Tool."
+                            ),
+                            "category": "validation",
+                        },
+                    }),
+                },
+            ),
+            # Deliberately retain the normal runtime parameters instead of
+            # forcing Tool choice or disabling provider thinking. This probe
+            # covers the same repair path used after a real schema rejection.
+            tools=(TYPED_REPAIR_PROBE_TOOL,), parameters=base_parameters,
+        ))
+        typed_call = (
+            typed_repair.tool_calls[0]
+            if len(typed_repair.tool_calls) == 1 else None
+        )
+        typed_repair_passed = bool(
+            typed_call
+            and typed_call.name == TYPED_REPAIR_PROBE_TOOL["name"]
+            and typed_call.arguments.get("occurrences") == 10
+            and not isinstance(typed_call.arguments.get("occurrences"), bool)
+            and typed_repair.stop_reason == StopReason.TOOL_USE
+        )
+        probes.append({
+            "name": "runtime_native_json_type_repair",
+            "passed": typed_repair_passed,
+            "details": typed_repair.as_dict(),
         })
 
         parallel_declared = capabilities.get("parallel_tool_calling") is True

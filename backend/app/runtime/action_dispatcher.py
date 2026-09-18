@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import re
 from dataclasses import dataclass, replace
 from typing import Any, Awaitable, Callable
 
@@ -36,9 +37,9 @@ class DispatchResult:
     schema_error: bool = False
     wait_reason: str | None = None
 
-    def provider_message(self) -> dict[str, Any]:
+    def provider_message(self, *, project: bool = True) -> dict[str, Any]:
         result = self.result
-        if self.tool_name in {"web_search", "web_fetch"}:
+        if project and self.tool_name in {"web_search", "web_fetch"}:
             from app.runtime.web_result_projection import (
                 BALANCED_SINGLE_FETCH_TOKENS,
                 BALANCED_SINGLE_SEARCH_TOKENS,
@@ -72,6 +73,11 @@ WEB_RETRIEVAL_LIMITS = {
 SCHEDULE_MUTATING_OPERATIONS = frozenset({
     "create", "update", "pause", "resume", "delete", "run_now",
 })
+
+# Runtime-owned compatibility policy for frozen built-in ToolVersions. New
+# versions also advertise this through annotations, but already-published
+# AgentVersions must receive correctness fixes without being republished.
+LOSSLESS_NORMALIZATION_TOOL_KEYS = frozenset({"schedule_task"})
 
 
 def _scheduled_schedule_mutation_failure(
@@ -131,6 +137,68 @@ def _schema_errors(value: Any, schema: dict[str, Any], path: str = "$") -> list[
     ]
 
 
+_CANONICAL_INTEGER_STRING = re.compile(r"-?(?:0|[1-9][0-9]*)\Z")
+
+
+def _json_pointer(path: str, key: object) -> str:
+    escaped = str(key).replace("~", "~0").replace("/", "~1")
+    return f"{path}/{escaped}" if path else f"/{escaped}"
+
+
+def _lossless_argument_normalization(
+    value: Any, schema: dict[str, Any], *, path: str = "",
+) -> tuple[Any, list[dict[str, str]]]:
+    """Apply only unambiguous JSON scalar repairs enabled by Tool metadata.
+
+    The provider-authored value remains immutable in ``AgentTurn.turn_items``.
+    Durable invocations persist the repair manifest alongside their authorization
+    snapshot so execution never disguises what the model originally emitted.
+    """
+
+    if isinstance(value, dict):
+        properties = schema.get("properties") if isinstance(schema, dict) else None
+        properties = properties if isinstance(properties, dict) else {}
+        normalized: dict[str, Any] = {}
+        repairs: list[dict[str, str]] = []
+        for key, item in value.items():
+            child_schema = properties.get(key)
+            child_schema = child_schema if isinstance(child_schema, dict) else {}
+            child, child_repairs = _lossless_argument_normalization(
+                item, child_schema, path=_json_pointer(path, key),
+            )
+            normalized[key] = child
+            repairs.extend(child_repairs)
+        return normalized, repairs
+    if isinstance(value, list):
+        item_schema = schema.get("items") if isinstance(schema, dict) else None
+        item_schema = item_schema if isinstance(item_schema, dict) else {}
+        normalized_items = []
+        repairs = []
+        for index, item in enumerate(value):
+            child, child_repairs = _lossless_argument_normalization(
+                item, item_schema, path=_json_pointer(path, index),
+            )
+            normalized_items.append(child)
+            repairs.extend(child_repairs)
+        return normalized_items, repairs
+
+    declared = schema.get("type") if isinstance(schema, dict) else None
+    declared_types = {declared} if isinstance(declared, str) else set(declared or [])
+    if (
+        isinstance(value, str)
+        and "integer" in declared_types
+        and "string" not in declared_types
+        and _CANONICAL_INTEGER_STRING.fullmatch(value) is not None
+    ):
+        return int(value), [{
+            "path": path or "/",
+            "from_type": "string",
+            "to_type": "integer",
+            "rule": "canonical_integer_string",
+        }]
+    return value, []
+
+
 def _remove_optional_nulls(value: Any, schema: dict[str, Any]) -> Any:
     """Undo OpenAI strict-mode nullable placeholders before neutral validation."""
 
@@ -153,6 +221,57 @@ def _remove_optional_nulls(value: Any, schema: dict[str, Any]) -> Any:
         else:
             normalized[key] = item
     return normalized
+
+
+def _prepare_tool_call(
+    call: ToolCallItem, definition: dict[str, Any],
+) -> tuple[ToolCallItem, list[dict[str, str]]]:
+    schema = definition.get("input_schema") or {}
+    arguments = _remove_optional_nulls(call.arguments, schema)
+    repairs: list[dict[str, str]] = []
+    if (
+        call.name in LOSSLESS_NORMALIZATION_TOOL_KEYS
+        or (definition.get("annotations") or {}).get(
+            "lossless_argument_normalization"
+        ) is True
+    ):
+        arguments, repairs = _lossless_argument_normalization(arguments, schema)
+    if arguments != call.arguments:
+        call = replace(call, arguments=arguments)
+    return call, repairs
+
+
+def _schema_failure(call: ToolCallItem, schema: dict[str, Any]) -> DispatchResult:
+    issues = validation_errors(call.arguments, schema)
+    errors = [
+        f"{item['path'] or '/'}: {item['message']}"
+        for item in issues
+    ]
+    repair_instruction = (
+        "Correct the arguments and call the same Tool again. Do not repeat the "
+        "unchanged arguments. Use native JSON types exactly as declared by the "
+        "Tool schema (for example, use 10 rather than \"10\" for an integer)."
+    )
+    return DispatchResult(
+        call.call_id, call.name,
+        ToolResult(
+            status="failed", summary="Tool arguments failed schema validation",
+            error=ToolError(
+                code="tool_arguments_schema_error",
+                message=f"{repair_instruction} Validation errors: {'; '.join(errors)}",
+                category="validation",
+                details={
+                    "errors": errors,
+                    "issues": [{
+                        "path": item["path"],
+                        "schema_path": item["schema_path"],
+                        "validator": item["validator"],
+                    } for item in issues],
+                    "repair_instruction": repair_instruction,
+                },
+            ),
+        ), schema_error=True,
+    )
 
 
 async def _dynamic_confirmation(
@@ -268,8 +387,9 @@ def _approval_presentation(
 async def _record_authorization_rejection(
     db: AsyncSession | None, *, call: ToolCallItem, context: RuntimeContext,
     run_id: str | None, source_turn_id: str | None, error_code: str,
+    error_category: str,
 ) -> None:
-    """Project a denied Tool call without manufacturing an invocation fact."""
+    """Project a rejected Tool call without manufacturing an invocation fact."""
 
     if db is None or not run_id or not source_turn_id:
         return
@@ -291,6 +411,7 @@ async def _record_authorization_rejection(
         visibility="user", summary=f"Tool request rejected: {call.name}",
         payload={
             "tool_key": call.name, "error_code": error_code,
+            "error_category": error_category,
             "arguments_hash": arguments_hash,
         },
         correlation_id=run_id,
@@ -339,18 +460,10 @@ class ActionDispatcher:
                     ),
                 ),
             )
-        neutral = _remove_optional_nulls(call.arguments, definition.get("input_schema") or {})
-        errors = _schema_errors(neutral, definition.get("input_schema") or {})
+        errors = _schema_errors(call.arguments, definition.get("input_schema") or {})
         if errors:
-            return DispatchResult(
-                call.call_id, call.name,
-                ToolResult(
-                    status="failed", summary="Tool arguments failed schema validation",
-                    error=ToolError(
-                        code="tool_arguments_schema_error", message="; ".join(errors),
-                        category="validation", details={"errors": errors},
-                    ),
-                ), schema_error=True,
+            return _schema_failure(
+                call, definition.get("input_schema") or {},
             )
         if permission_mode == "plan_readonly" and definition.get("side_effect", "none") != "none":
             return DispatchResult(
@@ -462,6 +575,7 @@ class ActionDispatcher:
                     db, call=call, context=runtime_context, run_id=run_id,
                     source_turn_id=source_turn_id,
                     error_code="web_retrieval_limit_exceeded",
+                    error_category="authorization",
                 )
                 continue
             admitted.append(call)
@@ -489,18 +603,23 @@ class ActionDispatcher:
         )
         rejected: dict[str, DispatchResult] = {}
         admitted: list[ToolCallItem] = []
-        for call in calls:
+        argument_normalizations: dict[str, list[dict[str, str]]] = {}
+        for original_call in calls:
+            definition = self.definitions.get(original_call.name) or {}
+            call, repairs = _prepare_tool_call(original_call, definition)
+            argument_normalizations[call.call_id] = repairs
             failure = self._preflight(
                 call, effective=effective, permission_mode=runtime_context.permission_mode,
                 authentication_source=runtime_context.authentication_source,
             )
             if failure is not None:
                 rejected[call.call_id] = failure
-                if failure.result.error and failure.result.error.category == "authorization":
+                error = failure.result.error
+                if error and error.category in {"authorization", "validation"}:
                     await _record_authorization_rejection(
                         db, call=call, context=runtime_context, run_id=run_id,
                         source_turn_id=source_turn_id,
-                        error_code=failure.result.error.code,
+                        error_code=error.code, error_category=error.category,
                     )
             else:
                 admitted.append(call)
@@ -542,6 +661,7 @@ class ActionDispatcher:
                 call, capability_snapshot=capability_snapshot,
                 runtime_context=runtime_context, db=db, run_id=run_id,
                 work_item_id=work_item_id, source_turn_id=source_turn_id,
+                argument_normalizations=argument_normalizations.get(call.call_id),
             )
             completed[call.call_id] = dispatched
             status = str((dispatched.result.data or {}).get("status") or dispatched.result.status)
@@ -562,6 +682,7 @@ class ActionDispatcher:
         run_id: str | None = None,
         work_item_id: str | None = None,
         source_turn_id: str | None = None,
+        argument_normalizations: list[dict[str, str]] | None = None,
     ) -> DispatchResult:
         effective = (
             capability_snapshot.effective_tool_keys
@@ -574,6 +695,7 @@ class ActionDispatcher:
                 db, call=call, context=runtime_context, run_id=run_id,
                 source_turn_id=source_turn_id,
                 error_code="tool_not_in_capability_snapshot",
+                error_category="authorization",
             )
             return DispatchResult(
                 call.call_id, call.name,
@@ -586,23 +708,11 @@ class ActionDispatcher:
                     ),
                 ),
             )
-        neutral_arguments = _remove_optional_nulls(
-            call.arguments, definition.get("input_schema") or {}
-        )
-        if neutral_arguments != call.arguments:
-            call = replace(call, arguments=neutral_arguments)
+        if argument_normalizations is None:
+            call, argument_normalizations = _prepare_tool_call(call, definition)
         errors = _schema_errors(call.arguments, definition.get("input_schema") or {})
         if errors:
-            return DispatchResult(
-                call.call_id, call.name,
-                ToolResult(
-                    status="failed", summary="Tool arguments failed schema validation",
-                    error=ToolError(
-                        code="tool_arguments_schema_error", message="; ".join(errors),
-                        category="validation", details={"errors": errors},
-                    ),
-                ), schema_error=True,
-            )
+            return _schema_failure(call, definition.get("input_schema") or {})
 
         # CapabilitySnapshot is the first authorization layer.  Re-evaluate
         # the actual semantic side-effect class at the Dispatcher boundary so
@@ -616,6 +726,7 @@ class ActionDispatcher:
                 db, call=call, context=runtime_context, run_id=run_id,
                 source_turn_id=source_turn_id,
                 error_code="permission_mode_denied",
+                error_category="authorization",
             )
             return DispatchResult(
                 call.call_id, call.name,
@@ -642,6 +753,7 @@ class ActionDispatcher:
                 db, call=call, context=runtime_context, run_id=run_id,
                 source_turn_id=source_turn_id,
                 error_code="schedule_recursive_mutation_denied",
+                error_category="authorization",
             )
             return recursive_schedule
 
@@ -814,6 +926,7 @@ class ActionDispatcher:
                     "permission_revision": runtime_context.permission_revision,
                     "authentication_source": runtime_context.authentication_source,
                     "permission_mode": runtime_context.permission_mode,
+                    "argument_normalizations": list(argument_normalizations or []),
                 },
                 execution_mode=definition.get("execution_mode", "inline"), status="created",
                 arguments=stored_arguments, arguments_hash=arguments_hash,
@@ -839,7 +952,12 @@ class ActionDispatcher:
                 entity_type="tool_invocation", entity_id=invocation.id,
                 entity_version=invocation.version, visibility="user",
                 summary=f"Tool requested: {call.name}",
-                payload={"tool_key": call.name, "status": invocation.status},
+                payload={
+                    "tool_key": call.name, "status": invocation.status,
+                    "argument_normalization_count": len(
+                        argument_normalizations or []
+                    ),
+                },
                 correlation_id=run_id,
             )
         if confirmation_policy == "always":

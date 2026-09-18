@@ -9,10 +9,10 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.database import Base
 from app.deps import CurrentAccount
-from app.models.agent_v1 import AgentAssemblyVersion, AgentBlueprint
+from app.models.agent_v1 import AgentAssemblyVersion, AgentBlueprint, AgentMember
 from app.models.common import utcnow, uuid7
 from app.models.foundation import PlatformAccount, UserIdentity, UserSession
-from app.models.runtime_v1 import Message, Run
+from app.models.runtime_v1 import DurableRunner, Message, MessageMention, Run, ToolInvocation
 from app.models.schedule_v1 import AgentSchedule, AgentScheduleFire, RunnerScheduleSnapshot
 from app.models.tenant_v1 import Tenant, TenantMembership
 from app.services.schedule_service import (
@@ -25,13 +25,15 @@ from app.services.schedule_service import (
     reconcile_one_fire,
 )
 import app.services.schedule_service as schedule_service
-from app.api.schedules import create_schedule
-from app.schemas.schedule_v1 import AgentScheduleCreate
+from app.api.schedules import update_schedule
+from app.schemas.schedule_v1 import AgentSchedulePatch
 from app.core.tool_registry.base import RuntimeContext
 from app.core.tool_registry.builtin.schedule_task import ScheduleTaskTool
 from app.runtime.action_dispatcher import ActionDispatcher
 from app.runtime.protocol import ToolCallItem
 from app.workers.runtime_worker import _scheduled_current_input, _scheduled_execution_rules
+from app.services.schedule_definition_service import load_schedule_definition
+from app.services.principal_ref_service import encode_account_ref
 
 
 pytestmark = pytest.mark.unit
@@ -148,21 +150,25 @@ async def _seed(factory, *, next_fire_at: datetime) -> str:
             ),
             AgentSchedule(
                 id=schedule_id, tenant_id=tenant_id, account_id=account_id,
-                user_id="schedule-user", agent_id=agent_id,
-                name="Daily report", prompt="Summarize the latest evidence",
+                user_id="schedule-user", legacy_agent_id=agent_id,
+                legacy_name="Daily report",
+                legacy_prompt="Summarize the latest evidence",
                 schedule_type="interval", interval_seconds=3600,
                 run_at=None, cron_expression=None, timezone="Asia/Taipei",
                 next_fire_at=next_fire_at, end_at=None,
-                version_policy="latest_published", pinned_agent_version_id=None,
+                legacy_context_mode="new_session",
+                legacy_version_policy="latest_published",
+                legacy_pinned_agent_version_id=None,
                 overlap_policy="skip", misfire_policy="fire_once",
-                misfire_grace_seconds=300, status="active", total_fire_count=0,
+                misfire_grace_seconds=300, status="active",
+                max_occurrences=None, occurrence_count=0, total_fire_count=0,
             ),
         ])
     return schedule_id
 
 
 @pytest.mark.asyncio
-async def test_create_schedule_api_normalizes_offset_to_utc():
+async def test_schedule_api_updates_only_trigger_and_normalizes_offset_to_utc():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
@@ -171,19 +177,16 @@ async def test_create_schedule_api_normalizes_offset_to_utc():
     async with factory() as db:
         seeded = await db.get(AgentSchedule, seeded_id)
         account = await db.get(PlatformAccount, seeded.account_id)
-        agent_id = seeded.agent_id
     current = CurrentAccount(account=account, roles=frozenset({"user"}))
-    body = AgentScheduleCreate(
-        agent_id=agent_id, name="One time", prompt="Create a report",
+    body = AgentSchedulePatch(
         schedule_type="once",
         run_at=datetime.now(timezone.utc) + timedelta(hours=2),
-        timezone="Asia/Taipei", version_policy="latest_published",
-        overlap_policy="skip", misfire_policy="fire_once",
-        misfire_grace_seconds=300,
+        cron_expression=None, interval_seconds=None, timezone="Asia/Taipei",
     )
     async with factory() as db:
-        response = await create_schedule(
-            body=body, idempotency_key="create-once", db=db, current=current,
+        response = await update_schedule(
+            schedule_id=seeded_id, body=body, if_match='W/"1"',
+            db=db, current=current,
         )
         assert response.schedule_type == "once"
         assert response.next_fire_at is not None
@@ -193,27 +196,75 @@ async def test_create_schedule_api_normalizes_offset_to_utc():
 
 
 @pytest.mark.asyncio
-async def test_agent_schedule_tool_creates_confirmed_owned_continuation_idempotently():
+async def test_agent_schedule_tool_creates_confirmed_owned_continuation_idempotently(
+    monkeypatch,
+):
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     factory = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(schedule_service, "AsyncSessionLocal", factory)
     seeded_id = await _seed(factory, next_fire_at=utcnow() + timedelta(hours=1))
     source_session_id = uuid7()
     async with factory.begin() as db:
         seeded = await db.get(AgentSchedule, seeded_id)
+        recipient_account_id = uuid7()
+        db.add(UserIdentity(user_id="recipient-user", status="active"))
+        await db.flush()
+        db.add(PlatformAccount(
+            id=recipient_account_id, tenant_id=seeded.tenant_id,
+            user_id="recipient-user", display_name="Report Recipient",
+            status="active", auth_revision=1,
+        ))
+        await db.flush()
+        db.add_all([
+            TenantMembership(
+                id=uuid7(), tenant_id=seeded.tenant_id,
+                account_id=recipient_account_id, role_key="member", status="active",
+            ),
+            AgentMember(
+                id=uuid7(), tenant_id=seeded.tenant_id,
+                agent_id=seeded.legacy_agent_id,
+                account_id=recipient_account_id,
+                granted_by_account_id=seeded.account_id,
+                granted_at=utcnow(), status="active",
+            ),
+        ])
         db.add(UserSession(
             id=source_session_id, tenant_id=seeded.tenant_id,
             account_id=seeded.account_id, user_id=seeded.user_id,
-            entry_agent_id=seeded.agent_id, status="active", origin_type="web",
+            entry_agent_id=seeded.legacy_agent_id, status="active", origin_type="web",
             permission_mode="direct", permission_revision=1,
+        ))
+        db.add(DurableRunner(
+            id="source-runner", tenant_id=seeded.tenant_id,
+            work_item_id="source-work", run_id="source-run",
+            session_id=source_session_id, agent_id=seeded.legacy_agent_id,
+            agent_version_id=(await db.get(
+                AgentBlueprint, seeded.legacy_agent_id,
+            )).current_published_version_id,
+            execution_epoch=1, fencing_token=1, status="running",
+            principal_snapshot={}, assembly_snapshot={}, prompt_manifest={},
+            input_snapshot={},
+        ))
+        db.add(ToolInvocation(
+            id="schedule-tool-invocation", tenant_id=seeded.tenant_id,
+            account_id=seeded.account_id, runner_id="source-runner",
+            work_item_id="source-work", run_id="source-run",
+            session_id=source_session_id, platform_tool_id="schedule-tool",
+            tool_version_id="schedule-tool-version",
+            tool_version_content_hash="d" * 64, tool_key="schedule_task",
+            execution_mode="inline", status="running", arguments={},
+            arguments_hash="e" * 64, business_idempotency_key="schedule-create",
+            principal_hash="f" * 64, authorization_snapshot={}, attempt_count=1,
+            execution_epoch=1,
         ))
     async with factory() as db:
         seeded = await db.get(AgentSchedule, seeded_id)
         context = RuntimeContext(
             tenant_id=seeded.tenant_id, account_id=seeded.account_id,
             session_id=source_session_id, runner_id="source-runner",
-            user_id=seeded.user_id, agent_id=seeded.agent_id,
+            user_id=seeded.user_id, agent_id=seeded.legacy_agent_id,
             tool_invocation_id="schedule-tool-invocation",
             runtime_clock={"timezone": "Asia/Taipei"},
         )
@@ -222,6 +273,13 @@ async def test_agent_schedule_tool_creates_confirmed_owned_continuation_idempote
         "instruction": "Continue reviewing the evidence in this conversation",
         "context_mode": "continue_session",
         "trigger": {"type": "delay", "delay_seconds": 120},
+        "principals": [{
+            "principal_ref": encode_account_ref(
+                tenant_id=context.tenant_id, agent_id=context.agent_id,
+                account_id=recipient_account_id,
+            ),
+            "role": "recipient",
+        }],
     }
     tool = ScheduleTaskTool()
     before = utcnow()
@@ -234,12 +292,64 @@ async def test_agent_schedule_tool_creates_confirmed_owned_continuation_idempote
     assert created.data["schedule"]["id"] == replayed.data["schedule"]["id"]
     async with factory() as db:
         item = await db.get(AgentSchedule, created.data["schedule"]["id"])
-        assert item.context_mode == "continue_session"
-        assert item.source_session_id == source_session_id
-        assert item.created_by_tool_invocation_id == "schedule-tool-invocation"
+        definition = await load_schedule_definition(db, item)
+        assert definition.context_mode == "continue_session"
+        assert definition.source_session_id == source_session_id
+        assert item.definition_tool_invocation_id == "schedule-tool-invocation"
+        assert item.legacy_prompt is None
+        assert definition.principals[0].account_id == recipient_account_id
+        assert definition.principals[0].role == "recipient"
         assert item.timezone == "Asia/Taipei"
         assert before + timedelta(seconds=119) <= item.next_fire_at
         assert item.next_fire_at <= before + timedelta(seconds=121)
+    async with factory.begin() as db:
+        item = await db.get(AgentSchedule, created.data["schedule"]["id"])
+        item.next_fire_at = utcnow() - timedelta(seconds=1)
+    schedule_claim = await claim_due_schedule("scheduler:principal-test")
+    assert schedule_claim is not None
+    assert await materialize_schedule_claim(schedule_claim) is True
+    fire_claim = await claim_dispatchable_fire("scheduler:principal-test")
+    assert fire_claim is not None
+    assert await dispatch_fire_claim(fire_claim) is True
+    async with factory() as db:
+        fire = await db.get(AgentScheduleFire, fire_claim.fire_id)
+        runner = await db.get(DurableRunner, fire.runner_id)
+        mention = await db.scalar(select(MessageMention).where(
+            MessageMention.message_id == fire.input_message_id,
+        ))
+        resolved = runner.input_snapshot["resolved_user_mentions"][0]
+        assert mention.target_account_id == recipient_account_id
+        assert resolved["account_id"] == recipient_account_id
+        assert resolved["role"] == "recipient"
+        assert resolved["principal_ref"].startswith("usr_")
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_max_occurrences_completes_after_exactly_ten_materializations(monkeypatch):
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    monkeypatch.setattr(schedule_service, "AsyncSessionLocal", factory)
+    schedule_id = await _seed(factory, next_fire_at=utcnow() - timedelta(seconds=1))
+    async with factory.begin() as db:
+        schedule = await db.get(AgentSchedule, schedule_id)
+        schedule.max_occurrences = 10
+    for occurrence in range(1, 11):
+        claim = await claim_due_schedule(f"scheduler:occurrence-{occurrence}")
+        assert claim is not None
+        assert await materialize_schedule_claim(claim) is True
+        async with factory.begin() as db:
+            schedule = await db.get(AgentSchedule, schedule_id)
+            assert schedule.occurrence_count == occurrence
+            if occurrence < 10:
+                assert schedule.status == "active"
+                schedule.next_fire_at = utcnow() - timedelta(seconds=1)
+            else:
+                assert schedule.status == "completed"
+                assert schedule.next_fire_at is None
+    assert await claim_due_schedule("scheduler:eleventh") is None
     await engine.dispose()
 
 
@@ -256,7 +366,7 @@ async def test_schedule_triggered_run_cannot_recursively_create_schedule():
         db.add(UserSession(
             id=source_session_id, tenant_id=seeded.tenant_id,
             account_id=seeded.account_id, user_id=seeded.user_id,
-            entry_agent_id=seeded.agent_id, status="active", origin_type="schedule",
+            entry_agent_id=seeded.legacy_agent_id, status="active", origin_type="schedule",
             origin_schedule_id=seeded.id, permission_mode="direct",
             permission_revision=1,
         ))
@@ -268,7 +378,7 @@ async def test_schedule_triggered_run_cannot_recursively_create_schedule():
         }, RuntimeContext(
             tenant_id=seeded.tenant_id, account_id=seeded.account_id,
             session_id=source_session_id, runner_id="scheduled-runner",
-            user_id=seeded.user_id, agent_id=seeded.agent_id,
+            user_id=seeded.user_id, agent_id=seeded.legacy_agent_id,
             tool_invocation_id="recursive-invocation",
             authentication_source="schedule",
         ), db=db)
@@ -313,7 +423,7 @@ async def test_fire_is_idempotent_and_dispatches_platform_authored_normal_run(mo
         assert directive.sender_user_id is None
         assert directive.role == "user"
         assert run.mode == "chat"
-        assert snapshot.prompt_hash == fire.prompt_hash
+        assert snapshot.definition_hash == fire.definition_hash
 
     async with factory.begin() as db:
         fire = await db.get(AgentScheduleFire, fire_claim.fire_id)
@@ -340,12 +450,12 @@ async def test_fire_can_continue_the_original_conversation(monkeypatch):
     source_session_id = uuid7()
     async with factory.begin() as db:
         schedule = await db.get(AgentSchedule, schedule_id)
-        schedule.context_mode = "continue_session"
-        schedule.source_session_id = source_session_id
+        schedule.legacy_context_mode = "continue_session"
+        schedule.legacy_source_session_id = source_session_id
         db.add(UserSession(
             id=source_session_id, tenant_id=schedule.tenant_id,
             account_id=schedule.account_id, user_id=schedule.user_id,
-            entry_agent_id=schedule.agent_id, status="active", origin_type="web",
+            entry_agent_id=schedule.legacy_agent_id, status="active", origin_type="web",
             permission_mode="direct", permission_revision=1,
         ))
 
@@ -358,8 +468,7 @@ async def test_fire_can_continue_the_original_conversation(monkeypatch):
     async with factory() as db:
         fire = await db.get(AgentScheduleFire, fire_claim.fire_id)
         directive = await db.get(Message, fire.input_message_id)
-        assert fire.context_mode_snapshot == "continue_session"
-        assert fire.source_session_id_snapshot == source_session_id
+        assert fire.definition_hash is not None
         assert fire.session_id == source_session_id
         assert directive.session_id == source_session_id
         assert directive.sender_type == "system"
@@ -380,9 +489,9 @@ async def test_overlapping_skip_is_ledgered_without_second_run(monkeypatch):
             id=uuid7(), schedule_id=schedule.id, tenant_id=schedule.tenant_id,
             account_id=schedule.account_id, trigger_kind="manual",
             operation_key="manual:active", scheduled_for=utcnow(), status="running",
-            schedule_version=1, prompt_snapshot=schedule.prompt,
-            prompt_hash="b" * 64, timezone_snapshot=schedule.timezone,
-            version_policy_snapshot=schedule.version_policy,
+            schedule_version=1, legacy_prompt_snapshot=schedule.legacy_prompt,
+            legacy_prompt_hash="b" * 64, timezone_snapshot=schedule.timezone,
+            legacy_version_policy_snapshot=schedule.legacy_version_policy,
             session_id=None, run_id="already-running", runner_id="active-runner",
             fired_at=utcnow(),
         ))
@@ -420,10 +529,10 @@ async def test_expired_dispatch_lease_is_recovered_without_bulk_update(monkeypat
             "scheduled_for": utcnow(),
             "status": "dispatching",
             "schedule_version": 1,
-            "prompt_snapshot": schedule.prompt,
-            "prompt_hash": "c" * 64,
+            "legacy_prompt_snapshot": schedule.legacy_prompt,
+            "legacy_prompt_hash": "c" * 64,
             "timezone_snapshot": schedule.timezone,
-            "version_policy_snapshot": schedule.version_policy,
+            "legacy_version_policy_snapshot": schedule.legacy_version_policy,
             "run_id": None,
         }
         db.add_all([

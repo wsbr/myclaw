@@ -8,11 +8,10 @@ import type { Dayjs } from 'dayjs'
 import dayjs from 'dayjs'
 import utc from 'dayjs/plugin/utc'
 import timezone from 'dayjs/plugin/timezone'
-import { CalendarClock, History, Pause, Play, Plus, Rocket, Trash2 } from 'lucide-react'
+import { CalendarClock, History, Pause, Play, Rocket, Trash2 } from 'lucide-react'
 
-import { agentsApi } from '@/api/agents'
 import {
-  AgentSchedule, AgentScheduleFire, AgentScheduleInput, ScheduleType, schedulesApi,
+  AgentSchedule, AgentScheduleFire, AgentSchedulePatch, ScheduleType, schedulesApi,
 } from '@/api/schedules'
 import { displayLabel } from '@/lib/presentation'
 
@@ -23,32 +22,25 @@ dayjs.extend(timezone)
 const localTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai'
 
 type FormValues = {
-  agent_id: string
-  name: string
-  prompt: string
   schedule_type: ScheduleType
   run_at?: Dayjs
   cron_expression?: string
   interval_minutes?: number
   timezone: string
-  version_policy: 'latest_published' | 'pinned'
+  max_occurrences?: number | null
   overlap_policy: 'skip' | 'queue_one' | 'allow'
   misfire_policy: 'skip' | 'fire_once'
   misfire_grace_seconds: number
 }
 
-function formToInput(values: FormValues): AgentScheduleInput {
+function formToInput(values: FormValues): AgentSchedulePatch {
   return {
-    agent_id: values.agent_id,
-    name: values.name.trim(), prompt: values.prompt.trim(),
     schedule_type: values.schedule_type,
     run_at: values.schedule_type === 'once' ? values.run_at!.toISOString() : null,
     cron_expression: values.schedule_type === 'cron' ? values.cron_expression!.trim() : null,
     interval_seconds: values.schedule_type === 'interval' ? values.interval_minutes! * 60 : null,
     timezone: values.timezone,
-    end_at: null,
-    version_policy: values.version_policy,
-    pinned_agent_version_id: null,
+    max_occurrences: values.schedule_type === 'once' ? 1 : values.max_occurrences || null,
     overlap_policy: values.overlap_policy,
     misfire_policy: values.misfire_policy,
     misfire_grace_seconds: values.misfire_grace_seconds,
@@ -80,7 +72,6 @@ export default function SchedulesPage() {
   const schedules = useQuery({
     queryKey: ['agent-schedules'], queryFn: schedulesApi.list, refetchInterval: 5000,
   })
-  const agents = useQuery({ queryKey: ['agents'], queryFn: agentsApi.list })
   const fires = useQuery({
     queryKey: ['agent-schedule-fires', historyItem?.id],
     queryFn: () => schedulesApi.fires(historyItem!.id),
@@ -99,11 +90,9 @@ export default function SchedulesPage() {
   }
 
   const save = useMutation({
-    mutationFn: (values: FormValues) => editing
-      ? schedulesApi.update(editing, formToInput(values))
-      : schedulesApi.create(formToInput(values)),
+    mutationFn: (values: FormValues) => schedulesApi.update(editing!, formToInput(values)),
     onSuccess: async () => {
-      message.success(editing ? '定时任务已更新' : '定时任务已创建')
+      message.success('触发设置已更新')
       setModalOpen(false); setEditing(null); form.resetFields(); await refresh()
     },
     onError: () => message.error('保存失败，请检查时间、Cron 表达式或任务版本是否已变化'),
@@ -125,24 +114,14 @@ export default function SchedulesPage() {
     onError: () => message.error('停用失败，任务版本可能已变化'),
   })
 
-  const openCreate = () => {
-    setEditing(null)
-    form.setFieldsValue({
-      schedule_type: 'once', run_at: dayjs().add(10, 'minute'),
-      timezone: localTimezone, version_policy: 'latest_published',
-      overlap_policy: 'skip', misfire_policy: 'fire_once', misfire_grace_seconds: 300,
-    })
-    setModalOpen(true)
-  }
   const openEdit = (item: AgentSchedule) => {
     setEditing(item)
     form.setFieldsValue({
-      agent_id: item.agent_id, name: item.name, prompt: item.prompt,
       schedule_type: item.schedule_type,
       run_at: item.run_at ? dayjs.utc(item.run_at).tz(item.timezone) : undefined,
       cron_expression: item.cron_expression || undefined,
       interval_minutes: item.interval_seconds ? item.interval_seconds / 60 : undefined,
-      timezone: item.timezone, version_policy: item.version_policy,
+      timezone: item.timezone, max_occurrences: item.max_occurrences,
       overlap_policy: item.overlap_policy, misfire_policy: item.misfire_policy,
       misfire_grace_seconds: item.misfire_grace_seconds,
     })
@@ -166,11 +145,10 @@ export default function SchedulesPage() {
           到点后创建或继续一次标准智能体对话。模型、工具、审批、审计与群组涌现均沿用普通运行链路。
         </Paragraph>
       </div>
-      <Button type="primary" icon={<Plus className="size-4" />} onClick={openCreate}>新建任务</Button>
     </div>
 
     <Alert type="info" showIcon message={`${activeCount} 个任务正在调度`}
-      description="任务定义按所选 IANA 时区计算，数据库统一保存 UTC。多节点 Scheduler 使用租约与唯一触发键防止重复执行；暂停不会中断已经开始的运行。" />
+      description="任务内容由你在智能体对话中创建和修改；此处只管理触发时间、次数与运行策略。数据库统一保存 UTC，暂停不会中断已经开始的运行。" />
 
     <Card className="overflow-hidden" styles={{ body: { padding: 0 } }}>
       <Table rowKey="id" loading={schedules.isLoading} dataSource={schedules.data || []}
@@ -187,7 +165,9 @@ export default function SchedulesPage() {
           { title: '下次运行', render: (_: unknown, item: AgentSchedule) => item.next_fire_at
             ? <span>{dayjs.utc(item.next_fire_at).tz(item.timezone).format('YYYY-MM-DD HH:mm:ss')}</span> : '—' },
           { title: '状态', dataIndex: 'status', render: (value: string) => <Tag color={statusColor(value)}>{displayLabel(value)}</Tag> },
-          { title: '已执行', dataIndex: 'total_fire_count', width: 90 },
+          { title: '触发进度', width: 100, render: (_: unknown, item: AgentSchedule) =>
+            `${item.occurrence_count}${item.max_occurrences ? ` / ${item.max_occurrences}` : ''}` },
+          { title: '已运行', dataIndex: 'total_fire_count', width: 80 },
           { title: '操作', width: 330, render: (_: unknown, item: AgentSchedule) => <Space wrap>
             <Button size="small" onClick={() => openEdit(item)}>编辑</Button>
             <Button size="small" icon={<Rocket className="size-3.5" />} loading={runNow.isPending} onClick={() => runNow.mutate(item)}>立即执行</Button>
@@ -205,22 +185,13 @@ export default function SchedulesPage() {
         ]} />
     </Card>
 
-    <Modal title={editing ? '编辑定时任务' : '新建定时任务'} open={modalOpen}
+    <Modal title="编辑触发设置" open={modalOpen}
       onCancel={() => setModalOpen(false)} onOk={() => form.submit()}
       confirmLoading={save.isPending} okText="保存" width={720} destroyOnClose>
       <Form form={form} layout="vertical" onFinish={values => save.mutate(values)}>
-        <div className="grid gap-x-4 md:grid-cols-2">
-          <Form.Item name="name" label="任务名称" rules={[{ required: true }, { max: 200 }]}>
-            <Input placeholder="例如：每日风险摘要" />
-          </Form.Item>
-          <Form.Item name="agent_id" label="执行智能体" rules={[{ required: true }]}>
-            <Select disabled={!!editing} showSearch optionFilterProp="label" placeholder="选择已发布智能体"
-              options={(agents.data || []).filter(item => item.status === 'published').map(item => ({ value: item.id, label: item.name }))} />
-          </Form.Item>
-        </div>
-        <Form.Item name="prompt" label="任务指令" rules={[{ required: true }, { max: 16000 }]}>
-          <Input.TextArea rows={5} showCount maxLength={16000} placeholder="描述每次触发时希望智能体完成的工作。" />
-        </Form.Item>
+        {editing && <Alert className="mb-4" type="info" showIcon
+          message={`${editing.name} · ${editing.agent_name}`}
+          description="任务指令、上下文、参与人和智能体版本属于原始工具调用定义，请回到智能体对话中修改。" />}
         <Form.Item name="schedule_type" label="触发方式" rules={[{ required: true }]}>
           <Radio.Group optionType="button" buttonStyle="solid" options={[
             { value: 'once', label: '单次' }, { value: 'cron', label: 'Cron' }, { value: 'interval', label: '固定间隔' },
@@ -241,12 +212,10 @@ export default function SchedulesPage() {
           <Form.Item name="timezone" label="时区" rules={[{ required: true }]}>
             <Input placeholder="Asia/Shanghai" />
           </Form.Item>
-          <Form.Item name="version_policy" label="智能体版本" rules={[{ required: true }]}>
-            <Select options={[
-              { value: 'latest_published', label: '每次使用最新已发布版本' },
-              { value: 'pinned', label: '固定当前已发布版本' },
-            ]} />
-          </Form.Item>
+          {scheduleType !== 'once' && <Form.Item name="max_occurrences" label="最多触发次数"
+            extra="留空表示持续运行；已触发次数不会因编辑而清零。">
+            <InputNumber min={1} precision={0} className="w-full" placeholder="不限" />
+          </Form.Item>}
           <Form.Item name="overlap_policy" label="上次尚未完成" rules={[{ required: true }]}>
             <Select options={[
               { value: 'skip', label: '跳过本次（推荐）' },

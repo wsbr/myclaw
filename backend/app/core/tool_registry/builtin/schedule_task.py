@@ -10,7 +10,7 @@ from app.core.tool_registry.base import BaseTool, RuntimeContext, ToolResult
 from app.models.agent_v1 import AgentAssemblyVersion, AgentBlueprint
 from app.models.common import utcnow, uuid7
 from app.models.foundation import PlatformAccount, PlatformAccountRole, UserSession
-from app.models.runtime_v1 import DurableRunner
+from app.models.runtime_v1 import DurableRunner, ToolInvocation
 from app.models.schedule_v1 import AgentSchedule
 from app.models.tenant_v1 import TenantMembership
 from app.persistence.reliable_writes import PlatformAuditWriter
@@ -24,6 +24,14 @@ from app.services.schedule_service import (
     zone,
 )
 from app.services.agent_access_service import has_agent_use_access
+from app.services.agent_people_service import resolve_agent_person
+from app.services.principal_ref_service import InvalidPrincipalRef, decode_account_ref
+from app.services.schedule_definition_service import (
+    ScheduleDefinition,
+    SchedulePrincipal,
+    load_schedule_definition,
+    persist_schedule_definition,
+)
 
 
 MUTATING_OPERATIONS = frozenset(
@@ -59,13 +67,13 @@ def _parse_offset_datetime(value: object, *, field: str) -> datetime:
     return parsed
 
 
-def _schedule_data(item: AgentSchedule) -> dict:
+def _schedule_data(item: AgentSchedule, definition: ScheduleDefinition) -> dict:
     return {
         "id": item.id,
-        "agent_id": item.agent_id,
-        "name": item.name,
-        "instruction": item.prompt,
-        "context_mode": item.context_mode,
+        "agent_id": definition.agent_id,
+        "name": definition.name,
+        "instruction": definition.instruction,
+        "context_mode": definition.context_mode,
         "schedule_type": item.schedule_type,
         "cron_expression": item.cron_expression,
         "interval_seconds": item.interval_seconds,
@@ -77,10 +85,12 @@ def _schedule_data(item: AgentSchedule) -> dict:
             if item.next_fire_at else None
         ),
         "end_at": item.end_at.isoformat() if item.end_at else None,
-        "version_policy": item.version_policy,
+        "version_policy": definition.version_policy,
         "overlap_policy": item.overlap_policy,
         "misfire_policy": item.misfire_policy,
         "status": item.status,
+        "max_occurrences": item.max_occurrences,
+        "occurrence_count": item.occurrence_count,
         "total_fire_count": item.total_fire_count,
         "version": item.version,
     }
@@ -142,7 +152,7 @@ async def _authority(db, context: RuntimeContext) -> ToolResult | tuple:
 
 async def _owned_schedule(
     db, context: RuntimeContext, schedule_id: object,
-) -> AgentSchedule | ToolResult:
+) -> tuple[AgentSchedule, ScheduleDefinition] | ToolResult:
     if not isinstance(schedule_id, str) or not schedule_id.strip():
         return _failure("schedule_id_required", "schedule_id is required")
     item = await db.scalar(select(AgentSchedule).where(
@@ -150,7 +160,6 @@ async def _owned_schedule(
         AgentSchedule.tenant_id == context.tenant_id,
         AgentSchedule.account_id == context.account_id,
         AgentSchedule.user_id == context.user_id,
-        AgentSchedule.agent_id == context.agent_id,
     ).with_for_update())
     if item is None:
         return _failure(
@@ -158,7 +167,61 @@ async def _owned_schedule(
             "No schedule owned by this user and current Agent has that ID",
             category="authorization",
         )
-    return item
+    try:
+        definition = await load_schedule_definition(db, item)
+    except ValueError:
+        return _failure(
+            "schedule_definition_unavailable",
+            "The schedule execution definition is unavailable",
+            category="conflict",
+        )
+    if definition.agent_id != context.agent_id:
+        return _failure(
+            "schedule_not_found",
+            "No schedule owned by this user and current Agent has that ID",
+            category="authorization",
+        )
+    return item, definition
+
+
+async def _resolve_principals(
+    db, context: RuntimeContext, values: object,
+) -> tuple[SchedulePrincipal, ...]:
+    if values is None:
+        return ()
+    if not isinstance(values, list):
+        raise ValueError("principals must be an array")
+    resolved: list[SchedulePrincipal] = []
+    seen: set[str] = set()
+    for value in values:
+        if not isinstance(value, dict):
+            raise ValueError("each principal must be an object")
+        ref = value.get("principal_ref")
+        role = str(value.get("role") or "recipient")
+        if role not in {"recipient", "approver", "mentioned"}:
+            raise ValueError("principal role must be recipient, approver, or mentioned")
+        try:
+            account_id = decode_account_ref(
+                str(ref or ""), tenant_id=context.tenant_id,
+                agent_id=context.agent_id,
+            )
+        except InvalidPrincipalRef as error:
+            raise ValueError("principal_ref is invalid or outside the current Agent") from error
+        if account_id in seen:
+            raise ValueError("duplicate principal_ref")
+        person = await resolve_agent_person(
+            db, tenant_id=context.tenant_id, agent_id=context.agent_id,
+            requester_account_id=context.account_id or "",
+            target_account_id=account_id,
+        )
+        if person is None:
+            raise ValueError("principal is no longer contactable by this Agent")
+        seen.add(account_id)
+        resolved.append(SchedulePrincipal(
+            account_id=person.account_id, user_id=person.user_id,
+            display_name=person.display_name, handle=person.handle, role=role,
+        ))
+    return tuple(resolved)
 
 
 def _trigger_values(trigger: object, *, now: datetime, default_timezone: str) -> dict:
@@ -235,6 +298,26 @@ class ScheduleTaskTool(BaseTool):
             "schedule_id": {"type": "string", "minLength": 1, "maxLength": 36},
             "name": {"type": "string", "minLength": 1, "maxLength": 200},
             "instruction": {"type": "string", "minLength": 1, "maxLength": 16000},
+            "principals": {
+                "type": "array", "maxItems": 20,
+                "description": (
+                    "Platform people explicitly resolved in this conversation. Reuse only "
+                    "principal_ref values supplied by Runtime context; never invent one."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "principal_ref": {"type": "string", "minLength": 1},
+                        "role": {
+                            "type": "string",
+                            "enum": ["recipient", "approver", "mentioned"],
+                            "default": "recipient",
+                        },
+                    },
+                    "required": ["principal_ref"],
+                    "additionalProperties": False,
+                },
+            },
             "context_mode": {
                 "type": "string", "enum": ["new_session", "continue_session"],
                 "default": "new_session",
@@ -269,6 +352,13 @@ class ScheduleTaskTool(BaseTool):
                 "default": 300,
             },
             "end_at": {"type": ["string", "null"], "format": "date-time"},
+            "max_occurrences": {
+                "type": ["integer", "null"], "minimum": 1,
+                "description": (
+                    "Maximum scheduled occurrences; omit for an unbounded recurrence. "
+                    "Use a native JSON integer such as 10, never a quoted string such as \"10\"."
+                ),
+            },
             "status": {
                 "type": "string",
                 "enum": ["all", "active", "paused", "completed"],
@@ -305,19 +395,28 @@ class ScheduleTaskTool(BaseTool):
                 AgentSchedule.tenant_id == context.tenant_id,
                 AgentSchedule.account_id == account.id,
                 AgentSchedule.user_id == context.user_id,
-                AgentSchedule.agent_id == context.agent_id,
                 AgentSchedule.status != "disabled",
             )
             status = args.get("status", "all")
             if status != "all":
                 statement = statement.where(AgentSchedule.status == status)
             limit = int(args.get("limit", 20))
-            items = list(await db.scalars(statement.order_by(
+            candidates = list(await db.scalars(statement.order_by(
                 AgentSchedule.updated_at.desc(), AgentSchedule.id.desc(),
-            ).limit(limit)))
+            ).limit(max(limit * 5, 50))))
+            items: list[tuple[AgentSchedule, ScheduleDefinition]] = []
+            for item in candidates:
+                try:
+                    definition = await load_schedule_definition(db, item)
+                except ValueError:
+                    continue
+                if definition.agent_id == context.agent_id:
+                    items.append((item, definition))
+                if len(items) >= limit:
+                    break
             data = {
                 "operation": operation,
-                "items": [_schedule_data(item) for item in items],
+                "items": [_schedule_data(item, definition) for item, definition in items],
                 "count": len(items),
             }
             return ToolResult(
@@ -327,12 +426,37 @@ class ScheduleTaskTool(BaseTool):
 
         if operation == "create":
             existing = await db.scalar(select(AgentSchedule).where(
-                AgentSchedule.created_by_tool_invocation_id == context.tool_invocation_id,
+                AgentSchedule.definition_tool_invocation_id == context.tool_invocation_id,
             ))
+            if existing is None:
+                invocation = await db.get(ToolInvocation, context.tool_invocation_id)
+                result_data = dict(invocation.result_data or {}) if invocation else {}
+                result_schedule = dict(
+                    (result_data.get("data") or {}).get("schedule") or {}
+                )
+                replay_id = result_schedule.get("id")
+                if isinstance(replay_id, str):
+                    existing = await db.scalar(select(AgentSchedule).where(
+                        AgentSchedule.id == replay_id,
+                        AgentSchedule.tenant_id == context.tenant_id,
+                        AgentSchedule.account_id == account.id,
+                        AgentSchedule.user_id == context.user_id,
+                    ))
             if existing is not None:
-                data = {"operation": operation, "schedule": _schedule_data(existing), "replayed": True}
+                definition = await load_schedule_definition(db, existing)
+                if definition.agent_id != context.agent_id:
+                    return _failure(
+                        "schedule_replay_boundary_invalid",
+                        "The original schedule is outside the current Agent boundary",
+                        category="authorization",
+                    )
+                data = {
+                    "operation": operation,
+                    "schedule": _schedule_data(existing, definition),
+                    "replayed": True,
+                }
                 return ToolResult(
-                    status="succeeded", summary=f"Schedule already exists: {existing.name}",
+                    status="succeeded", summary=f"Schedule already exists: {definition.name}",
                     data=data, content_blocks=[{"type": "json", "value": data}],
                 )
             instruction = str(args.get("instruction") or "").strip()
@@ -354,6 +478,14 @@ class ScheduleTaskTool(BaseTool):
                 return _failure("invalid_schedule_trigger", str(error))
             if end_at is not None and end_at < timing["next_fire_at"]:
                 return _failure("schedule_end_before_first_fire", "end_at is before the first fire")
+            max_occurrences = args.get("max_occurrences")
+            if timing["schedule_type"] == "once":
+                if max_occurrences not in (None, 1):
+                    return _failure(
+                        "schedule_once_occurrence_limit",
+                        "A one-time schedule must have max_occurrences equal to 1",
+                    )
+                max_occurrences = 1
             context_mode = args.get("context_mode", "new_session")
             if (
                 context_mode == "continue_session"
@@ -382,23 +514,37 @@ class ScheduleTaskTool(BaseTool):
                         category="conflict",
                     )
                 pinned_id = version.id
+            try:
+                principals = await _resolve_principals(db, context, args.get("principals"))
+            except ValueError as error:
+                return _failure("invalid_schedule_principal", str(error))
+            definition = await persist_schedule_definition(
+                db, invocation_id=context.tool_invocation_id,
+                definition=ScheduleDefinition(
+                    tool_invocation_id=context.tool_invocation_id,
+                    agent_id=context.agent_id,
+                    name=str(args.get("name") or instruction[:80]).strip(),
+                    instruction=instruction, context_mode=context_mode,
+                    source_session_id=source_session.id,
+                    version_policy=version_policy,
+                    pinned_agent_version_id=pinned_id,
+                    principals=principals,
+                ),
+            )
             item = AgentSchedule(
                 id=uuid7(), tenant_id=context.tenant_id, account_id=account.id,
-                user_id=context.user_id, agent_id=context.agent_id,
-                name=str(args.get("name") or instruction[:80]).strip(),
-                prompt=instruction, context_mode=context_mode,
-                source_session_id=source_session.id,
-                created_by_tool_invocation_id=context.tool_invocation_id,
+                user_id=context.user_id,
+                definition_tool_invocation_id=context.tool_invocation_id,
                 schedule_type=timing["schedule_type"], run_at=timing["run_at"],
                 cron_expression=timing["cron_expression"],
                 interval_seconds=timing["interval_seconds"],
                 timezone=timing["timezone"], next_fire_at=timing["next_fire_at"],
-                end_at=end_at, version_policy=version_policy,
-                pinned_agent_version_id=pinned_id,
+                end_at=end_at,
                 overlap_policy=args.get("overlap_policy", "skip"),
                 misfire_policy=args.get("misfire_policy", "fire_once"),
                 misfire_grace_seconds=int(args.get("misfire_grace_seconds", 300)),
-                status="active", total_fire_count=0,
+                status="active", max_occurrences=max_occurrences,
+                occurrence_count=0, total_fire_count=0,
             )
             db.add(item)
             await db.flush()
@@ -406,13 +552,18 @@ class ScheduleTaskTool(BaseTool):
                 db, context, item, action="schedule.created_by_agent",
                 changes={
                     "schedule_type": item.schedule_type,
-                    "context_mode": item.context_mode,
-                    "agent_id": item.agent_id,
+                    "context_mode": definition.context_mode,
+                    "agent_id": definition.agent_id,
+                    "definition_tool_invocation_id": definition.tool_invocation_id,
                 },
             )
-            data = {"operation": operation, "schedule": _schedule_data(item), "replayed": False}
+            data = {
+                "operation": operation,
+                "schedule": _schedule_data(item, definition),
+                "replayed": False,
+            }
             return ToolResult(
-                status="succeeded", summary=f"Schedule created: {item.name}",
+                status="succeeded", summary=f"Schedule created: {definition.name}",
                 data=data, content_blocks=[{"type": "json", "value": data}],
                 evidence=[{
                     "kind": "agent_schedule", "schedule_id": item.id,
@@ -421,9 +572,10 @@ class ScheduleTaskTool(BaseTool):
                 }],
             )
 
-        item = await _owned_schedule(db, context, args.get("schedule_id"))
-        if isinstance(item, ToolResult):
-            return item
+        owned = await _owned_schedule(db, context, args.get("schedule_id"))
+        if isinstance(owned, ToolResult):
+            return owned
+        item, definition = owned
         if item.status == "disabled":
             return _failure(
                 "schedule_disabled", "The schedule has been disabled",
@@ -432,18 +584,10 @@ class ScheduleTaskTool(BaseTool):
 
         if operation == "update":
             changed: list[str] = []
-            if "name" in args:
-                name = str(args["name"]).strip()
-                if not name:
-                    return _failure("schedule_name_required", "name must not be blank")
-                item.name = name
-                changed.append("name")
-            if "instruction" in args:
-                instruction = str(args["instruction"]).strip()
-                if not instruction:
-                    return _failure("schedule_instruction_required", "instruction must not be blank")
-                item.prompt = instruction
-                changed.append("instruction")
+            semantic_fields = {
+                "name", "instruction", "context_mode", "version_policy", "principals",
+            }
+            semantic_changed = bool(semantic_fields.intersection(args))
             if "trigger" in args:
                 try:
                     timing = _trigger_values(
@@ -460,24 +604,8 @@ class ScheduleTaskTool(BaseTool):
                 changed.append("trigger")
                 if item.status == "completed":
                     item.status = "paused"
-            if "context_mode" in args:
-                if (
-                    args["context_mode"] == "continue_session"
-                    and source_session.entry_agent_id != context.agent_id
-                ):
-                    return _failure(
-                        "schedule_continuation_requires_entry_agent",
-                        "continue_session is only available to the conversation's entry Agent; use new_session",
-                        category="conflict",
-                    )
-                if args["context_mode"] == "continue_session" and not item.source_session_id:
-                    return _failure(
-                        "schedule_source_session_missing",
-                        "This schedule was not created from a conversation and cannot continue one",
-                        category="conflict",
-                    )
-                item.context_mode = args["context_mode"]
-                changed.append("context_mode")
+                if item.schedule_type == "once":
+                    item.max_occurrences = 1
             for field in (
                 "overlap_policy", "misfire_policy", "misfire_grace_seconds",
             ):
@@ -493,8 +621,31 @@ class ScheduleTaskTool(BaseTool):
                 except ValueError as error:
                     return _failure("invalid_schedule_end", str(error))
                 changed.append("end_at")
-            if "version_policy" in args:
-                policy = args["version_policy"]
+            if "max_occurrences" in args:
+                maximum = args["max_occurrences"]
+                if item.schedule_type == "once" and maximum not in (None, 1):
+                    return _failure(
+                        "schedule_once_occurrence_limit",
+                        "A one-time schedule must have max_occurrences equal to 1",
+                    )
+                item.max_occurrences = 1 if item.schedule_type == "once" else maximum
+                changed.append("max_occurrences")
+            if semantic_changed:
+                name = str(args.get("name", definition.name)).strip()
+                instruction = str(args.get("instruction", definition.instruction)).strip()
+                if not name:
+                    return _failure("schedule_name_required", "name must not be blank")
+                if not instruction:
+                    return _failure("schedule_instruction_required", "instruction must not be blank")
+                context_mode = args.get("context_mode", definition.context_mode)
+                if context_mode == "continue_session" and source_session.entry_agent_id != context.agent_id:
+                    return _failure(
+                        "schedule_continuation_requires_entry_agent",
+                        "continue_session is only available to the conversation's entry Agent; use new_session",
+                        category="conflict",
+                    )
+                policy = args.get("version_policy", definition.version_policy)
+                pinned_id = definition.pinned_agent_version_id
                 if policy == "pinned":
                     runner = await db.get(DurableRunner, context.runner_id)
                     version = (
@@ -510,22 +661,51 @@ class ScheduleTaskTool(BaseTool):
                             "The current Runner version cannot be pinned",
                             category="conflict",
                         )
-                    item.pinned_agent_version_id = version.id
+                    pinned_id = version.id
                 else:
-                    item.pinned_agent_version_id = None
-                item.version_policy = policy
-                changed.append("version_policy")
+                    pinned_id = None
+                if "principals" in args:
+                    try:
+                        principals = await _resolve_principals(db, context, args["principals"])
+                    except ValueError as error:
+                        return _failure("invalid_schedule_principal", str(error))
+                else:
+                    principals = definition.principals
+                definition = await persist_schedule_definition(
+                    db, invocation_id=context.tool_invocation_id,
+                    definition=ScheduleDefinition(
+                        tool_invocation_id=context.tool_invocation_id,
+                        agent_id=definition.agent_id, name=name,
+                        instruction=instruction, context_mode=context_mode,
+                        source_session_id=(
+                            source_session.id
+                            if context_mode == "continue_session"
+                            else definition.source_session_id
+                        ),
+                        version_policy=policy,
+                        pinned_agent_version_id=pinned_id,
+                        principals=principals,
+                    ),
+                )
+                item.definition_tool_invocation_id = context.tool_invocation_id
+                changed.extend(sorted(semantic_fields.intersection(args)))
             if not changed:
                 return _failure("schedule_update_empty", "No schedule fields were supplied for update")
             if item.end_at and item.next_fire_at and item.end_at < item.next_fire_at:
                 return _failure("schedule_end_before_next_fire", "end_at is before the next fire")
+            if (
+                item.max_occurrences is not None
+                and item.occurrence_count >= item.max_occurrences
+            ):
+                item.next_fire_at = None
+                item.status = "completed"
             item.version += 1
             await self._audit(
                 db, context, item, action="schedule.updated_by_agent",
                 changes={"fields": changed},
             )
-            summary = f"Schedule updated: {item.name}"
-            data = {"operation": operation, "schedule": _schedule_data(item)}
+            summary = f"Schedule updated: {definition.name}"
+            data = {"operation": operation, "schedule": _schedule_data(item, definition)}
         elif operation == "pause":
             if item.status != "paused":
                 item.status = "paused"
@@ -533,10 +713,19 @@ class ScheduleTaskTool(BaseTool):
                 item.version += 1
                 await cancel_pending_fires(db, item.id, reason="schedule_paused_by_agent")
                 await self._audit(db, context, item, action="schedule.paused_by_agent")
-            summary = f"Schedule paused: {item.name}"
-            data = {"operation": operation, "schedule": _schedule_data(item)}
+            summary = f"Schedule paused: {definition.name}"
+            data = {"operation": operation, "schedule": _schedule_data(item, definition)}
         elif operation == "resume":
             if item.status != "active":
+                if (
+                    item.max_occurrences is not None
+                    and item.occurrence_count >= item.max_occurrences
+                ):
+                    return _failure(
+                        "schedule_occurrence_limit_reached",
+                        "The schedule has reached its occurrence limit",
+                        category="conflict",
+                    )
                 try:
                     item.next_fire_at = initial_fire_at(
                         schedule_type=item.schedule_type, timezone_name=item.timezone,
@@ -554,8 +743,8 @@ class ScheduleTaskTool(BaseTool):
                 item.last_error_code = item.last_error_detail = None
                 item.version += 1
                 await self._audit(db, context, item, action="schedule.resumed_by_agent")
-            summary = f"Schedule resumed: {item.name}"
-            data = {"operation": operation, "schedule": _schedule_data(item)}
+            summary = f"Schedule resumed: {definition.name}"
+            data = {"operation": operation, "schedule": _schedule_data(item, definition)}
         elif operation == "delete":
             item.status = "disabled"
             item.next_fire_at = None
@@ -563,7 +752,7 @@ class ScheduleTaskTool(BaseTool):
             item.version += 1
             await cancel_pending_fires(db, item.id, reason="schedule_disabled_by_agent")
             await self._audit(db, context, item, action="schedule.disabled_by_agent")
-            summary = f"Schedule deleted: {item.name}"
+            summary = f"Schedule deleted: {definition.name}"
             data = {"operation": operation, "schedule_id": item.id, "status": item.status}
         elif operation == "run_now":
             fire = await create_manual_fire(
@@ -574,10 +763,10 @@ class ScheduleTaskTool(BaseTool):
                 db, context, item, action="schedule.run_now_requested_by_agent",
                 resource_type="agent_schedule_fire", resource_id=fire.id,
             )
-            summary = f"Schedule queued to run now: {item.name}"
+            summary = f"Schedule queued to run now: {definition.name}"
             data = {
                 "operation": operation,
-                "schedule": _schedule_data(item),
+                "schedule": _schedule_data(item, definition),
                 "fire": {"id": fire.id, "status": fire.status},
             }
         else:

@@ -25,6 +25,10 @@ from app.models.registry import (
 from app.core.tool_registry.schema import assert_valid_schema, builtin_result_schema
 from app.persistence.reliable_writes import PlatformAuditWriter
 from app.services.tool_display_names import builtin_tool_display_name_zh
+from app.services.context_policy_service import (
+    CONTEXT_POLICY_DEFAULTS, LEGACY_CONTEXT_POLICY_DEFAULTS,
+)
+from app.services.policy_version_service import publish_policy_version
 
 
 def _stable_hash(value: object) -> str:
@@ -76,7 +80,9 @@ class CodeToolSpec:
 
 
 POLICY_SEEDS = (
-    ("context.standard", "context", "Standard context", {"token_budget": 8_000}),
+    ("context.standard", "context", "Standard context", CONTEXT_POLICY_DEFAULTS["context.standard"]),
+    ("context.concise", "context", "Concise context", CONTEXT_POLICY_DEFAULTS["context.concise"]),
+    ("context.evidence", "context", "Evidence context", CONTEXT_POLICY_DEFAULTS["context.evidence"]),
     ("history.recent", "history", "Recent history", {"token_budget": 24_000, "max_messages": 80}),
     ("history.summary_recent", "history", "Summary plus recent history", {
         "token_budget": 24_000, "max_messages": 80, "summary_trigger_tokens": 12_000,
@@ -91,10 +97,36 @@ POLICY_SEEDS = (
 )
 
 
+async def _refresh_builtin_context_defaults(db: AsyncSession, policy: PolicyDefinition) -> None:
+    """Advance an untouched built-in head; preserve custom and frozen policies."""
+
+    defaults = CONTEXT_POLICY_DEFAULTS.get(policy.policy_key)
+    if (defaults is None or policy.policy_type != "context"
+            or policy.parameter_version != 1 or not policy.enabled or policy.status != "active"
+            or policy.implementation_ref != f"app.runtime.policies:{policy.policy_key}"
+            or policy.implementation_version != "1"
+            or policy.default_parameters == defaults):
+        return
+    known_defaults = [LEGACY_CONTEXT_POLICY_DEFAULTS[policy.policy_key]]
+    if policy.policy_key == "context.standard":
+        known_defaults.append({"token_budget": 8_000})
+    if policy.default_parameters not in known_defaults:
+        return
+    previous = await db.get(PolicyVersion, policy.current_version_id)
+    if (previous is None or previous.policy_definition_id != policy.id
+            or previous.status != "published"
+            or previous.implementation_ref != policy.implementation_ref
+            or previous.parameters != policy.default_parameters):
+        return
+    policy.default_parameters = dict(defaults)
+    policy.parameter_version += 1
+    await publish_policy_version(db, policy)
+
+
 async def seed_core_registries(db: AsyncSession) -> None:
     for key, policy_type, name, default_parameters in POLICY_SEEDS:
         existing = await db.scalar(
-            select(PolicyDefinition).where(PolicyDefinition.policy_key == key)
+            select(PolicyDefinition).where(PolicyDefinition.policy_key == key).with_for_update()
         )
         if existing is None:
             existing = PolicyDefinition(
@@ -105,7 +137,7 @@ async def seed_core_registries(db: AsyncSession) -> None:
                 description=name,
                 implementation_ref=f"app.runtime.policies:{key}",
                 implementation_version="1",
-                default_parameters=default_parameters,
+                default_parameters=dict(default_parameters),
                 parameter_version=1,
                 enabled=True,
                 status="active",
@@ -114,26 +146,9 @@ async def seed_core_registries(db: AsyncSession) -> None:
             db.add(existing)
             await db.flush()
         if existing.current_version_id is None:
-            content = {
-                "implementation_ref": existing.implementation_ref,
-                "parameters": existing.default_parameters,
-                "policy_type": existing.policy_type,
-            }
-            version = PolicyVersion(
-                id=uuid7(),
-                policy_definition_id=existing.id,
-                version_no=existing.next_version_no,
-                implementation_ref=existing.implementation_ref,
-                parameters=dict(existing.default_parameters or {}),
-                content_hash=_stable_hash(content),
-                status="published",
-                published_at=utcnow(),
-                version=1,
-            )
-            db.add(version)
-            await db.flush()
-            existing.current_version_id = version.id
-            existing.next_version_no += 1
+            await publish_policy_version(db, existing)
+        if policy_type == "context":
+            await _refresh_builtin_context_defaults(db, existing)
 
     sandbox = await db.scalar(
         select(SandboxProfile).where(SandboxProfile.profile_key == "local")
@@ -413,6 +428,9 @@ def builtin_tool_specs() -> list[CodeToolSpec]:
             annotations={
                 "untrusted_external_content": tool.name.startswith(("web_", "browser_")),
                 **({"eager": True} if tool.name == "schedule_task" else {}),
+                **({
+                    "lossless_argument_normalization": True,
+                } if tool.name == "schedule_task" else {}),
                 **({
                     "retrieval_profile": "balanced",
                     "model_visible_total_tokens": 12_000,

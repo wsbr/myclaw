@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -21,6 +20,12 @@ from app.models.schedule_v1 import AgentSchedule, AgentScheduleFire, RunnerSched
 from app.models.tenant_v1 import Tenant, TenantMembership
 from app.services.chat_service import AgentUnavailable, create_user_session, enqueue_chat_message
 from app.services.agent_access_service import has_agent_use_access
+from app.services.agent_people_service import resolve_agent_person
+from app.services.principal_ref_service import encode_account_ref
+from app.services.schedule_definition_service import (
+    ScheduleDefinition,
+    load_schedule_definition,
+)
 
 
 TERMINAL_FIRE_STATUSES = frozenset({"succeeded", "failed", "skipped", "cancelled"})
@@ -37,10 +42,6 @@ class ScheduleClaim:
 class FireClaim:
     fire_id: str
     lease_token: str
-
-
-def prompt_hash(prompt: str) -> str:
-    return hashlib.sha256(prompt.encode("utf-8")).hexdigest()
 
 
 def zone(name: str) -> ZoneInfo:
@@ -116,8 +117,12 @@ def advance_schedule(
     schedule: AgentSchedule, *, scheduled_for: datetime, now: datetime,
     coalesce_missed: bool,
 ) -> None:
-    next_at = next_fire_after(schedule, scheduled_for)
-    if coalesce_missed:
+    exhausted = (
+        schedule.max_occurrences is not None
+        and schedule.occurrence_count >= schedule.max_occurrences
+    )
+    next_at = None if exhausted else next_fire_after(schedule, scheduled_for)
+    if coalesce_missed and next_at is not None:
         if schedule.schedule_type == "cron":
             next_at = cron_next(
                 schedule.cron_expression or "", after_utc=now,
@@ -219,15 +224,15 @@ async def materialize_schedule_claim(claim: ScheduleClaim) -> bool:
                 operation_key=operation_key, scheduled_for=scheduled_for,
                 status=status, reason_code=reason,
                 schedule_version=schedule.version,
-                prompt_snapshot=schedule.prompt, prompt_hash=prompt_hash(schedule.prompt),
+                definition_tool_invocation_id=schedule.definition_tool_invocation_id,
                 timezone_snapshot=schedule.timezone,
-                context_mode_snapshot=schedule.context_mode,
-                source_session_id_snapshot=schedule.source_session_id,
-                version_policy_snapshot=schedule.version_policy,
-                agent_version_id=schedule.pinned_agent_version_id,
+                occurrence_no=schedule.occurrence_count + 1,
                 completed_at=now if status == "skipped" else None,
             )
+            definition = await load_schedule_definition(db, schedule)
+            fire.definition_hash = definition.content_hash
             db.add(fire)
+            schedule.occurrence_count += 1
         advance_schedule(
             schedule, scheduled_for=scheduled_for, now=now,
             # Never materialize an unbounded backlog after downtime or while a
@@ -303,9 +308,11 @@ async def _current_authority(db, schedule: AgentSchedule):
     return account
 
 
-async def _resolved_agent_version(db, schedule: AgentSchedule) -> str:
+async def _resolved_agent_version(
+    db, schedule: AgentSchedule, definition: ScheduleDefinition,
+) -> str:
     agent = await db.scalar(select(AgentBlueprint).where(
-        AgentBlueprint.id == schedule.agent_id,
+        AgentBlueprint.id == definition.agent_id,
         AgentBlueprint.tenant_id == schedule.tenant_id,
     ))
     if agent is None or agent.status != "published" or not agent.current_published_version_id:
@@ -318,8 +325,8 @@ async def _resolved_agent_version(db, schedule: AgentSchedule) -> str:
     ):
         raise AgentUnavailable("Scheduled Agent is no longer visible")
     version_id = (
-        schedule.pinned_agent_version_id
-        if schedule.version_policy == "pinned"
+        definition.pinned_agent_version_id
+        if definition.version_policy == "pinned"
         else agent.current_published_version_id
     )
     version = await db.get(AgentAssemblyVersion, version_id)
@@ -329,6 +336,33 @@ async def _resolved_agent_version(db, schedule: AgentSchedule) -> str:
     ):
         raise AgentUnavailable("Scheduled Agent version is unavailable")
     return version.id
+
+
+async def _resolved_principals(
+    db, schedule: AgentSchedule, definition: ScheduleDefinition,
+) -> list[dict]:
+    resolved = []
+    for principal in definition.principals:
+        person = await resolve_agent_person(
+            db, tenant_id=schedule.tenant_id, agent_id=definition.agent_id,
+            requester_account_id=schedule.account_id,
+            target_account_id=principal.account_id,
+        )
+        if person is None or person.user_id != principal.user_id:
+            raise AgentUnavailable(
+                f"Scheduled principal is no longer contactable: {principal.display_name}"
+            )
+        resolved.append({
+            "account_id": person.account_id,
+            "display_name": person.display_name,
+            "handle": person.handle,
+            "role": principal.role,
+            "principal_ref": encode_account_ref(
+                tenant_id=schedule.tenant_id, agent_id=definition.agent_id,
+                account_id=person.account_id,
+            ),
+        })
+    return resolved
 
 
 async def dispatch_fire_claim(claim: FireClaim) -> bool:
@@ -360,14 +394,20 @@ async def dispatch_fire_claim(claim: FireClaim) -> bool:
             if schedule is None or schedule.status == "disabled":
                 raise AgentUnavailable("Schedule is disabled")
             account = await _current_authority(db, schedule)
-            version_id = await _resolved_agent_version(db, schedule)
-            if fire.context_mode_snapshot == "continue_session":
+            definition = await load_schedule_definition(db, schedule, fire=fire)
+            if definition.agent_id != (schedule.legacy_agent_id or definition.agent_id):
+                raise AgentUnavailable("Schedule definition Agent does not match its legacy boundary")
+            version_id = await _resolved_agent_version(db, schedule, definition)
+            resolved_principals = await _resolved_principals(db, schedule, definition)
+            if fire.definition_hash and fire.definition_hash != definition.content_hash:
+                raise AgentUnavailable("Schedule definition integrity check failed")
+            if definition.context_mode == "continue_session":
                 session = await db.scalar(select(UserSession).where(
-                    UserSession.id == fire.source_session_id_snapshot,
+                    UserSession.id == definition.source_session_id,
                     UserSession.tenant_id == schedule.tenant_id,
                     UserSession.account_id == schedule.account_id,
                     UserSession.user_id == schedule.user_id,
-                    UserSession.entry_agent_id == schedule.agent_id,
+                    UserSession.entry_agent_id == definition.agent_id,
                     UserSession.status == "active",
                 ))
                 if session is None:
@@ -378,15 +418,15 @@ async def dispatch_fire_claim(claim: FireClaim) -> bool:
                 title_time = local_iso(fire.scheduled_for, fire.timezone_snapshot)[:16]
                 session = await create_user_session(
                     db, tenant_id=schedule.tenant_id, account_id=schedule.account_id,
-                    user_id=schedule.user_id, entry_agent_id=schedule.agent_id,
+                    user_id=schedule.user_id, entry_agent_id=definition.agent_id,
                     origin_type="schedule", origin_schedule_id=schedule.id,
-                    title=f"定时任务 · {schedule.name} · {title_time}",
+                    title=f"定时任务 · {definition.name} · {title_time}",
                     agent_version_id=version_id,
                     actor_type="service", actor_id="scheduler",
                 )
             message, run, _, runner = await enqueue_chat_message(
                 db, session_id=session.id, user_id=schedule.user_id,
-                content=fire.prompt_snapshot, idempotency_record_id=fire.id,
+                content=definition.instruction, idempotency_record_id=fire.id,
                 agent_version_id=version_id, execution_kind="scheduled",
                 sender_type="system", actor_type="service", actor_id="scheduler",
                 authentication_source="schedule",
@@ -394,8 +434,11 @@ async def dispatch_fire_claim(claim: FireClaim) -> bool:
                     "schedule_id": schedule.id, "schedule_fire_id": fire.id,
                     "scheduled_for": fire.scheduled_for.isoformat(),
                     "schedule_version": fire.schedule_version,
-                    "schedule_context_mode": fire.context_mode_snapshot,
+                    "schedule_context_mode": definition.context_mode,
+                    "schedule_definition_tool_invocation_id": definition.tool_invocation_id,
+                    "schedule_definition_hash": definition.content_hash,
                 },
+                resolved_mentions=resolved_principals,
             )
             runner.principal_snapshot = {
                 **dict(runner.principal_snapshot or {}),
@@ -407,7 +450,9 @@ async def dispatch_fire_claim(claim: FireClaim) -> bool:
                 runner_id=runner.id, fire_id=fire.id, schedule_id=schedule.id,
                 schedule_version=fire.schedule_version,
                 scheduled_for=fire.scheduled_for, timezone=fire.timezone_snapshot,
-                prompt_hash=fire.prompt_hash, agent_version_id=version_id,
+                definition_tool_invocation_id=definition.tool_invocation_id,
+                definition_hash=definition.content_hash,
+                agent_version_id=version_id,
                 account_auth_revision=account.auth_revision, created_at=utcnow(),
             ))
             now = utcnow()
@@ -549,13 +594,11 @@ async def create_manual_fire(
         account_id=schedule.account_id, trigger_kind="manual",
         operation_key=operation_key, scheduled_for=utcnow(), status="queued",
         schedule_version=schedule.version,
-        prompt_snapshot=schedule.prompt, prompt_hash=prompt_hash(schedule.prompt),
+        definition_tool_invocation_id=schedule.definition_tool_invocation_id,
         timezone_snapshot=schedule.timezone,
-        context_mode_snapshot=schedule.context_mode,
-        source_session_id_snapshot=schedule.source_session_id,
-        version_policy_snapshot=schedule.version_policy,
-        agent_version_id=schedule.pinned_agent_version_id,
     )
+    definition = await load_schedule_definition(db, schedule)
+    fire.definition_hash = definition.content_hash
     db.add(fire)
     await db.flush()
     return fire

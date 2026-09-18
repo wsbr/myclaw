@@ -18,6 +18,7 @@ from app.models.registry import (
 )
 from app.models.runtime_v1 import DurableRunner, Message, Run, WorkItem
 from app.runtime.protocol import NormalizedTurnResult, StopReason, ToolCallItem, Usage
+from app.services.history_service import source_hash
 from app.services.maintenance_command_service import (
     build_memory_result, HistoryResult, MaintenanceClaim,
     MaintenanceCommandError, MaintenanceCommandWorker,
@@ -61,6 +62,9 @@ async def _fixture(factory):
                 priority=100, available_at=utcnow(), status="pending",
             ),
         ])
+        await db.flush()
+        summary = await db.get(HistorySummary, summary_id)
+        summary.source_hash = source_hash([await db.get(Message, message_id)])
     return session_id, summary_id, command_id
 
 
