@@ -15,6 +15,7 @@ from typing import Any
 from sqlalchemy import or_, select, update
 
 from app.config import settings
+from app.core.model_hub.parameters import runtime_model_defaults
 from app.core.model_hub.registry import ModelHub
 from app.database import AsyncSessionLocal
 from app.models.agent_v1 import AgentAssemblyVersion
@@ -140,7 +141,7 @@ def _provider_parameters(
     version: ModelVersion, *, max_tokens: int, forced_tool: str | None = None,
 ) -> dict[str, Any]:
     parameters = {
-        **dict(version.default_parameters or {}),
+        **runtime_model_defaults(version.default_parameters or {}),
         "model_id": version.model_name,
         "temperature": 0,
         "max_tokens": max(1, max_tokens),

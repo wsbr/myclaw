@@ -23,16 +23,16 @@ class StopReason(StrEnum):
 
 @dataclass(frozen=True)
 class Usage:
-    input_tokens: int = 0
-    output_tokens: int = 0
-    cached_input_tokens: int = 0
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    cached_input_tokens: int | None = None
 
     def as_dict(self) -> dict[str, int]:
-        return {
+        return {key: value for key, value in {
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
             "cached_input_tokens": self.cached_input_tokens,
-        }
+        }.items() if value is not None}
 
 
 @dataclass(frozen=True)
@@ -89,6 +89,8 @@ class NormalizedTurnResult:
     model: str | None = None
     provider_request_id: str | None = None
     provider_state_ref: str | None = None
+    provider_request_id_source: str | None = None
+    provider_response_id: str | None = None
 
     @property
     def tool_calls(self) -> tuple[ToolCallItem, ...]:
@@ -105,6 +107,8 @@ class NormalizedTurnResult:
             "usage": self.usage.as_dict(),
             "model": self.model,
             "provider_request_id": self.provider_request_id,
+            "provider_request_id_source": self.provider_request_id_source,
+            "provider_response_id": self.provider_response_id,
             "provider_state_ref": self.provider_state_ref,
         }
 
@@ -125,30 +129,51 @@ class StreamEvent:
 
 @dataclass(frozen=True)
 class ProviderAttemptEvent:
-    phase: Literal["started", "payload", "succeeded", "failed"]
+    phase: Literal["started", "metadata", "payload", "succeeded", "failed"]
     attempt_no: int
     received_payload: bool
     request_hash: str
     result: NormalizedTurnResult | None = None
     error: Exception | None = None
+    provider_request_id: str | None = None
+    provider_request_id_source: str | None = None
+    provider_response_id: str | None = None
 
 
 class ProviderError(RuntimeError):
     def __init__(
         self, message: str, *, code: str, retryable: bool = False,
         received_payload: bool = False,
+        stop_reason: str | None = None, usage: Usage | None = None,
+        provider_request_id: str | None = None,
+        provider_request_id_source: str | None = None,
+        provider_response_id: str | None = None,
+        diagnostics: dict[str, int] | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.retryable = retryable
         self.received_payload = received_payload
+        self.stop_reason = stop_reason
+        self.usage = usage
+        self.provider_request_id = provider_request_id
+        self.provider_request_id_source = provider_request_id_source
+        self.provider_response_id = provider_response_id
+        self.diagnostics = dict(diagnostics or {})
 
 
 class ProviderSchemaError(ProviderError):
-    def __init__(self, message: str, *, received_payload: bool = True) -> None:
+    def __init__(
+        self, message: str, *, received_payload: bool = True,
+        stop_reason: str | None = None, usage: Usage | None = None,
+        provider_request_id: str | None = None,
+        diagnostics: dict[str, int] | None = None,
+    ) -> None:
         super().__init__(
             message, code="provider_schema_error", retryable=False,
             received_payload=received_payload,
+            stop_reason=stop_reason, usage=usage,
+            provider_request_id=provider_request_id, diagnostics=diagnostics,
         )
 
 

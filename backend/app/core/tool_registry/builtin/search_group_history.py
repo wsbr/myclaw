@@ -7,6 +7,9 @@ import re
 from sqlalchemy import and_, exists, func, or_, select
 
 from app.core.tool_registry.base import BaseTool, RuntimeContext, ToolResult
+from app.core.tool_registry.runtime_tools import (
+    SEARCH_GROUP_HISTORY_DESCRIPTION, SEARCH_GROUP_HISTORY_INPUT_SCHEMA,
+)
 from app.models.foundation import ExecutionEvent, ExecutionEventRecipient
 from app.models.group_v1 import GroupMembership, GroupSession
 from app.models.runtime_v1 import Message
@@ -32,28 +35,8 @@ def _decode_cursor(value: str) -> tuple[int, int]:
 
 class SearchGroupHistoryTool(BaseTool):
     name = "search_group_history"
-    description = (
-        "WHEN: actively retrieve the human-visible Group transcript, including concise shared notes "
-        "and directed @ exchanges between other members, from the current governed Group. "
-        "WHEN NOT: never use outside a Group or to access another member's private runtime data. "
-        "RETURNS: bounded visible messages, Artifacts, events, sequence bounds, and a stable cursor. "
-        "RECOVERY: narrow terms or continue with next_cursor when more evidence remains."
-    )
-    input_schema = {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "type": "object",
-        "properties": {
-            "query": {"type": "string", "minLength": 1, "maxLength": 1000},
-            "agent_ids": {"type": "array", "items": {"type": "string"}, "maxItems": 100},
-            "event_types": {"type": "array", "items": {"type": "string"}, "maxItems": 100},
-            "from_sequence": {"type": "integer", "minimum": 1},
-            "to_sequence": {"type": "integer", "minimum": 1},
-            "cursor": {"type": "string"},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
-        },
-        "required": ["query"],
-        "additionalProperties": False,
-    }
+    description = SEARCH_GROUP_HISTORY_DESCRIPTION
+    input_schema = SEARCH_GROUP_HISTORY_INPUT_SCHEMA
 
     async def execute(self, args: dict, context: RuntimeContext, db=None) -> ToolResult:
         if db is None:

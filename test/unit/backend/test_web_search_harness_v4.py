@@ -71,8 +71,8 @@ def test_runtime_prompt_treats_run_ceiling_as_recovery_reserve():
         "web_search": {"total": 2, "succeeded": 2},
         "web_fetch": {"total": 1, "succeeded": 1},
     })
-    assert "two web_search" in rules
-    assert "hard Run ceilings" in rules
+    assert "web_search Run retrieval ledger" in rules
+    assert "hard Run ceiling: 6" in rules
     assert '"succeeded": 2' in rules
 
 

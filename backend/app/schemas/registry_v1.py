@@ -3,6 +3,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from app.core.model_hub.parameters import validate_model_defaults
+
 
 def _validate_model_capabilities(value: dict | None) -> dict | None:
     if value is None:
@@ -128,6 +130,7 @@ class ModelCreate(BaseModel):
 
     _capabilities_are_valid = field_validator("capabilities")(_validate_model_capabilities)
     _default_parameters_have_no_secrets = field_validator("default_parameters")(_validate_no_embedded_secrets)
+    _default_parameters_are_safe = field_validator("default_parameters")(validate_model_defaults)
     _capabilities_have_no_secrets = field_validator("capabilities")(_validate_no_embedded_secrets)
     _endpoint_is_valid = field_validator("endpoint")(_validate_endpoint)
 
@@ -157,6 +160,7 @@ class ModelVersionCreate(BaseModel):
 
     _capabilities_are_valid = field_validator("capabilities")(_validate_model_capabilities)
     _default_parameters_have_no_secrets = field_validator("default_parameters")(_validate_no_embedded_secrets)
+    _default_parameters_are_safe = field_validator("default_parameters")(validate_model_defaults)
     _capabilities_have_no_secrets = field_validator("capabilities")(_validate_no_embedded_secrets)
     _endpoint_is_valid = field_validator("endpoint")(_validate_endpoint)
 
@@ -181,6 +185,7 @@ class ModelPatch(BaseModel):
 
     _capabilities_are_valid = field_validator("capabilities")(_validate_model_capabilities)
     _default_parameters_have_no_secrets = field_validator("default_parameters")(_validate_no_embedded_secrets)
+    _default_parameters_are_safe = field_validator("default_parameters")(validate_model_defaults)
     _capabilities_have_no_secrets = field_validator("capabilities")(_validate_no_embedded_secrets)
     _endpoint_is_valid = field_validator("endpoint")(_validate_endpoint)
 

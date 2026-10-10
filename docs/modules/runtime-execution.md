@@ -68,7 +68,11 @@ Run 终态后不重新激活。后续输入创建新 Run 并引用历史。
 
 AgentTurn 是一次逻辑模型决定；ProviderAttempt 是传输层尝试。只有零 payload、未产生 Tool Call 和未提交副作用的可重试错误，才允许透明重试同一 Turn。
 
-模型 Token 统计和生成之前必须提交已有 Turn/Tool 事实并释放数据库连接。ProviderAttempt 的 started、首个 payload 和终态分别使用短事务落库，任何数据库事务都不能跨越 Provider 网络等待。
+OpenAI-compatible 与 Anthropic SDK 的 `max_retries` 统一设为 `0`。重试只由 ModelAdapter 管理，每次实际生成请求都有独立的 ProviderAttempt，避免 SDK 内部重试藏在同一条尝试记录中。已收到 payload 后不透明重试的规则保持不变。
+
+模型 Token 统计和生成之前必须提交已有 Turn/Tool 事实并释放数据库连接。ProviderAttempt 的 started、请求元数据、首个 payload 和终态分别使用短事务落库，任何数据库事务都不能跨越 Provider 网络等待。响应头中的请求 ID 一经取得即保存，不等待流正常结束；元数据不算 payload，不设置 `first_payload_at`。
+
+请求 ID 优先取供应商响应头，其次取 SDK 请求标识；仅在前两者缺失时使用响应体 completion/message ID，并明确标识来源。断流的 `error_detail.provider_identifiers` 保留请求 ID、来源和响应体 ID，便于关联供应商日志。标识只接受 1–191 个可打印非空白 ASCII 字符，各次重试独立保存；连接在返回响应头前失败或供应商未提供 ID 时，不能凭空补齐。
 
 ## ExecutionPrincipal 与 CapabilitySnapshot
 
@@ -153,6 +157,10 @@ AgentVersion 只冻结 Agent 装配，不冻结整个平台 Harness。每个 Run
 - 保留 WorkingPlan、未完成 Action、权限和关键决定；
 - 不注入其他 Agent 的 Instructions、私有 Memory、凭证或 Chain-of-Thought。
 
+具体工具的操作指导由独立的 `tool_guidance` 平台段承载，声明所需工具并根据每轮实际呈现的 schema 重新生成；权限摘要也同时更新。通用平台规则不能无条件指示未绑定工具。Skill Catalog、历史、记忆、计划及产物信息保持数据身份；已存的旧平台计划恢复通知会转换为不要求缺失工具的状态提示，不改写原始历史。
+
+模型参数只调整推理设置，不拥有消息、工具、模型路由或平台提示的组装权。注册与 Provider Chat/Stream/Count 出口均检查参数；保留字段和未审核的扩展参数返回 `model_parameters_invalid`，不能通过 `extra_body` 覆盖工具列表或开启隐藏搜索。详见[模型参数边界](../technical/model-parameter-boundary.md)。
+
 ## Provider 最小协议
 
 目标 Provider 只需可靠支持以下通用语义：
@@ -191,16 +199,19 @@ Stop reason 只说明 Provider 为什么结束当前采样，例如正常结束�
 
 ## Runtime Coordination Tools
 
-Runtime 可以向模型提供少量真实协调能力：
+Runtime 协调能力统一注册在工具目录，只有 AgentVersion 显式绑定且满足平台启用、模式、权限和预算的工具才向模型提供。执行仍由 Runtime 领域处理器完成，并记录统一 ToolInvocation：
 
 | Tool | 真实作用 |
 | --- | --- |
+| `search_tools` | 查询已绑定的冻结 ToolVersion 并按需加载模型定义，不扩大授权 |
 | `update_plan` | 更新当前 Agent 的 WorkingPlan 投影 |
+| `find_agent_user` | 查询授权人员目录，返回可用于澄清的主体引用 |
 | `ask_user` | 创建持久 Clarification |
-| `discover_agents` | 查询授权范围内 AgentCard |
+| `discover_agents` | 查询当前调用方显式绑定或双方网络资格允许、且原始用户有权访问的 AgentCard |
+| `select_group_members` | 在参与协作网络的根 Chat 中选择包含当前 Agent 的后续 Group 成员，并固定新 GroupRun 快照 |
 | `invoke_agent` | 创建定向 AgentInvocation；Chat/Plan awaited，Group async handoff 并自动投影 human 可见的请求 `@` 与交付 `@` |
 | `search_group_history` | Group 内主动查询其他成员的 human 可见协作记录，不扩大私有数据权限 |
-| `invite_agent` | 创建 Group Membership 邀请或 Approval |
+| `invite_agent` | 当前 `fixed_for_run` 策略下记录图外邀请拒绝并返回 `membership_policy_fixed_for_run`，不创建邀请 Approval |
 | `send_group_message` | 写入定向 `@`，或不唤醒、不自动注入上下文的精炼群留痕 |
 | `update_shared_task` | 更新可选 Group 协作白板 |
 
@@ -337,6 +348,8 @@ Chat/Plan 调用方在需要结果时进入 Run/WorkItem `waiting_agent`，目�
 
 Chat/Plan 委派结果回调用方；Group 成员还可以直接写入 Group 消息。Agent 调用保持 Run 创建时固定的 `tenant_id + account_id`，不能通过目标 Agent 改写身份或提权。Agent API 来源另保留 `api_key_id + asserted_user_id` 审计证据；后者是调用方裸断言而非终端用户证明，不再作为领域授权键。
 
+委派按每一跳的当前调用方校验：显式绑定 A→B、B→C 可以形成多级调用，无需开启 `group_enabled`，但不产生 A→C 的直接授权。另一条路径是调用双方均开启 `group_enabled`，在原始用户授权与平台治理范围内无需互绑即可发现和委派。两条路径均要求实际使用的协调工具已有显式绑定；子调用重新解析自己的装配和调用边界，不能复制入口 Agent 的目标列表或扩大用户权限。
+
 同一 MyClaw 控制域内，AgentInvocation 不建立目标 Agent 进程的网络连接：
 
 ```text
@@ -352,7 +365,7 @@ Delegation 与 Group 复用这条路径；Group 只额外校验 Membership、vis
 
 ## Clarification 与 Approval
 
-Clarification 用于缺失信息或用户判断，Approval 用于精确副作用、Plan 实施或成员加入等权限变化。二者都是持久等待对象，具有稳定 ID、请求者、作用域和版本。
+Clarification 用于缺失信息或用户判断，Approval 用于精确副作用或 Plan 实施等需要批准的动作。二者都是持久等待对象，具有稳定 ID、请求者、作用域和版本。当前 GroupRun 成员固定，`invite_agent` 直接形成可审计拒绝，不进入邀请 Approval 等待。
 
 Clarification 可以面向源 Session owner，也可以面向 `find_agent_user` 或结构化 `@` mention 解析出的同 Tenant Agent 用户。目标账号通过签名 principal reference 传递；回答权限只来自 `target_account_id`，不要求也不产生源 Session 读取权限。跨用户答案作为原 `ask_user` Tool continuation 恢复源 WorkItem，源 Run/Runner 的执行账号始终不变。
 

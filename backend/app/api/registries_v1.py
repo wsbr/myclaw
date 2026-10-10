@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.model_hub.registry import ModelHub
 from app.core.platform_secrets import PlatformSecretError, secret_reference, store_secret
+from app.core.tool_registry.runtime_tools import is_runtime_tool_implementation
 from app.database import get_db
 from app.deps import CurrentAccount, get_current_account
 from app.models.common import utcnow, uuid7
@@ -419,6 +420,19 @@ async def patch_platform_tool(
         None, "never", "per_call", "session_grant",
     ):
         raise HTTPException(status_code=422, detail={"code": "invalid_confirmation_policy"})
+    version_row = await db.get(ToolVersion, tool.current_version_id) if tool.current_version_id else None
+    if version_row and is_runtime_tool_implementation(tool.tool_key, version_row.implementation_ref):
+        if changes.get("confirmation_policy", "never") != "never" or any(
+            item.get("confirmation") not in (None, "never")
+            for item in changes.get("risk_rules") or []
+        ):
+            raise HTTPException(status_code=422, detail={
+                "code": "runtime_confirmation_policy_unsupported",
+                "message": (
+                    "Runtime coordination Tools support confirmation_policy=never. "
+                    "Agent bindings, platform enablement and domain authorization still apply."
+                ),
+            })
     workspace_access = (changes.get("workspace_policy") or {}).get("workspace_access")
     if workspace_access not in (None, "none", "read", "write"):
         raise HTTPException(status_code=422, detail={"code": "invalid_workspace_access"})

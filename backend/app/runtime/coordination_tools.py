@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 
 from sqlalchemy import select
 
 from app.config import settings
 from app.core.tool_registry.base import RuntimeContext, ToolResult
 from app.core.tool_registry.builtin.search_group_history import SearchGroupHistoryTool
-from app.core.tool_registry.schema import runtime_result_schema
+from app.core.tool_registry.runtime_tools import RUNTIME_COORDINATION_DEFINITIONS
 from app.models.common import uuid7
+from app.runtime.tool_presentation import resolve_tool_presentation
+from app.models.agent_v1 import AgentAssemblyVersion
 from app.models.foundation import ExecutionEvent
 from app.models.runtime_v1 import (
     AgentInvocation,
@@ -36,261 +36,10 @@ from app.services.agent_invocation_service import (
 from app.services.group_collaboration_service import (
     GroupPolicyError,
     reject_fixed_run_invitation,
+    resolve_group_emergence_anchor,
     send_agent_group_message,
     update_runtime_shared_task,
 )
-
-
-RUNTIME_COORDINATION_DEFINITIONS = ({
-    "name": "search_tools",
-    "description": (
-        "WHEN: a needed capability is not currently visible, or inventory the authorized catalog with an empty "
-        "query. WHEN NOT: do not search for an already presented Tool. "
-        "RETURNS: matching pre-authorized frozen ToolVersions plus current execution availability; executable "
-        "schemas are presented next Turn, while temporarily blocked Tools remain discoverable for planning. "
-        "RECOVERY: refine the capability query; discovery never expands authorization."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "query": {"type": "string", "maxLength": 500, "default": ""},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
-        },
-        "additionalProperties": False,
-    },
-    "source": "runtime",
-}, {
-    "name": "update_plan",
-    "description": (
-        "WHEN: create or revise the visible working plan for a multi-step task. "
-        "WHEN NOT: skip it for a simple one-step request. RETURNS: the persisted WorkingPlan revision. "
-        "RECOVERY: refresh the current revision after a conflict."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "summary": {"type": "string", "maxLength": 2000},
-            "items": {
-                "type": "array", "minItems": 1, "maxItems": 100,
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "text": {"type": "string", "minLength": 1, "maxLength": 4000},
-                        "status": {
-                            "type": "string",
-                            "enum": ["pending", "in_progress", "completed"],
-                        },
-                    },
-                    "required": ["text", "status"],
-                    "additionalProperties": False,
-                },
-            },
-            "explanation": {"type": "string", "maxLength": 4000},
-            "expected_revision": {"type": "integer", "minimum": 0},
-        },
-        "required": ["items"],
-        "additionalProperties": False,
-    },
-    "source": "runtime",
-}, {
-    "name": "find_agent_user",
-    "description": (
-        "WHEN: the user identifies another Platform person by name or handle but no resolved "
-        "mention reference is available. Search only people this Agent may contact. WHEN NOT: "
-        "do not enumerate people without a concrete collaboration need and do not guess among "
-        "multiple matches. RETURNS: a small candidate list with opaque principal_ref values. "
-        "RECOVERY: ask the requesting user to choose when resolution is ambiguous."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "query": {"type": "string", "minLength": 1, "maxLength": 200},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5},
-        },
-        "required": ["query"],
-        "additionalProperties": False,
-    },
-    "source": "runtime",
-}, {
-    "name": "ask_user",
-    "description": (
-        "WHEN: one essential human answer is missing. Omit target_ref to ask the requesting "
-        "Session owner; to ask another Platform user, use only an opaque principal_ref from an "
-        "explicit resolved @mention or find_agent_user. WHEN NOT: do not ask for discoverable "
-        "facts, secrets, passwords, or credentials, and never guess among multiple people. "
-        "RETURNS: a durable clarification wait. RECOVERY: continue only after the target user's "
-        "committed answer."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "question": {"type": "string", "minLength": 1, "maxLength": 8000},
-            "target_ref": {"type": "string", "minLength": 1, "maxLength": 2000},
-            "reason": {"type": "string", "maxLength": 2000},
-            "context_summary": {"type": "string", "maxLength": 4000},
-        },
-        "required": ["question"],
-        "additionalProperties": False,
-    },
-    "source": "runtime",
-}, {
-    "name": "discover_agents",
-    "description": (
-        "WHEN: find a governed professional Agent for a bounded subtask. WHEN NOT: do not use for Platform Tools. "
-        "RETURNS: currently visible Agent cards. RECOVERY: refine the query; discovery does not authorize invocation."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "query": {"type": "string", "maxLength": 500},
-            "domain_tags": {
-                "type": "array", "maxItems": 20,
-                "items": {"type": "string", "minLength": 1, "maxLength": 100},
-            },
-            "group_enabled": {"type": "boolean"},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 100},
-        },
-        "additionalProperties": False,
-    },
-    "source": "runtime",
-}, {
-    "name": "select_group_members",
-    "description": (
-        "WHEN: during the root normal Chat, the current user request can materially benefit from a Group follow-up. "
-        "Select the smallest semantically relevant peer set from the exact candidate Agent catalog in the prompt; "
-        "the current Chat Agent is retained automatically as the conversation anchor when eligible. "
-        "WHEN NOT: do not use outside root Chat, do not select unknown IDs, and never select every candidate by "
-        "default. RETURNS: one durable, immutable full member selection that is applied only after Chat completes. "
-        "RECOVERY: if no suitable peer exists, continue the normal Chat without selecting a Group."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "selected_agent_ids": {
-                "type": "array", "minItems": 1,
-                "maxItems": settings.emergent_group_max_members,
-                "uniqueItems": True,
-                "items": {"type": "string", "minLength": 1, "maxLength": 191},
-            },
-            "rationale": {"type": "string", "minLength": 1, "maxLength": 4000},
-        },
-        "required": ["selected_agent_ids", "rationale"],
-        "additionalProperties": False,
-    },
-    "source": "runtime",
-    "side_effect": "idempotent",
-    "chat_only": True,
-}, {
-    "name": "invoke_agent",
-    "description": (
-        "WHEN: delegate or hand off a bounded request to an authorized discovered Agent. In Group, dispatch is "
-        "asynchronous: the request is immediately persisted as a human-visible directed @ message, this Turn "
-        "continues, its final response is retained as the concise handoff status, and the returned result later "
-        "arrives as a new directed @ message in a new Turn. In Chat and "
-        "Plan, the caller still durably waits for the result. WHEN NOT: do not invoke unknown IDs, do not fan out "
-        "by default, and do not duplicate the returned result with send_group_message. RECOVERY: inspect "
-        "authorization or the later directed Agent result."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "agent_id": {"type": "string", "minLength": 1, "maxLength": 191},
-            "task": {"type": "string", "minLength": 1, "maxLength": 16000},
-            "input": {"type": "object"},
-        },
-        "required": ["agent_id", "task"],
-        "additionalProperties": False,
-    },
-    "source": "runtime",
-}, {
-    "name": "search_group_history",
-    "description": SearchGroupHistoryTool.description,
-    "input_schema": SearchGroupHistoryTool.input_schema,
-    "source": "runtime",
-    "group_only": True,
-}, {
-    "name": "send_group_message",
-    "description": (
-        "WHEN: send a directed @ message to one governed member, or append a concise group-wide history note about "
-        "material progress, disagreement, risk, or result. A group-wide note wakes nobody and is not injected into "
-        "other members' ambient context; they must retrieve it with search_group_history. WHEN NOT: do not contact "
-        "outsiders, do not post detailed working traces group-wide, and do not duplicate an invoke_agent deliverable. "
-        "RETURNS: the committed Group message and wake decision. RECOVERY: correct recipient/visibility after policy errors."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "content": {"type": "string", "minLength": 1, "maxLength": 16000},
-            "visibility": {"type": "string", "enum": ["direct", "group"]},
-            "recipient_agent_id": {"type": "string", "minLength": 1, "maxLength": 191},
-        },
-        "required": ["content", "visibility"],
-        "additionalProperties": False,
-    },
-    "source": "runtime",
-    "side_effect": "idempotent",
-    "group_only": True,
-}, {
-    "name": "invite_agent",
-    "description": (
-        "WHEN: propose an additional governed Group member. WHEN NOT: do not assume invitations are permitted. "
-        "RETURNS: an auditable invitation outcome. RECOVERY: fixed-for-run Groups require a new Group instead."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "agent_id": {"type": "string", "minLength": 1, "maxLength": 191},
-            "reason": {"type": "string", "minLength": 1, "maxLength": 4000},
-        },
-        "required": ["agent_id", "reason"],
-        "additionalProperties": False,
-    },
-    "source": "runtime",
-    "side_effect": "idempotent",
-    "group_only": True,
-}, {
-    "name": "update_shared_task",
-    "description": (
-        "WHEN: track optional shared Group work. WHEN NOT: do not use it to schedule an Agent. "
-        "RETURNS: the persisted SharedTask. RECOVERY: refresh the task and retry valid state transitions."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "task_id": {"type": "string"},
-            "title": {"type": "string", "minLength": 1, "maxLength": 300},
-            "description": {"type": "string", "maxLength": 16000},
-            "status": {"type": "string", "enum": ["pending", "in_progress", "completed", "blocked", "cancelled"]},
-            "assignee_agent_id": {"type": "string"},
-        },
-        "additionalProperties": False,
-    },
-    "source": "runtime",
-    "side_effect": "idempotent",
-    "group_only": True,
-})
-
-for _definition in RUNTIME_COORDINATION_DEFINITIONS:
-    _result_schema = runtime_result_schema(_definition["name"])
-    _definition.update({
-        "output_schema": _result_schema,
-        "registration_hash": hashlib.sha256(json.dumps(
-            {
-                "name": _definition["name"],
-                "description": _definition["description"],
-                "input_schema": _definition["input_schema"],
-                "output_schema": _result_schema,
-                "side_effect": _definition.get("side_effect", "none"),
-                "runtime_contract_version": 4,
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()).hexdigest(),
-        "execution_mode": "inline",
-        "confirmation_policy": "never",
-    })
-    _definition.setdefault("side_effect", "none")
 
 
 async def dispatch_coordination_tool(
@@ -308,10 +57,14 @@ async def dispatch_coordination_tool(
                 error="Capability snapshot is unavailable", error_code="capability_snapshot_missing",
                 error_category="authorization",
             ), False, None
+        presentation = await resolve_tool_presentation(
+            db, capability_snapshot=capability,
+            authentication_source=context.authentication_source,
+        )
         query = str(arguments.get("query") or "").casefold().strip()
         tokens = [token for token in query.replace("_", " ").split() if token]
         ranked = []
-        for definition in capability.authorized_tool_versions:
+        for definition in presentation.authorized_tool_versions:
             name_value = str(definition.get("name") or "").casefold()
             haystack = " ".join([
                 name_value, str(definition.get("description") or "").casefold(),
@@ -325,10 +78,10 @@ async def dispatch_coordination_tool(
                 ranked.append((score, definition))
         ranked.sort(key=lambda item: (-item[0], item[1]["name"]))
         loaded = [dict(item[1]) for item in ranked[:int(arguments.get("limit", 20))]]
-        effective = set(capability.effective_tool_keys or [])
+        effective = presentation.effective_tool_keys
         denied_reasons = {
             item.get("capability"): item.get("reason_code")
-            for item in (capability.denied_capabilities or [])
+            for item in presentation.denied_capabilities
         }
         summary = [{
             "name": item["name"], "description": item["description"],
@@ -339,7 +92,7 @@ async def dispatch_coordination_tool(
             ),
         } for item in loaded]
         return ToolResult(
-            status="succeeded", summary=f"Loaded {len(loaded)} authorized ToolVersion(s)",
+            status="succeeded", summary=f"Found {len(loaded)} bound ToolVersion(s)",
             data={"tools": summary, "loaded_tool_definitions": loaded},
             content_blocks=[{"type": "json", "value": summary}],
             evidence=[{
@@ -397,9 +150,36 @@ async def dispatch_coordination_tool(
         ), False, None
 
     if name == "discover_agents":
+        runner = await db.get(DurableRunner, context.runner_id)
+        work = await db.get(WorkItem, work_item_id)
+        run = await db.get(Run, run_id)
+        if (
+            runner is None or work is None or run is None
+            or runner.run_id != run.id or work.run_id != run.id
+            or runner.work_item_id != work.id or runner.agent_id != context.agent_id
+            or runner.tenant_id != context.tenant_id
+            or run.tenant_id != context.tenant_id or run.session_id != context.session_id
+            or work.owner_agent_id != runner.agent_id
+            or work.agent_version_id != runner.agent_version_id
+        ):
+            return ToolResult(
+                status="failed", summary="Agent discovery requires the current Runner context",
+                error_code="runtime_context_required",
+                error="Agent discovery requires the current Runner context",
+                error_category="authorization",
+            ), False, None
+        version = await db.get(AgentAssemblyVersion, runner.agent_version_id)
+        if version is None or version.agent_id != runner.agent_id or not version.group_enabled:
+            return ToolResult(
+                status="failed", summary="Enable Group collaboration to discover the Agent network",
+                error_code="group_network_disabled",
+                error="Enable Group collaboration to discover the Agent network",
+                error_category="authorization",
+            ), False, None
         cards = await discover_agent_cards(
             db, tenant_id=context.tenant_id, account_id=context.account_id,
             actor_agent_id=context.agent_id,
+            actor_agent_version_id=runner.agent_version_id,
             query=arguments.get("query"),
             domain_tags=list(arguments.get("domain_tags") or []),
             group_enabled=arguments.get("group_enabled"),
@@ -418,6 +198,11 @@ async def dispatch_coordination_tool(
         if (
             runner is None or work is None or run is None
             or runner.run_id != run.id or work.run_id != run.id
+            or runner.work_item_id != work.id or runner.agent_id != context.agent_id
+            or runner.tenant_id != context.tenant_id
+            or run.tenant_id != context.tenant_id or run.session_id != context.session_id
+            or work.owner_agent_id != runner.agent_id
+            or work.agent_version_id != runner.agent_version_id
             or run.mode != "chat" or work.id != run.root_work_item_id
             or work.parent_work_item_id is not None
         ):
@@ -426,6 +211,16 @@ async def dispatch_coordination_tool(
                 error_code="group_selection_chat_root_only",
                 error="Group selection is available only in the root normal Chat",
                 error_category="authorization",
+            ), False, None
+        try:
+            anchor = await resolve_group_emergence_anchor(
+                db, tenant_id=run.tenant_id, account_id=context.account_id,
+                agent_id=runner.agent_id, agent_version_id=runner.agent_version_id,
+            )
+        except GroupPolicyError as error:
+            return ToolResult(
+                status="failed", summary=str(error), error_code=error.code,
+                error=str(error), error_category="authorization",
             ), False, None
         invoked_peer = await db.scalar(select(AgentInvocation.id).where(
             AgentInvocation.run_id == run.id,
@@ -460,6 +255,20 @@ async def dispatch_coordination_tool(
                 error_category="validation",
             ), False, None
         candidates_by_id = {str(item.get("agent_id")): item for item in candidates}
+        anchor_id = runner.agent_id
+        frozen_anchor = dict((emergence.get("candidate_versions") or {}).get(anchor_id) or {})
+        if (
+            emergence.get("current_chat_agent_id") != anchor_id
+            or anchor_id not in candidates_by_id
+            or frozen_anchor.get("agent_version_id") != runner.agent_version_id
+            or frozen_anchor.get("card_content_hash") != anchor.card.content_hash
+        ):
+            return ToolResult(
+                status="failed", summary="The Chat Agent is not an eligible frozen Group candidate",
+                error_code="group_initiator_snapshot_changed",
+                error="The Chat Agent is not an eligible frozen Group candidate",
+                error_category="authorization",
+            ), False, None
         unknown_ids = [item for item in requested_ids if item not in candidates_by_id]
         if unknown_ids:
             return ToolResult(
@@ -469,12 +278,7 @@ async def dispatch_coordination_tool(
                 error_category="authorization",
                 error_details={"unknown_agent_ids": unknown_ids},
             ), False, None
-        anchor_id = str(emergence.get("current_chat_agent_id") or "").strip()
-        selected_ids = list(requested_ids)
-        if anchor_id in candidates_by_id:
-            selected_ids = [anchor_id, *(
-                item for item in selected_ids if item != anchor_id
-            )]
+        selected_ids = [anchor_id, *(item for item in requested_ids if item != anchor_id)]
         if len(selected_ids) < 2:
             return ToolResult(
                 status="failed", summary="A Group requires the Chat anchor and at least one peer",

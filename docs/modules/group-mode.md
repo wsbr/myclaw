@@ -26,11 +26,11 @@ GroupSession、Membership 和共享记录可以长期存在而没有任何 Runne
 
 所有成员必须是工作网中可发现或可直接寻址的真实 Agent。第一阶段工作网直接查询 MyClaw 数据库中的 AgentCard 投影；Group 不在内部创建 Agent 副本，也不根据“产品经理”“开发”“测试”等角色名称临时生成 Prompt Agent。
 
-当前产品路径只有一个默认入口：用户先进行正常 Chat；root Runner 按当前身份边界发现所有 `group_enabled`、已发布、可见、可用、可调用且 `group_allowed` 的 Agent 作为完整候选目录，由模型按用户诉求选择必要协作成员并保留 Chat 会话锚点。Chat 的用户消息和首轮回答提交成功后，可靠 Outbox 才自动形成或复用 GroupSession、创建新的 GroupRun。该过程不回滚已经成功的 Chat。
+当前产品路径只有一个默认入口：普通用户先与 A 进行正常 Chat。A 开启 `group_enabled` 后，由模型判断是否需要协作；root Runner 在原始用户授权范围内提供同样开启网络参与资格、已发布、可见、可用、可调用且 `group_allowed` 的完整候选目录，不要求 A 与候选逐对绑定。模型按用户诉求选择必要成员并保留 A 作为会话锚点。Chat 的用户消息和首轮回答提交成功后，可靠 Outbox 才自动形成或复用包含 A 的 GroupSession、创建新的 GroupRun，在群内继续互动完成任务。该过程不回滚已经成功的 Chat，也不要求每次 Chat 都建群。
 
 旧版 `manual_selected` Group 及创建 API 仅为历史记录和兼容性保留，不再是 Web 主入口。后续每次 Chat 由模型按当次诉求重新选择未来成员；成员变化写入 joined/removed 事件，本次 GroupRun 仍冻结当时的成员与 AgentVersion 快照。
 
-是否允许自动邀请由 Collaboration Policy 决定。`group_enabled` 只表示可以成为候选；发现不等于授权，加入仍需检查原始用户身份、visibility、发布版本、Agent 可用性、共享范围、权限、预算和企业策略。
+`group_enabled` 同时控制发起和接受网络协作的资格；双方开启后可在原始用户授权内无需互绑进行发现、委派与组队。加入仍需检查 visibility、发布版本、Agent 可用性、共享范围、权限、预算和企业策略。`discover_agents`、`invoke_agent`、`select_group_members` 和群内协调工具仍须在实际使用它们的 AgentVersion 显式绑定，平台不会因开启网络而自动授予工具。未开启网络的 Agent 仍可通过显式绑定进行普通 Chat/Plan 的逐跳委派。
 
 ## 为什么不需要模板
 
@@ -99,7 +99,7 @@ AgentVersion 不必永久写死在 Membership；每个 GroupRun 或 AgentInvocat
 
 GroupRun 只保存协作聚合事实：`group_session_id`、唯一 `run_id`、本轮负责向用户汇总的 `reporter_agent_id`、成员/AgentVersion 快照、共享范围、预算与策略，以及汇总 epoch。API 和 UI 中的 GroupRun 状态全部从关联 Run 派生。
 
-第一阶段 `membership_policy=fixed_for_run`，本轮成员不变化；长期模式可以允许成员事件在后续 Turn 或新 Run 生效。
+每个 GroupRun 使用 `membership_policy=fixed_for_run`，本轮成员不变化；重新选择的成员只在后续新 Run 生效。
 
 ### GroupMessage
 
@@ -200,7 +200,7 @@ SharedTask 是 Agent 社会的协作白板，不是平台工作流：
 
 ## 动态成员
 
-成员发现能力缺口时，可以搜索工作网并提交邀请。邀请说明候选、原因、共享上下文、预计预算和风险。
+成员发现能力缺口时，可以在已绑定工具允许的范围内搜索工作网并提出候选。当前 `invite_agent` 对图外邀请返回 `membership_policy_fixed_for_run` 并记录拒绝，不创建邀请 Approval，不进入等待批准状态，也不会立即扩员；候选可留待后续新 Run 选择。
 
 Collaboration Policy 可以逐步开放：
 
@@ -209,7 +209,7 @@ Collaboration Policy 可以逐步开放：
 3. `network_policy`：在组织、数据、成本和风险规则内自主发现和组队；
 4. `federated`：跨组织 Agent 在联邦身份和授权下协作。
 
-GroupSession 使用 `dynamic_future`：每次 Chat 后可以按最新治理结果加入或移除未来成员。每个 GroupRun 始终使用 `fixed_for_run` 快照，本轮不热插拔；模型邀请图外 Agent 时仍形成可审计拒绝或等待。
+GroupSession 使用 `dynamic_future`：每次 Chat 后可以按最新治理结果加入或移除未来成员。每个 GroupRun 始终使用 `fixed_for_run` 快照，本轮不热插拔；模型邀请图外 Agent 时形成可审计拒绝。上述更灵活的邀请策略属于后续能力，不改变当前运行边界。
 
 ## 计划和协调
 
@@ -267,9 +267,9 @@ GroupRunSnapshot 固定每个参与成员本轮实际使用的 AgentVersion。�
 
 第一阶段路径是：
 
-1. 产品、开发、测试 Agent 各自发布到工作网；
-2. 用户先向入口 Agent 发送容量风险计算器目标并得到正常 Chat 回答；
-3. Chat 模型根据 Agent 名称与描述选出产品、开发、测试等必要成员；平台复核后创建 `dynamic_future` GroupSession 和 `fixed_for_run` GroupRun 快照；
+1. 入口与专业 Agent 各自发布、开启网络参与资格并显式绑定所需工具，不要求逐对绑定 Agent；
+2. 普通用户先向入口 Agent 发送容量风险计算器目标，由其判断协作需求并得到正常 Chat 回答；
+3. Chat 模型根据 Agent 名称与描述选出产品、开发、测试等必要成员并保留入口 Agent；平台复核后创建 `dynamic_future` GroupSession 和 `fixed_for_run` GroupRun 快照；
 4. UI 根据 `group.emerged` 自动进入本次 GroupRun；
 5. 成员自主讨论、创建或认领工作、调用 Tool 和互相复核；
 6. 用户可以直接回答任一成员或要求反向复核；

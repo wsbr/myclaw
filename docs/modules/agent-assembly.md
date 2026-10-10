@@ -35,6 +35,8 @@ Agent 平时不对应常驻进程。收到请求后，Runtime 才把指定 Agent
 
 版本至少冻结 Model、Instructions、Tool、Skill、四类 Context/Memory Policy、Sandbox、发现配置及各依赖版本/checksum。Draft 选择逻辑 `model_id/policy_id/sandbox_profile_id/skill_id`，Publish 与 draft_test_snapshot 分别解析并固定 `model_version_id`、四个 `policy_version_id`、`sandbox_profile_version_id`、`skill_version_id + checksum`；Runner 不追随任何 current pointer。Tool 的 `registration_hash` 固定在 AgentVersion，但启停、Confirmation、风险和连接配置是明确的实时治理例外，执行前重读。
 
+Runtime 协调工具与文件、Web、MCP 工具使用同一个 Tool 绑定列表。`ask_user`、`update_plan`、`invoke_agent` 等不再自动附加；需要时在草稿中显式选择并发布。注册升级不修改历史发布版本，不自动修改草稿选择。使用 Plan 模式需要有效的 `update_plan` 绑定，Group 协作需要按实际职责绑定相应协调工具。
+
 工作网默认只投影 Agent 当前有效的发布版本。普通 Chat/Plan 委派在创建 AgentInvocation 时解析并固定目标版本；GroupRun 优先使用自己的成员版本快照。停用 Agent 或撤下当前版本会阻止新的解析，但不改变已经创建的 WorkItem、Invocation 和历史。
 
 ## 身份与专业边界
@@ -103,9 +105,13 @@ private | enterprise
 
 成员授权是实时治理事实，不冻结进 AgentVersion 或 AgentCard。创建 Session、发送后续消息、Agent Network 发现/调用、Group 成员选择和定时任务分派都调用同一授权边界。撤销只阻止新的运行和分派，不删除成员自己的历史 Session，也不改写已经开始的 Runner 快照。
 
-还可以配置受信候选、组织标签、可用时间和成本提示。这些影响发现，不预设谁必须调用谁，也不创建 Group 模板。
+还可以配置显式调用关系、组织标签、可用时间和成本提示。调用关系限定可委派对象；是否调用及如何协作仍由当前 Agent 根据任务判断，不创建必执行流程或 Group 模板。
 
-兼容字段 `bound_agent_ids[]` 只可解释为发现快捷方式或受信候选，不表示固定拓扑。`group_enabled` 只表示当前版本是否允许成为 Group 候选，不代表对所有用户可见，不赋予 `invoke_agent` 权限，也不保证当前环境可以成功运行。
+`bound_agent_ids[]` 是逐跳的显式调用关系，不要求双方开启 `group_enabled`。例如 A 绑定 B、B 绑定 C 时，允许 A→B→C，每一跳都按当前调用方的发布版本重新校验；这不等于 A 获得直接调用 C 的权限。结果逐级返回，各跳始终沿用原始用户身份和权限。
+
+`group_enabled` 是双向的协作网络参与资格：调用方与目标方都开启时，在原始用户可见、可调用及平台治理允许的范围内，无需互相绑定即可发现、委派或被选入 Group。普通用户可以直接 Chat A，由 A 判断是否需要协作、寻找成员，并自动形成包含 A 的群组继续工作。每个 GroupRun 固定成员与版本，成员调整在后续新 Run 生效。
+
+两条路径都不自动授予工具。发现、委派和组队所需的 `discover_agents`、`invoke_agent`、`select_group_members` 等仍须分别在相应 AgentVersion 显式绑定并通过工具治理。网络开关和 Agent 绑定都不扩大原始用户的数据权限，也不保证当前环境可以成功运行。
 
 ## 权限忠实性
 
@@ -138,9 +144,33 @@ Draft Test 只能证明当前装配候选，不自动发布，也不代表业务
 
 ### 版本化 Eval 与发布门禁
 
-Builder 可以为 Agent 配置一个或多个 active Eval Suite。套件的名称、阈值、用例输入、权重与断言按 SuiteVersion 冻结；修改会发布新版本，不覆盖旧定义。启动评测时平台先生成与发布内容哈希一致的 `draft_test_snapshot`，再为每个用例建立独立的真实 Session/Run。维护 Worker 在 Run 终态后对最终回复结算 `contains_all`、`contains_none`、长度与最大成本断言；未知成本默认不能冒充 0 成本通过。
+工作区侧栏「评测」(`/evals`) 提供独立评测工作台，Agent 配置页保留跳转入口。Builder 管理自己拥有的 Agent，管理员可管理当前 tenant 的 Agent。界面支持：
 
-发布门禁匹配的是当前 active SuiteVersion 和当前草稿解析全部 Model、Tool、Skill、Policy、Sandbox 依赖后得到的精确 candidate content hash。草稿或任一依赖 current version 发生变化，即使 draft revision 未变，旧 EvalRun 也不再满足门禁。没有 active Suite 的 Agent 保持原发布行为；启用 Suite 表示 Builder 明确选择强制门禁。
+- 手工创建用例、从自己的真实 Chat 运行预览导入、场景标签、权重和表单化断言编辑；
+- 评测集 JSON 导入/导出、启停、不可变版本保存；移除用例只影响新版本；
+- 当前已保存草稿的真实批量评测、进度、逐项断言、实际回答、运行详情与报告导出；
+- 同一评测集版本的两次已结束运行对比，展示加权通过率差值、退步/改善用例、回答对照及标签切片通过数。
+
+套件名称、门禁策略、输入、权重、断言、标签及来源快照按 SuiteVersion 冻结，纳入内容哈希。编辑通过 `expected_version` 检查并发更新，保存新版本，不覆盖旧定义。启动时平台生成与发布内容哈希一致的 `draft_test_snapshot`，再为每个用例建立独立真实 Session/Run；不另建评测模型调用链。使用真实模型和已绑定工具，记录原有 ProviderAttempt、ToolInvocation 和 Usage 账本。需要用户答复或审批时，从逐用例的「查看过程」进入原运行处理，不能假定已经通过。
+
+历史导入通过 `tenant_id + account_id + user_id + root Agent` 校验，只接受已结束的 Chat Run。拥有 Agent 或管理员角色不会额外获得其他用户对话的导入权限。只提取本轮 root WorkItem 输入、面向用户的最终回答、工具名称/状态和配置版本指纹，不导入系统提示词、凭据、历史消息或工具原始参数。来源回答和观察到的工具行为仅供参考，不自动当成金标，也不注入被测模型。依赖多轮历史、文件或记忆的样例需先整理为自包含输入。跨环境 JSON 导出只携带可移植的用例定义，不携带来源会话标识和原回答。
+
+维护 Worker 在 Run 终态后，对被测 Agent 面向用户的 Chat 最终 Message 结算；不会误取后续子 Agent 消息。每个用例全部断言通过才得分，套件得分按权重计算：
+
+| 断言 | 判定依据 |
+| --- | --- |
+| `contains_all` / `contains_none` | 最终回答包含/不包含指定文本，区分大小写 |
+| `min_chars` / `max_chars` | 最终回答字符数 |
+| `require_tools` | 本 Run 内存在该工具的持久化 ToolInvocation，含失败/拒绝记录 |
+| `require_successful_tools` | 本 Run 内至少一次该工具调用状态为 succeeded |
+| `forbid_tools` | 本 Run 内不存在该工具的持久化 ToolInvocation |
+| `max_cost` | Usage 账本中指定币种的成本；未知或不可换算成本默认不能冒充 0 成本 |
+
+工具断言覆盖同 Run 的持久化调用，不能证明模型没有在文字或未落库的拒绝尝试中提及某个工具。运行失败、取消或缺少最终交付记为 error，不能靠降低通过率门槛放行。当前执行范围为单 Chat 草稿测试，不伪装成 Group/Plan 全流程回放。
+
+发布只要求当前 active 且 `gate_policy.required_for_publish != false` 的 SuiteVersion，在当前精确 candidate content hash 下存在 passed 终态 EvalRun。新工作台创建套件默认是日常回归，可显式开启发布门禁；旧套件缺省仍作为门禁。停用套件不会删除历史，但不再参与发布也不能新建评测运行。草稿或 Model/Tool/Skill/Policy/Sandbox 依赖变化、门禁定义版本变化都会使旧成绩失效。
+
+对比仅允许同 Agent、同不可变 SuiteVersion 且用例完整的终态运行。相同候选指纹会提示这是运行波动，不能声称配置提升。历史结果重判、轨迹相似度、LLM 裁判、线上健康分和 Group 多轮评测不在当前实现范围。
 
 ## Agent 的专业成长
 
@@ -168,14 +198,14 @@ Builder 可以为 Agent 配置一个或多个 active Eval Suite。套件的名�
 - 开发擅长实现、执行和修复；
 - 测试擅长精确用例、反证和复核。
 
-产品、开发、测试发布到同一工作网范围，供用户在 Group UAT 中直接选择。Group 不复制其定义，也不通过模板补齐能力。
+入口与产品、开发、测试 Agent 发布到同一工作网范围并开启网络参与资格，供普通 Chat 中的 Agent 按任务需要选择成员。所需工具分别显式绑定；Group 不复制其定义，也不通过模板补齐能力。
 
 ## 禁止设计
 
 - 仅靠名称和短 Prompt 冒充专业 Agent；
 - 用强制 Profile 枚举替代 Instructions、Memory 和 Skill；
 - 根据角色自动授予 Tool 或数据；
-- 把 bound agents 编译成固定调用图；
+- 把逐跳显式绑定编译成必须执行的流程，或传递成入口 Agent 的直接授权；
 - 为 Group 单独复制 Agent 配置；
 - 发布时接受未解析依赖或隐式 fallback；
 - 让新版本改变历史 Run；

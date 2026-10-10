@@ -7,12 +7,17 @@ import re
 
 BUILTIN_TOOL_DISPLAY_NAMES_ZH: dict[str, str] = {
     "apply_patch": "应用补丁",
+    "ask_user": "询问用户",
     "browser_interact": "操作浏览器",
     "browser_navigate": "浏览器导航",
     "browser_observe": "观察浏览器页面",
     "browser_screenshot": "浏览器截图",
     "delete_path": "删除路径",
     "execute": "执行命令",
+    "discover_agents": "发现智能体",
+    "find_agent_user": "查找可联系用户",
+    "invite_agent": "邀请智能体",
+    "invoke_agent": "调用智能体",
     "knowledge_search": "搜索知识库",
     "list_files": "列出文件",
     "memory_propose": "提议记忆",
@@ -21,10 +26,15 @@ BUILTIN_TOOL_DISPLAY_NAMES_ZH: dict[str, str] = {
     "read_file": "读取文件",
     "search_files": "搜索文件",
     "search_group_history": "搜索群组历史",
+    "search_tools": "搜索工具",
+    "select_group_members": "选择群组成员",
+    "send_group_message": "发送群组消息",
     "schedule_task": "定时任务",
     "web_fetch": "获取网页",
     "web_search": "搜索网页",
     "write_file": "写入文件",
+    "update_plan": "更新计划",
+    "update_shared_task": "更新共享任务",
 }
 
 

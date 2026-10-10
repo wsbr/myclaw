@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.core.model_hub.base import BaseLLM, LLMChunk, LLMResponse
+from app.core.model_hub.parameters import runtime_model_defaults
 from app.core.model_hub.registry import ModelHub
 from app.models.common import utcnow, uuid7
 from app.models.registry import ConformanceRun, ModelVersion
@@ -141,7 +142,7 @@ def _forced_tool_parameters(
 
 
 def _base_probe_parameters(version: ModelVersion) -> dict[str, Any]:
-    defaults = dict(version.default_parameters or {})
+    defaults = runtime_model_defaults(version.default_parameters or {})
     return {
         **defaults,
         "model_id": version.model_name,
@@ -226,7 +227,7 @@ class ProviderConformanceSuite:
         ))
         plain_passed = bool(plain.assistant_messages) and not plain.tool_calls and plain.stop_reason in {
             StopReason.END_TURN, StopReason.UNKNOWN,
-        } and plain.usage.input_tokens > 0 and plain.usage.output_tokens > 0
+        } and (plain.usage.input_tokens or 0) > 0 and (plain.usage.output_tokens or 0) > 0
         probes.append({
             "name": "streaming_plain_message_stop_usage", "passed": plain_passed,
             "details": {

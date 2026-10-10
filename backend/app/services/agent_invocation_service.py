@@ -8,9 +8,9 @@ import json
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.agent_v1 import AgentBlueprint, AgentVersionBinding
+from app.models.agent_v1 import AgentAssemblyVersion, AgentBlueprint, AgentVersionBinding
 from app.models.common import utcnow, uuid7
-from app.models.foundation import ExecutionEvent
+from app.models.foundation import ExecutionEvent, UserSession
 from app.models.group_v1 import GroupMembership, GroupRun, GroupRunMember
 from app.models.runtime_v1 import (
     AgentInvocation,
@@ -25,6 +25,9 @@ from app.persistence.runtime_graph import persist_new_work_runner
 from app.services.agent_directory_service import resolve_callable_agent
 from app.services.group_diagnostic_service import record_group_invocation_guard
 from app.services.group_collaboration_service import _next_group_message_sequence
+from app.services.run_reliability_service import (
+    BudgetExceeded, assert_action_budget, normalize_run_budget,
+)
 
 
 class AgentInvocationRejected(ValueError):
@@ -108,7 +111,7 @@ async def persist_rejected_agent_invocation(
         ),
         authorization_snapshot={
             "tenant_id": run.tenant_id,
-            "account_id": caller_runner.principal_snapshot.get("account_id"),
+            "account_id": run.account_id,
             "permission_mode": run.permission_mode,
             "permission_revision": caller_runner.principal_snapshot.get("permission_revision"),
         },
@@ -159,15 +162,26 @@ async def dispatch_agent_invocation(
         raise AgentInvocationRejected(
             "agent_id and task are required", "agent_invocation_arguments_invalid",
         )
+    await db.scalar(select(UserSession.id).where(
+        UserSession.id == run.session_id,
+    ).with_for_update())
+    owning_run = await db.scalar(select(Run).where(
+        Run.id == run.id,
+    ).execution_options(populate_existing=True).with_for_update())
+    if (
+        owning_run is None or caller_runner.run_id != run.id or caller_work.run_id != run.id
+        or caller_runner.work_item_id != caller_work.id
+        or caller_runner.session_id != run.session_id or caller_work.session_id != run.session_id
+        or caller_runner.tenant_id != run.tenant_id or caller_work.tenant_id != run.tenant_id
+        or caller_runner.agent_id != caller_work.owner_agent_id
+        or caller_runner.agent_version_id != caller_work.agent_version_id
+    ):
+        raise AgentInvocationRejected("AgentInvocation runtime graph is invalid", "agent_invocation_context_invalid")
     chain = list(caller_runner.principal_snapshot.get("delegation_chain") or [])
+    limits = normalize_run_budget(run.hard_budget_snapshot, mode=run.mode)
     if target_agent_id == caller_runner.agent_id:
         raise AgentInvocationRejected(
             "an Agent cannot invoke itself", "agent_invocation_self_cycle",
-        )
-    if run.mode in {"chat", "plan"} and chain:
-        raise AgentInvocationRejected(
-            "sub Agents cannot invoke another Agent in Chat or Plan",
-            "agent_invocation_nested_direct_mode",
         )
     if run.mode == "chat":
         selected_group = await db.scalar(select(ExecutionEvent.id).where(
@@ -179,61 +193,59 @@ async def dispatch_agent_invocation(
                 "This Chat already selected a post-Chat Group; dispatch work from the emerged Group instead",
                 "agent_invocation_after_group_selection",
             )
-    if run.mode == "group":
-        max_depth = int(
-            (run.hard_budget_snapshot or {}).get("max_agent_depth") or 8
-        )
-        if len(chain) >= max_depth:
-            raise AgentInvocationRejected(
-                "Group AgentInvocation maximum depth detected",
-                "group_invocation_max_depth",
-            )
-        if target_agent_id in chain:
-            raise AgentInvocationRejected(
-                "Group AgentInvocation would re-enter its causal Agent chain",
-                "group_invocation_cycle",
-            )
-    target = await db.scalar(select(AgentBlueprint).where(
-        AgentBlueprint.id == target_agent_id,
-        AgentBlueprint.tenant_id == run.tenant_id,
-    ))
-    if target is None:
+    max_depth = int(limits["max_agent_depth"])
+    if len(chain) >= max_depth:
         raise AgentInvocationRejected(
-            "target Agent is unavailable", "agent_invocation_target_unavailable",
+            "AgentInvocation maximum depth reached for this Run",
+            "group_invocation_max_depth" if run.mode == "group" else "agent_invocation_max_depth",
         )
+    if target_agent_id in chain:
+        raise AgentInvocationRejected(
+            "AgentInvocation would re-enter its causal Agent chain",
+            "group_invocation_cycle" if run.mode == "group" else "agent_invocation_cycle",
+        )
+    # A binding is a collaboration edge, never a substitute for the original
+    # user's ACL or the target's current publication and callable governance.
+    try:
+        target, card = await resolve_callable_agent(
+            db, tenant_id=run.tenant_id, account_id=run.account_id,
+            actor_agent_id=caller_runner.agent_id, target_agent_id=target_agent_id,
+        )
+    except (LookupError, PermissionError) as error:
+        raise AgentInvocationRejected(str(error)) from error
 
-    if run.mode == "plan":
-        try:
-            target, _card = await resolve_callable_agent(
-                db,
-                tenant_id=run.tenant_id,
-                account_id=caller_runner.principal_snapshot.get("account_id"),
-                actor_agent_id=caller_runner.agent_id,
-                target_agent_id=target_agent_id,
-            )
-        except (LookupError, PermissionError) as error:
-            raise AgentInvocationRejected(str(error)) from error
-        target_version_id = target.current_published_version_id
-    elif run.mode == "chat":
-        # Keep configured bindings as a trusted-candidate path, but do not turn
-        # them into a topology: a current visible AgentCard is equally valid.
-        bound = await db.scalar(select(AgentVersionBinding).where(
-            AgentVersionBinding.agent_version_id == caller_runner.agent_version_id,
-            AgentVersionBinding.bound_agent_id == target_agent_id,
-        ))
-        if bound is None:
-            try:
-                target, _card = await resolve_callable_agent(
-                    db,
-                    tenant_id=run.tenant_id,
-                    account_id=caller_runner.principal_snapshot.get("account_id"),
-                    actor_agent_id=caller_runner.agent_id,
-                    target_agent_id=target_agent_id,
+    collaboration_path = "group_membership"
+    if run.mode in {"chat", "plan"}:
+        caller_version = await db.get(AgentAssemblyVersion, caller_runner.agent_version_id)
+        if (
+            caller_version is None or caller_version.agent_id != caller_runner.agent_id
+            or caller_version.immutable_at is None
+            or caller_version.publication_status not in {"published", "draft_test_snapshot"}
+        ):
+            raise AgentInvocationRejected("Caller has no frozen AgentVersion", "agent_invocation_caller_version_invalid")
+        bound = await db.get(AgentVersionBinding, {
+            "agent_version_id": caller_runner.agent_version_id,
+            "bound_agent_id": target_agent_id,
+        })
+        if bound is not None:
+            collaboration_path = "bound_agent"
+        else:
+            if not caller_version.group_enabled:
+                raise AgentInvocationRejected(
+                    "Target is not bound to this AgentVersion and the caller is not network-enabled",
+                    "agent_invocation_target_not_bound",
                 )
-            except (LookupError, PermissionError) as error:
-                raise AgentInvocationRejected(str(error)) from error
-        if target.status != "published" or not target.current_published_version_id:
-            raise AgentInvocationRejected("target Agent has no active published version")
+            if not card.group_enabled:
+                raise AgentInvocationRejected(
+                    "Unbound target Agent is not network-enabled", "agent_network_target_disabled",
+                )
+            governance = dict(card.collaboration_summary or {}).get("governance") or {}
+            if isinstance(governance, dict) and governance.get("group_allowed") is False:
+                raise AgentInvocationRejected(
+                    "Target Agent is denied by network collaboration governance",
+                    "agent_network_governance_denied",
+                )
+            collaboration_path = "agent_network"
         target_version_id = target.current_published_version_id
     elif run.mode == "group":
         group_run = await db.scalar(select(GroupRun).where(GroupRun.run_id == run.id).with_for_update())
@@ -299,6 +311,10 @@ async def dispatch_agent_invocation(
                 existing.error_code or "agent_invocation_rejected",
             )
         return existing
+    try:
+        await assert_action_budget(db, run.id, action_kind="agent")
+    except BudgetExceeded as error:
+        raise AgentInvocationRejected(str(error), error.code) from error
     if run.mode == "group":
         duplicate = await db.scalar(select(AgentInvocation.id).where(
             AgentInvocation.run_id == run.id,
@@ -313,23 +329,17 @@ async def dispatch_agent_invocation(
                 "The same Group task was already delegated from this WorkItem",
                 "group_duplicate_delegation",
             )
-        max_fan_out = int(
-            (run.hard_budget_snapshot or {}).get(
-                "max_agent_fan_out_per_work_item",
-            ) or 8
+    max_fan_out = int(limits["max_agent_fan_out_per_work_item"])
+    prior_targets = set(await db.scalars(select(AgentInvocation.target_agent_id).where(
+        AgentInvocation.run_id == run.id,
+        AgentInvocation.caller_work_item_id == caller_work.id,
+        AgentInvocation.status != "rejected",
+    )))
+    if target_agent_id not in prior_targets and len(prior_targets) >= max_fan_out:
+        raise AgentInvocationRejected(
+            "AgentInvocation fan-out limit reached for this WorkItem",
+            "group_fan_out_exhausted" if run.mode == "group" else "agent_fan_out_exhausted",
         )
-        prior_targets = set(await db.scalars(select(
-            AgentInvocation.target_agent_id,
-        ).where(
-            AgentInvocation.run_id == run.id,
-            AgentInvocation.caller_work_item_id == caller_work.id,
-            AgentInvocation.status != "rejected",
-        )))
-        if target_agent_id not in prior_targets and len(prior_targets) >= max_fan_out:
-            raise AgentInvocationRejected(
-                "Group AgentInvocation fan-out limit reached for this WorkItem",
-                "group_fan_out_exhausted",
-            )
 
     invocation_id, target_work_id, target_runner_id = uuid7(), uuid7(), uuid7()
     request_message_id = uuid7() if run.mode == "group" else None
@@ -347,6 +357,7 @@ async def dispatch_agent_invocation(
         work_item_id=target_work.id, run_id=run.id, session_id=run.session_id,
         agent_id=target_agent_id, agent_version_id=target_version_id, execution_epoch=1, status="queued",
         principal_snapshot={**dict(caller_runner.principal_snapshot), "current_agent_id": target_agent_id,
+                            "tenant_id": run.tenant_id, "account_id": run.account_id, "user_id": run.user_id,
                             "group_membership_id": target_group_scope_id if run.mode == "group" else caller_runner.principal_snapshot.get("group_membership_id"),
                             "delegation_chain": [*chain, caller_runner.agent_id]},
         assembly_snapshot={"agent_version_id": target_version_id}, prompt_manifest={},
@@ -387,10 +398,12 @@ async def dispatch_agent_invocation(
         request_hash=request_hash,
         authorization_snapshot={
             "tenant_id": run.tenant_id,
-            "account_id": caller_runner.principal_snapshot.get("account_id"),
+            "account_id": run.account_id,
             "permission_mode": run.permission_mode,
             "permission_revision": caller_runner.principal_snapshot.get("permission_revision"),
             "caller_agent_id": caller_runner.agent_id,
+            "caller_agent_version_id": caller_runner.agent_version_id,
+            "collaboration_path": collaboration_path,
             "target_agent_version_id": target_version_id,
         },
         group_session_id=group_run.group_session_id if run.mode == "group" else None,

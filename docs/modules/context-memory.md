@@ -222,6 +222,8 @@ updated_at
 
 相同或冲突事实需要受控更新、合并或停用，不能无界重复追加。用户可以查看、修改和删除自己的记忆；删除或停用后不得继续召回。
 
+复用同一 Runner 的记忆快照时，仍重新检查 active 状态、租户、用户、Agent 作用域及内容 hash。快照固定已选记忆的身份和顺序，不保留对已撤回内容的访问权；失效项被排除，不自动补选其他记忆。
+
 ## Group 中的上下文
 
 Group 只有一个共享 GroupSession，不为每个成员复制一份用户会话。每个成员以 `group_id + agent_id` 为私有执行命名空间，先确定当前 Agent 的直接可见范围，再由自己的策略在该范围内构建上下文。
@@ -239,9 +241,11 @@ Group 只有一个共享 GroupSession，不为每个成员复制一份用户会�
 
 Context、History 和 Memory Policy 只能在上述可见范围内裁剪、召回和组装，不能借助策略读取其他 Agent 的对话或工作。
 
-其他 Agent 之间的 human 可见定向 `@` 委托/交付、标记为 `group` 的精炼留痕、SharedTask、调用、验证结果、分歧、结果和 Artifact 属于可主动查询的 Group 共享记录。未参与成员不会收到通知，这些记录也不会自动进入其 Prompt；当前 Group Runtime 会为所有有效成员注入只读、可重复调用的 `search_group_history` 协调能力。查询结果进入当前 Runner，并保留来源、sequence、visibility 与 checksum。`direct` 只扩大群聊记录的主动检索范围，不会暴露其他 Agent 的私有 Runtime 事件、Prompt、Tool 数据或 Memory。
+其他 Agent 之间的 human 可见定向 `@` 委托/交付、标记为 `group` 的精炼留痕、SharedTask、调用、验证结果、分歧、结果和 Artifact 属于可主动查询的 Group 共享记录。未参与成员不会收到通知，这些记录也不会自动进入其 Prompt；成员只有显式绑定且当前可用的 `search_group_history` 才能主动查询。查询结果进入当前 Runner，并保留来源、sequence、visibility 与 checksum。`direct` 只扩大群聊记录的主动检索范围，不会暴露其他 Agent 的私有 Runtime 事件、Prompt、Tool 数据或 Memory。
 
-GroupTranscriptDocument 是共享 Message 与 ExecutionEvent 的派生只读文档或索引，不是上下文策略的隐式数据源。`search_group_history` 是 Group 模式的核心只读 Runtime Coordination Tool，不依赖 AgentVersion 的可选 Tool 装配；Runtime 仍须按当前 Membership 和 GroupSession 逐次授权。
+自动装配的产物目录仅包含当前 Agent 自己发布的产物，或通过其直接可见消息明确交付的附件。同 Session、同用户、已发布或存在 Group 共享索引，均不单独构成自动注入其他 Agent 上下文的许可；委派 Agent 不继承父会话的产物目录。此目录只有元数据，不包含正文或私有路径。
+
+GroupTranscriptDocument 是共享 Message 与 ExecutionEvent 的派生只读文档或索引，不是上下文策略的隐式数据源。`search_group_history` 是 Group 模式的只读 Runtime 协调工具，必须通过 AgentVersion 显式绑定并在平台启用；Runtime 仍须按当前 Membership 和 GroupSession 逐次授权。
 
 `history.summary_recent` 的 Group 摘要也必须按 `group_id + agent_id` 分别维护，不能生成一份全群摘要后自动注入所有 Agent。通过 `search_group_history` 得到的结果只进入当前 Runner 的可见上下文，不自动写入长期记忆。
 

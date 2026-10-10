@@ -9,14 +9,14 @@
 Agent 可以通过：
 
 - 已知 Agent ID；
-- Builder 配置的受信候选；
+- Builder 配置的逐跳显式绑定；
 - 当前 Group Membership；
 - Enterprise Agent Network 搜索；
 - 用户明确 @或选择；
 
 找到候选 Agent。发现依据 AgentCard，不读取候选的 Instructions、私有 Memory 或 Prompt。
 
-平台内 AgentCard 是由已发布 AgentVersion 生成的数据库投影。查询至少过滤原始用户、租户、visibility、发布状态、协作开关、治理规则和可用性；`group_enabled` 不能单独推出可发现、可邀请或可调用。
+平台内 AgentCard 是由已发布 AgentVersion 生成的数据库投影。查询按显式绑定或双方网络参与资格确定候选边界，并过滤原始用户、租户、visibility、发布状态、治理规则和可用性；单个 Agent 开启 `group_enabled` 不会赋予任意调用方访问权限。
 
 ## 发现、邀请、调用、授权分离
 
@@ -29,7 +29,14 @@ Agent 可以通过：
 
 任何前一层都不能自动推出后一层。Runtime 在创建 AgentInvocation 时再次做机器校验，并为拒绝形成可审计记录。
 
-## 两种协作语义
+## 两条协作授权路径
+
+- **显式绑定**：`bound_agent_ids[]` 表示当前 Agent 发布版本可直接委派的目标，不要求开启 `group_enabled`。A 绑定 B、B 绑定 C 时，B 可以依据自己的绑定继续调用 C，形成 A→B→C；结果按 C→B→A 返回。A 不继承 B 的绑定，不能仅凭这条链直接调用 C。
+- **协作网络**：调用方与目标方都开启 `group_enabled` 时，在原始用户授权和平台治理范围内，无需互相绑定即可发现和委派。普通用户 Chat A 后，A 可以自主判断协作需求、寻找成员，并自动建立包含 A 的 Group，在群内继续互动完成任务。
+
+每一跳都保留原始用户身份，并检查目标的发布版本、可见性、可用性、策略与预算。Agent 关系不代替工具授权：`discover_agents`、`invoke_agent`、`select_group_members` 等工具仍须按职责显式绑定到实际使用它们的 AgentVersion。没有有效工具绑定时，不自动补充。
+
+## 两种交互方式
 
 ### Delegation
 
@@ -40,7 +47,7 @@ caller → AgentInvocation → target
 caller ← final result / failure ← target
 ```
 
-适用于 Chat 和 Plan 中的探索、评审、测试、摘要等任务。目标 Agent不直接成为用户会话成员，也不能继续获得调用方的完整历史。
+适用于 Chat 和 Plan 中的探索、评审、测试、摘要等任务。目标 Agent 不直接成为用户会话成员，也不会获得调用方的完整历史。目标可以依据自己的逐跳绑定或网络资格继续委派，深度、循环、扇出与累计预算仍受运行护栏限制。
 
 ### Group Collaboration
 
@@ -94,6 +101,10 @@ return_route
 - 返回结果、Artifact 或失败。
 
 普通最终消息足以结束这次 AgentInvocation，不要求 `collaboration_response` Completion Envelope。
+
+目标失败时，Invocation 和目标 WorkItem 保持 `failed`，同时可在 `result_data.partial_results` 返回已经完成的检索证据。当前只提取原生搜索、网页抓取工具的成功结果，严格限定同一租户、用户账号、Session、Run、目标 WorkItem 和目标 Agent，并核对工具冻结版本及执行状态。不收集其他任务结果、失败工具结果或未完成的模型输出，也不重新执行工具。
+
+部分成果包含来源 URL、标题、检索时间和正文摘录，最多 12 个来源、24 KiB；明确标注任务失败、尚未完成、外部文本是证据而非指令。Chat/Plan 通过原有 Tool continuation 取得结构化数据，Group 通过原有定向交付消息取得可读的来源和摘录，接收范围不变。这些证据不等于成功交付，后续工具组合包可以扩展证据提取协议，但不会因此注入新工具或权限。
 
 ## 上下文最小化
 
@@ -157,9 +168,9 @@ Plan 不冻结参与者集合。第一阶段部署可以只开放产品、开发
 
 ## Group
 
-Group 中每个成员可以看到当前 Membership 目录，并按权限直接调用其他成员。实际 Interaction Graph 由 Message 和 AgentInvocation 追加形成。
+Group 中每个成员可以看到当前 Membership 目录。网络成员无需预先逐对绑定，在原始用户授权和工具绑定有效时可以直接调用其他本轮成员。实际 Interaction Graph 由 Message 和 AgentInvocation 追加形成。
 
-图外候选必须先走工作网发现和邀请策略。第一阶段 `fixed_for_run` 会拒绝新增成员，但必须记录候选、原因和拒绝 reason code；不能静默丢弃，也不能假装调用成功。
+每个 GroupRun 使用 `fixed_for_run`，本轮不能新增成员。当前 `invite_agent` 对图外候选记录可审计拒绝并返回 `membership_policy_fixed_for_run`，不会创建邀请 Approval 或等待用户批准；成员调整须在后续新 Run 重新选择和校验。
 
 ## 消息与可见性
 
@@ -186,7 +197,7 @@ Group 中每个成员可以看到当前 Membership 目录，并按权限直接�
 
 ## 禁止设计
 
-- 把绑定 Agent 当作固定调用拓扑；
+- 把逐跳绑定传递成调用方的直接授权，或把允许的调用关系当作必须执行的工作流；
 - 因用户文本提到 Agent 名称就绕过权限；
 - 让调用方复制自己的权限给目标 Agent；
 - 默认共享完整历史、Prompt 或私有 Memory；

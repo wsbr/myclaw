@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import json
 
 import pytest
 from sqlalchemy import text
@@ -128,4 +129,32 @@ async def test_mysql_agent_eval_definitions_and_run_bindings_are_immutable():
         ), {"id": case_run_id})
         await db.execute(text("SET FOREIGN_KEY_CHECKS=1"))
 
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_mysql_eval_case_metadata_is_frozen_with_the_definition():
+    engine = create_async_engine(_database_url(), isolation_level="READ COMMITTED")
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    case_id = uuid7()
+    metadata = {"tags": ["搜索"], "source_run_id": uuid7(), "source_snapshot": {
+        "content_hash": "a" * 64, "response_text": "historical reference, not gold",
+    }}
+    async with factory.begin() as db:
+        await db.execute(text("SET FOREIGN_KEY_CHECKS=0"))
+        try:
+            await db.execute(text(
+                "INSERT INTO agent_eval_case (id,suite_version_id,case_key,name,input_text,"
+                "assertions,weight,sort_order,created_at,case_metadata) VALUES "
+                "(:id,:version,'source','Source','question',JSON_OBJECT('min_chars',1),"
+                "1,0,NOW(),:metadata)"
+            ), {"id": case_id, "version": uuid7(), "metadata": json.dumps(metadata)})
+        finally:
+            await db.execute(text("SET FOREIGN_KEY_CHECKS=1"))
+    async with factory() as db:
+        stored = await db.scalar(text("SELECT case_metadata FROM agent_eval_case WHERE id=:id"), {"id": case_id})
+        assert json.loads(stored) == metadata
+        with pytest.raises(DBAPIError, match="agent eval definition is immutable"):
+            await db.execute(text("UPDATE agent_eval_case SET case_metadata=JSON_OBJECT() WHERE id=:id"), {"id": case_id})
+        await db.rollback()
     await engine.dispose()

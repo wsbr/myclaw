@@ -4,7 +4,9 @@ from __future__ import annotations
 
 from sqlalchemy import select
 
-from app.models.agent_v1 import AgentAssemblyVersion, AgentBlueprint, AgentCard
+from app.models.agent_v1 import (
+    AgentAssemblyVersion, AgentBlueprint, AgentCard, AgentVersionBinding,
+)
 from app.models.foundation import PlatformAccountRole
 from app.services.agent_access_service import agent_use_filter, has_agent_use_access
 
@@ -33,6 +35,7 @@ def agent_card_view(card: AgentCard) -> dict:
 async def discover_agent_cards(
     db, *, tenant_id: str, account_id: str | None,
     actor_agent_id: str | None = None,
+    actor_agent_version_id: str | None = None,
     query: str | None = None, domain_tags: list[str] | None = None,
     group_enabled: bool | None = None, capability_keys: list[str] | None = None,
     governance_labels: list[str] | None = None, limit: int = 20,
@@ -44,6 +47,27 @@ async def discover_agent_cards(
     visibility, publication, mode, and collaboration checks before creating a
     target WorkItem.
     """
+    if actor_agent_id:
+        actor = await db.scalar(select(AgentBlueprint).where(
+            AgentBlueprint.id == actor_agent_id,
+            AgentBlueprint.tenant_id == tenant_id,
+        ))
+        version_id = actor_agent_version_id or (
+            actor.current_published_version_id if actor else None
+        )
+        actor_version = await db.get(AgentAssemblyVersion, version_id) if version_id else None
+        if (
+            actor is None or actor_version is None
+            or actor_version.agent_id != actor_agent_id
+            or actor_version.immutable_at is None
+            or actor_version.publication_status not in {"published", "draft_test_snapshot"}
+            or not actor_version.group_enabled
+        ):
+            return []
+        # A model-supplied filter cannot opt out of the network boundary.
+        if group_enabled is False:
+            return []
+        group_enabled = True
     limit = max(1, min(int(limit), 500))
     statement = (
         select(AgentCard)
@@ -92,6 +116,14 @@ async def discover_agent_cards(
         if collaboration.get("discoverable") is False:
             continue
         if isinstance(governance, dict) and governance.get("discoverable") is False:
+            continue
+        if actor_agent_id and (
+            collaboration.get("callable") is False
+            or (isinstance(governance, dict) and (
+                governance.get("callable") is False
+                or governance.get("group_allowed") is False
+            ))
+        ):
             continue
         capabilities = {
             str(item).casefold()
@@ -164,3 +196,27 @@ async def resolve_callable_agent(
     ):
         raise PermissionError("target Agent is denied by collaboration governance")
     return target, card
+
+
+async def resolve_bound_agent_cards(
+    db, *, tenant_id: str, account_id: str | None,
+    actor_agent_id: str, actor_agent_version_id: str,
+) -> list[AgentCard]:
+    """Project only this frozen caller's usable explicit targets, without network discovery."""
+    version = await db.get(AgentAssemblyVersion, actor_agent_version_id)
+    if version is None or version.agent_id != actor_agent_id:
+        return []
+    target_ids = list(await db.scalars(select(AgentVersionBinding.bound_agent_id).where(
+        AgentVersionBinding.agent_version_id == actor_agent_version_id,
+    ).order_by(AgentVersionBinding.sort_order)))
+    cards: list[AgentCard] = []
+    for target_id in target_ids:
+        try:
+            _agent, card = await resolve_callable_agent(
+                db, tenant_id=tenant_id, account_id=account_id,
+                actor_agent_id=actor_agent_id, target_agent_id=target_id,
+            )
+        except (LookupError, PermissionError):
+            continue
+        cards.append(card)
+    return cards

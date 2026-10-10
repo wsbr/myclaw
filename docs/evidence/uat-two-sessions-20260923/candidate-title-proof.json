@@ -1,0 +1,278 @@
+[
+  {
+    "turn_id": "01a0cc0f-4f00-73df-932f-9b577ce3386f",
+    "views": [
+      {
+        "call_id": "call_29c4c57a16384d13b8c99709",
+        "matches_actual_manifest": true,
+        "source_metadata": [
+          {
+            "url": null,
+            "source_id": null,
+            "title": null,
+            "excerpt_chars": 0,
+            "contains_fund_name": false,
+            "contains_company_name": false
+          }
+        ],
+        "raw_content_url_count": 0,
+        "result_keys": []
+      },
+      {
+        "call_id": "call_c34a39295d3c4129bc9bbf7b",
+        "matches_actual_manifest": true,
+        "source_metadata": [
+          {
+            "url": "https://xueqiu.com/9173021627/406495578?_ugc_source=ugcbaiducard",
+            "source_id": "web-68fa50fa308724d0a480",
+            "title": "科大讯飞的&#34;反惯性&#34;半年报:主动做减法,换来76%的新基本盘",
+            "excerpt_chars": 0,
+            "contains_fund_name": false,
+            "contains_company_name": false
+          },
+          {
+            "url": "https://www.zhipin.com/job_detail/263efced3f6344ba1Xx_0ty5ElpS.html",
+            "source_id": "web-9cb6471f0c7c57f029c8",
+            "title": "智慧医疗-销售经理-潍坊",
+            "excerpt_chars": 0,
+            "contains_fund_name": false,
+            "contains_company_name": false
+          },
+          {
+            "url": "https://www.zhipin.com/job_detail/b03a3f0fc87d149103N43dS_E1VZ.html",
+            "source_id": "web-b5939030e4d07e9f46a8",
+            "title": "交付产品经理",
+            "excerpt_chars": 0,
+            "contains_fund_name": false,
+            "contains_company_name": false
+          },
+          {
+            "url": "https://pdf.dfcfw.com/pdf/H2_AN202608281828578998_1.pdf",
+            "source_id": "web-fa007ddd2d65a63d01e9",
+            "title": "鹏华中证车联网主题交易型开放式指数证 券投资基金发起式联接基金 2026 年中期报告",
+            "excerpt_chars": 0,
+            "contains_fund_name": false,
+            "contains_company_name": false
+          },
+          {
+            "url": "https://www.zhipin.com/job_detail/943b7e1923faaf801HB439m_GFRQ.html",
+            "source_id": "web-8d1c33f382810d78b2e9",
+            "title": "智慧医疗-C端大模型产品经理-合肥",
+            "excerpt_chars": 0,
+            "contains_fund_name": false,
+            "contains_company_name": false
+          }
+        ],
+        "raw_content_url_count": 15,
+        "result_keys": [
+          "checksum",
+          "count",
+          "domains",
+          "effective_query",
+          "freshness",
+          "original_query",
+          "query",
+          "results",
+          "retrieved_at"
+        ]
+      }
+    ],
+    "web_stats": [
+      {
+        "tool_name": "web_search",
+        "tool_call_id": "call_29c4c57a16384d13b8c99709",
+        "full_result_hash": "fb7c684a690ce17690820799490d54c7de0f3e9df822ab38ec33b0a4a5608b4f",
+        "full_chars": 451,
+        "full_tokens": 225,
+        "projected_chars": 451,
+        "projected_tokens": 225,
+        "omitted": false,
+        "consumed": true,
+        "omission_reason": "none",
+        "allocated_tokens": 225,
+        "minimum_reference_tokens": 225,
+        "budget_exceeded": false,
+        "shared_budget_tokens": 12000,
+        "shared_projected_tokens": 2074,
+        "shared_budget_exceeded": false,
+        "unavoidable_metadata_tokens": 0
+      },
+      {
+        "tool_name": "web_search",
+        "tool_call_id": "call_c34a39295d3c4129bc9bbf7b",
+        "full_result_hash": "aecc8dc43a5fd3cbd8975009febf653557e2b0514a8ede0cb73d8002db1c4910",
+        "full_chars": 3698,
+        "full_tokens": 1849,
+        "projected_chars": 3698,
+        "projected_tokens": 1849,
+        "omitted": false,
+        "consumed": false,
+        "omission_reason": "none",
+        "allocated_tokens": 1849,
+        "minimum_reference_tokens": 561,
+        "budget_exceeded": false,
+        "shared_budget_tokens": 12000,
+        "shared_projected_tokens": 2074,
+        "shared_budget_exceeded": false,
+        "unavoidable_metadata_tokens": 0
+      }
+    ]
+  },
+  {
+    "turn_id": "01a0cc0f-76f4-7b57-82cd-fb23c52a8066",
+    "views": [
+      {
+        "call_id": "call_29c4c57a16384d13b8c99709",
+        "matches_actual_manifest": true,
+        "source_metadata": [
+          {
+            "url": null,
+            "source_id": null,
+            "title": null,
+            "excerpt_chars": 0,
+            "contains_fund_name": false,
+            "contains_company_name": false
+          }
+        ],
+        "raw_content_url_count": 0,
+        "result_keys": []
+      },
+      {
+        "call_id": "call_c34a39295d3c4129bc9bbf7b",
+        "matches_actual_manifest": true,
+        "source_metadata": [
+          {
+            "url": "https://xueqiu.com/9173021627/406495578?_ugc_source=ugcbaiducard",
+            "source_id": "web-68fa50fa308724d0a480",
+            "title": null,
+            "excerpt_chars": 0,
+            "contains_fund_name": false,
+            "contains_company_name": false
+          },
+          {
+            "url": "https://www.zhipin.com/job_detail/263efced3f6344ba1Xx_0ty5ElpS.html",
+            "source_id": "web-9cb6471f0c7c57f029c8",
+            "title": null,
+            "excerpt_chars": 0,
+            "contains_fund_name": false,
+            "contains_company_name": false
+          },
+          {
+            "url": "https://www.zhipin.com/job_detail/b03a3f0fc87d149103N43dS_E1VZ.html",
+            "source_id": "web-b5939030e4d07e9f46a8",
+            "title": null,
+            "excerpt_chars": 0,
+            "contains_fund_name": false,
+            "contains_company_name": false
+          },
+          {
+            "url": "https://pdf.dfcfw.com/pdf/H2_AN202608281828578998_1.pdf",
+            "source_id": "web-fa007ddd2d65a63d01e9",
+            "title": null,
+            "excerpt_chars": 0,
+            "contains_fund_name": false,
+            "contains_company_name": false
+          },
+          {
+            "url": "https://www.zhipin.com/job_detail/943b7e1923faaf801HB439m_GFRQ.html",
+            "source_id": "web-8d1c33f382810d78b2e9",
+            "title": null,
+            "excerpt_chars": 0,
+            "contains_fund_name": false,
+            "contains_company_name": false
+          }
+        ],
+        "raw_content_url_count": 5,
+        "result_keys": [
+          "count",
+          "omitted",
+          "results"
+        ]
+      },
+      {
+        "call_id": "call_5a2e913af466459d9c7cfacd",
+        "matches_actual_manifest": true,
+        "source_metadata": [
+          {
+            "url": "https://xueqiu.com/9173021627/406495578?_ugc_source=ugcbaiducard",
+            "source_id": "web-68fa50fa308724d0a480",
+            "title": null,
+            "excerpt_chars": 66,
+            "contains_fund_name": false,
+            "contains_company_name": false
+          }
+        ],
+        "raw_content_url_count": 6,
+        "result_keys": [
+          "checksum",
+          "excerpts",
+          "normalized_text_checksum",
+          "omitted",
+          "retrieved_at",
+          "source_id",
+          "title",
+          "url"
+        ]
+      }
+    ],
+    "web_stats": [
+      {
+        "tool_name": "web_search",
+        "tool_call_id": "call_29c4c57a16384d13b8c99709",
+        "full_result_hash": "fb7c684a690ce17690820799490d54c7de0f3e9df822ab38ec33b0a4a5608b4f",
+        "full_chars": 451,
+        "full_tokens": 225,
+        "projected_chars": 451,
+        "projected_tokens": 225,
+        "omitted": false,
+        "consumed": true,
+        "omission_reason": "none",
+        "allocated_tokens": 225,
+        "minimum_reference_tokens": 225,
+        "budget_exceeded": false,
+        "shared_budget_tokens": 12000,
+        "shared_projected_tokens": 1302,
+        "shared_budget_exceeded": false,
+        "unavoidable_metadata_tokens": 0
+      },
+      {
+        "tool_name": "web_search",
+        "tool_call_id": "call_c34a39295d3c4129bc9bbf7b",
+        "full_result_hash": "aecc8dc43a5fd3cbd8975009febf653557e2b0514a8ede0cb73d8002db1c4910",
+        "full_chars": 3698,
+        "full_tokens": 1849,
+        "projected_chars": 1122,
+        "projected_tokens": 561,
+        "omitted": true,
+        "consumed": true,
+        "omission_reason": "consumed_citation_digest",
+        "allocated_tokens": 561,
+        "minimum_reference_tokens": 561,
+        "budget_exceeded": false,
+        "shared_budget_tokens": 12000,
+        "shared_projected_tokens": 1302,
+        "shared_budget_exceeded": false,
+        "unavoidable_metadata_tokens": 0
+      },
+      {
+        "tool_name": "web_fetch",
+        "tool_call_id": "call_5a2e913af466459d9c7cfacd",
+        "full_result_hash": "c13a50b6c2d46e173258ce35c56be925a30983590c16bb11a271414978c063a6",
+        "full_chars": 35574,
+        "full_tokens": 17787,
+        "projected_chars": 1033,
+        "projected_tokens": 516,
+        "omitted": true,
+        "consumed": false,
+        "omission_reason": "balanced_model_projection",
+        "allocated_tokens": 4000,
+        "minimum_reference_tokens": 255,
+        "budget_exceeded": false,
+        "shared_budget_tokens": 12000,
+        "shared_projected_tokens": 1302,
+        "shared_budget_exceeded": false,
+        "unavoidable_metadata_tokens": 0
+      }
+    ]
+  }
+]

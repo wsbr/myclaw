@@ -56,17 +56,19 @@ class WriteFileTool(BaseTool):
         exists = path.exists()
         if exists and not path.is_file():
             return ToolResult(success=False, error="target exists and is not a regular file")
+        # These conflicts require new arguments or a refreshed checksum. A
+        # Worker replay of the same immutable invocation cannot resolve them.
         if mode == "create" and exists:
             return ToolResult(
                 status="failed", error="version conflict: target already exists",
                 error_code="workspace_target_exists", error_category="conflict",
-                retryable=True,
+                retryable=False,
             )
         if mode == "replace" and not exists:
             return ToolResult(
                 status="failed", error="version conflict: target does not exist",
                 error_code="workspace_target_missing", error_category="conflict",
-                retryable=True,
+                retryable=False,
             )
         if mode == "replace" and not args.get("expected_checksum"):
             return ToolResult(
@@ -80,7 +82,7 @@ class WriteFileTool(BaseTool):
                 return ToolResult(
                     status="failed", error="version conflict: checksum does not match",
                     error_code="workspace_checksum_conflict", error_category="conflict",
-                    retryable=True,
+                    retryable=False,
                 )
         if has_artifact:
             source, artifact = await resolve_artifact_storage_path(

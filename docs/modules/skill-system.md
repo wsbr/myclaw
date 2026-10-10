@@ -84,6 +84,8 @@ path
 
 Catalog 有独立的总 token 上限；当固定元数据本身超过上限时发布/运行失败，不允许静默省略已绑定 Skill。完整 `SKILL.md` 及其引用内容由 Agent 按需通过已装配的 `read_file` 渐进读取，并作为 Tool Result 返回，不能提升为 system role。`read_file` 首先校验 `RunnerSkillSnapshot`，再在当前执行节点按 checksum 自愈缓存；未绑定的 `skill://` URI 始终拒绝。平台不会因为 Agent 选择了 Skill 而自动添加 `read_file`；未选择该 Tool 时，Agent 只能使用初始 Catalog 信息。
 
+Catalog 的名称、说明和路径作为结构化的 `assistant` 数据段呈现，包内元数据不能成为 system 指令。平台的加载指导独立生成：仅当本轮实际呈现 `read_file` 时要求按精确路径读取；否则明确只有目录信息可用，不要求调用缺失能力，也不能声称已读取完整 Skill。该指导在工具被停用或动态加载后随下一次模型请求更新。
+
 ## 更新语义
 
 - 可编辑 Agent Draft 绑定逻辑 `skill_id`，便于 Builder 选择能力；Draft 页面应同时显示当前解析到的 SkillVersion。

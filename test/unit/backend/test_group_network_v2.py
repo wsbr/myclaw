@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -15,7 +16,7 @@ from app.core.tool_registry.builtin.search_group_history import SearchGroupHisto
 from app.runtime.coordination_tools import dispatch_coordination_tool
 from app.database import Base
 from app.deps import SessionActor
-from app.models.agent_v1 import AgentAssemblyVersion, AgentBlueprint, AgentCard
+from app.models.agent_v1 import AgentAssemblyVersion, AgentBlueprint, AgentCard, AgentVersionBinding
 from app.models.common import utcnow, uuid7
 from app.models.foundation import (
     ExecutionEvent, OutboxCommand, PlatformAccount, UserIdentity, UserSession,
@@ -442,6 +443,7 @@ async def test_completed_chat_emerges_only_model_selected_agents_idempotently():
         candidate_snapshot = await build_group_emergence_candidate_snapshot(
             db, tenant_id=DEFAULT_TENANT_ID,
             account_id=account_id, current_agent_id=agents[0][0].id,
+            current_agent_version_id=agents[0][1].id,
         )
         assert candidate_snapshot["status"] == "ready"
         assert set(candidate_snapshot["candidates"][0]) == {
@@ -1141,3 +1143,233 @@ async def test_group_peers_message_invoke_audit_and_repeat_history():
         ))
         assert invite_event.payload["result"] == "rejected"
     await engine.dispose()
+
+
+@asynccontextmanager
+async def _emergence_chat_case(*, network_enabled: bool = True):
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    account_id, session_id, run_id, work_id, runner_id = [uuid7() for _ in range(5)]
+    agents = [
+        _published_agent(account_id, "Anchor", "requirements"),
+        _published_agent(account_id, "Builder", "workspace_write"),
+        _published_agent(account_id, "Reviewer", "test_execute"),
+    ]
+    agents[0][1].group_enabled = network_enabled
+    agents[0][2].group_enabled = network_enabled
+    run = Run(
+        id=run_id, account_id=account_id, session_id=session_id,
+        user_id="group-boundary-user", mode="chat", status="completed",
+        terminal_reason="completed", completed_at=utcnow(), root_work_item_id=work_id,
+    )
+    work = WorkItem(
+        id=work_id, run_id=run_id, session_id=session_id, user_id=run.user_id,
+        mode="chat", owner_agent_id=agents[0][0].id,
+        agent_version_id=agents[0][1].id, goal="Review implementation",
+        purpose="chat", status="succeeded", execution_epoch=1, attempt_no=1,
+    )
+    runner = DurableRunner(
+        id=runner_id, work_item_id=work_id, run_id=run_id, session_id=session_id,
+        agent_id=agents[0][0].id, agent_version_id=agents[0][1].id,
+        execution_epoch=1, status="succeeded",
+        principal_snapshot={"account_id": account_id, "tenant_id": DEFAULT_TENANT_ID},
+        assembly_snapshot={}, prompt_manifest={}, input_snapshot={},
+    )
+    context = RuntimeContext(
+        tenant_id=DEFAULT_TENANT_ID, session_id=session_id, runner_id=runner_id,
+        user_id=run.user_id, account_id=account_id, agent_id=runner.agent_id,
+    )
+    try:
+        async with factory.begin() as db:
+            db.add_all([
+                UserIdentity(user_id=run.user_id, status="active"),
+                PlatformAccount(id=account_id, user_id=run.user_id, display_name="Boundary", status="active"),
+                *[row for bundle in agents for row in bundle],
+                UserSession(
+                    id=session_id, user_id=run.user_id, account_id=account_id,
+                    entry_agent_id=runner.agent_id, status="active", origin_type="web",
+                    next_event_sequence=1,
+                ),
+                run, work, runner,
+            ])
+            await db.flush()
+            yield SimpleNamespace(
+                db=db, account_id=account_id, agents=agents,
+                run=run, work=work, runner=runner, context=context,
+            )
+    finally:
+        await engine.dispose()
+
+
+async def _freeze_emergence_candidates(case):
+    snapshot = await build_group_emergence_candidate_snapshot(
+        case.db, tenant_id=DEFAULT_TENANT_ID, account_id=case.account_id,
+        current_agent_id=case.runner.agent_id,
+        current_agent_version_id=case.runner.agent_version_id,
+    )
+    case.runner.input_snapshot = {"group_emergence": snapshot}
+    return snapshot
+
+
+async def _select_emergence_peers(case):
+    return await dispatch_coordination_tool(
+        "select_group_members", {"selected_agent_ids": [case.agents[1][0].id]},
+        context=case.context, db=case.db, run_id=case.run.id,
+        work_item_id=case.work.id, source_turn_id="boundary-turn",
+        provider_call_id="boundary-selection",
+    )
+
+
+async def _record_legacy_group_selection(case):
+    snapshot = {
+        "status": "ready", "current_chat_agent_id": case.runner.agent_id,
+        "candidates": [{"agent_id": item[0].id} for item in case.agents[1:]],
+        "candidate_versions": {
+            item[0].id: {"agent_version_id": item[1].id, "card_content_hash": item[2].content_hash}
+            for item in case.agents[1:]
+        },
+    }
+    case.runner.input_snapshot = {"group_emergence": snapshot}
+    await ExecutionEventWriter(case.db).append(
+        session_id=case.run.session_id, run_id=case.run.id,
+        event_type="group.emergence_selected",
+        event_dedupe_key=f"group-emergence-selection:{case.run.id}",
+        actor_type="agent", actor_id=case.runner.agent_id,
+        entity_type="run", entity_id=case.run.id, visibility="user",
+        summary="Legacy selection before Group admission checks",
+        payload={
+            "selected_agent_ids": [item[0].id for item in case.agents[1:]],
+            "selected_agent_versions": snapshot["candidate_versions"],
+        },
+        correlation_id=case.run.id,
+    )
+
+
+async def _publish_anchor_replacement(case, *, network_enabled: bool):
+    _unused_agent, version, card = _published_agent(case.account_id, "Anchor v2", "requirements")
+    version.agent_id = case.runner.agent_id
+    version.version_no = 2
+    version.group_enabled = network_enabled
+    card.agent_id = case.runner.agent_id
+    card.group_enabled = network_enabled
+    case.agents[0][0].current_published_version_id = version.id
+    case.db.add_all([version, card])
+    await case.db.flush()
+
+
+@pytest.mark.asyncio
+async def test_group_disabled_chat_cannot_discover_select_or_apply_legacy_selection():
+    async with _emergence_chat_case(network_enabled=False) as case:
+        snapshot = await _freeze_emergence_candidates(case)
+        assert snapshot["status"] == "unavailable"
+        assert snapshot["reason"] == "group_initiator_not_network_enabled"
+        assert snapshot["candidates"] == []
+
+        discovery, _, _ = await dispatch_coordination_tool(
+            "discover_agents", {"group_enabled": False}, context=case.context,
+            db=case.db, run_id=case.run.id, work_item_id=case.work.id,
+            source_turn_id="discover-turn", provider_call_id="discover-call",
+        )
+        assert not discovery.success
+        assert discovery.error.code == "group_network_disabled"
+        # Old queued selections could omit the disabled caller and select others.
+        await _record_legacy_group_selection(case)
+        selection, wait, _ = await _select_emergence_peers(case)
+        assert not selection.success and wait is False
+        assert selection.error.code == "group_initiator_not_network_enabled"
+        assert await emerge_group_after_chat(
+            case.db, source_run_id=case.run.id, source_runner_id=case.runner.id,
+        ) is None
+        assert await case.db.scalar(select(func.count()).select_from(GroupSession)) == 0
+        assert await case.db.scalar(select(func.count()).select_from(GroupMembership)) == 0
+        skipped = await case.db.scalar(select(ExecutionEvent).where(
+            ExecutionEvent.event_type == "group.emergence_skipped",
+        ))
+        assert skipped.payload["reason"] == "group_initiator_not_network_enabled"
+
+
+@pytest.mark.asyncio
+async def test_group_enabled_chat_includes_itself_without_agent_bindings():
+    async with _emergence_chat_case() as case:
+        snapshot = await _freeze_emergence_candidates(case)
+        assert snapshot["status"] == "ready"
+        selection, wait, _ = await _select_emergence_peers(case)
+        assert selection.success and wait is False
+        assert await case.db.scalar(select(func.count()).select_from(AgentVersionBinding)) == 0
+        group, group_run = await emerge_group_after_chat(
+            case.db, source_run_id=case.run.id, source_runner_id=case.runner.id,
+        )
+        assert group_run.reporter_agent_id == case.runner.agent_id
+        members = list(await case.db.scalars(select(GroupRunMember).where(
+            GroupRunMember.group_run_id == group_run.id,
+        )))
+        assert {member.agent_id for member in members} == {
+            case.runner.agent_id, case.agents[1][0].id,
+        }
+        assert all(member.membership_policy == "fixed_for_run" for member in members)
+        assert {membership.status for membership in await case.db.scalars(select(GroupMembership).where(
+            GroupMembership.group_session_id == group.id,
+        ))} == {"joined"}
+
+
+@pytest.mark.asyncio
+async def test_new_enabled_publication_does_not_enable_old_disabled_chat():
+    async with _emergence_chat_case(network_enabled=False) as case:
+        await _publish_anchor_replacement(case, network_enabled=True)
+        snapshot = await _freeze_emergence_candidates(case)
+        assert snapshot["reason"] == "group_initiator_not_network_enabled"
+        await _record_legacy_group_selection(case)
+        selection, _, _ = await _select_emergence_peers(case)
+        assert selection.error.code == "group_initiator_not_network_enabled"
+        assert await emerge_group_after_chat(
+            case.db, source_run_id=case.run.id, source_runner_id=case.runner.id,
+        ) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("network_enabled", [False, True])
+async def test_group_formation_rejects_changed_initiator_publication(network_enabled):
+    async with _emergence_chat_case() as case:
+        await _freeze_emergence_candidates(case)
+        selection, _, _ = await _select_emergence_peers(case)
+        assert selection.success
+        await _publish_anchor_replacement(case, network_enabled=network_enabled)
+        assert await emerge_group_after_chat(
+            case.db, source_run_id=case.run.id, source_runner_id=case.runner.id,
+        ) is None
+        skipped = await case.db.scalar(select(ExecutionEvent).where(
+            ExecutionEvent.event_type == "group.emergence_skipped",
+        ))
+        assert skipped.payload["reason"] == "group_initiator_snapshot_changed"
+        assert await case.db.scalar(select(func.count()).select_from(GroupRun)) == 0
+
+
+@pytest.mark.asyncio
+async def test_group_formation_rechecks_initiator_collaboration_governance():
+    async with _emergence_chat_case() as case:
+        await _freeze_emergence_candidates(case)
+        selection, _, _ = await _select_emergence_peers(case)
+        assert selection.success
+        case.agents[0][2].collaboration_summary = {"callable": False}
+        await case.db.flush()
+        assert await emerge_group_after_chat(
+            case.db, source_run_id=case.run.id, source_runner_id=case.runner.id,
+        ) is None
+        skipped = await case.db.scalar(select(ExecutionEvent).where(
+            ExecutionEvent.event_type == "group.emergence_skipped",
+        ))
+        assert skipped.payload["reason"] == "group_initiator_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_group_selection_and_formation_reject_catalog_without_initiator():
+    async with _emergence_chat_case() as case:
+        await _record_legacy_group_selection(case)
+        selection, _, _ = await _select_emergence_peers(case)
+        assert selection.error.code == "group_initiator_snapshot_changed"
+        assert await emerge_group_after_chat(
+            case.db, source_run_id=case.run.id, source_runner_id=case.runner.id,
+        ) is None
+        assert await case.db.scalar(select(func.count()).select_from(GroupRun)) == 0

@@ -100,7 +100,11 @@ async def count_provider_request(
             int(value),
             "anthropic_native" if normalized_type == "anthropic" else "openai_tokenizer",
         )
-    except Exception:
+    except Exception as error:
+        if getattr(error, "code", None) == "model_parameters_invalid":
+            # A forbidden request override is a configuration failure, not a
+            # tokenizer outage that may be hidden by the estimation fallback.
+            raise
         return RequestTokenCount(
             conservative_request_tokens(messages, tools, parameters),
             "conservative_utf8_structural_fallback", degraded=True,

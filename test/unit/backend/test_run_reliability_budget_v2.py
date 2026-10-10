@@ -33,6 +33,8 @@ def test_direct_budget_has_real_plan_flow_token_headroom():
     assert chat["max_tokens"] == 200_000
     assert plan["max_tokens"] == 200_000
     assert plan["max_tokens"] < default_run_budget("group")["max_tokens"]
+    assert chat["max_agent_depth"] == plan["max_agent_depth"] == 8
+    assert normalize_run_budget({"max_agent_depth": 1}, mode="chat")["max_agent_depth"] == 1
 
 
 def test_existing_run_budget_snapshot_is_not_rewritten_by_new_default():

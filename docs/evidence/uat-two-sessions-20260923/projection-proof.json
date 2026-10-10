@@ -1,0 +1,808 @@
+[
+  {
+    "turn_id": "01a0cbf9-af88-7a68-b5f9-5493356be1c9",
+    "views": [
+      {
+        "call_id": "call_de3b21588c244998802e1927",
+        "matches_actual_manifest": true,
+        "source_metadata": [
+          {
+            "url": null,
+            "source_id": null,
+            "title": null,
+            "excerpt_chars": 0,
+            "contains_fund_name": false,
+            "contains_company_name": false
+          }
+        ],
+        "raw_content_url_count": 0,
+        "result_keys": []
+      },
+      {
+        "call_id": "call_5191bb32b11d482a966793ff",
+        "matches_actual_manifest": true,
+        "source_metadata": [
+          {
+            "url": "https://news.mydrivers.com/tag/kedaxunfei.htm",
+            "source_id": "web-ecfcfc7ed6371d9150dc",
+            "title": null,
+            "excerpt_chars": 0,
+            "contains_fund_name": false,
+            "contains_company_name": false
+          },
+          {
+            "url": "http://vip.stock.finance.sina.com.cn/corp/view/vCB_AllNewsStock.php?symbol=sz002230&Page=8",
+            "source_id": "web-4c0fce9265bac222e724",
+            "title": null,
+            "excerpt_chars": 0,
+            "contains_fund_name": false,
+            "contains_company_name": false
+          },
+          {
+            "url": "http://finance.sina.com.cn/realstock/company/sz002230/nc.shtml",
+            "source_id": "web-dc92c3eaef7a85c0fae4",
+            "title": null,
+            "excerpt_chars": 0,
+            "contains_fund_name": false,
+            "contains_company_name": false
+          },
+          {
+            "url": "https://www.sina.cn/news/detail/5341295540961285.html",
+            "source_id": "web-6b0f0d1ed9ea143d5445",
+            "title": null,
+            "excerpt_chars": 0,
+            "contains_fund_name": false,
+            "contains_company_name": false
+          },
+          {
+            "url": "https://www.xueqiu.com/3667526041/408983576",
+            "source_id": "web-069c7f161db69f241c4a",
+            "title": null,
+            "excerpt_chars": 0,
+            "contains_fund_name": false,
+            "contains_company_name": false
+          },
+          {
+            "url": "https://xueqiu.com/9173021627/406495578?_ugc_source=ugcbaiducard",
+            "source_id": "web-68fa50fa308724d0a480",
+            "title": null,
+            "excerpt_chars": 0,
+            "contains_fund_name": false,
+            "contains_company_name": false
+          }
+        ],
+        "raw_content_url_count": 6,
+        "result_keys": [
+          "count",
+          "omitted",
+          "results"
+        ]
+      },
+      {
+        "call_id": "call_34eb61d4e1b9418b911b6d9f",
+        "matches_actual_manifest": true,
+        "source_metadata": [
+          {
+            "url": "https://www.sina.cn/news/detail/5341295540961285.html",
+            "source_id": "web-6b0f0d1ed9ea143d5445",
+            "title": "【#科大讯飞半年营收增6.52%，优选G端落地，高额研发投入推高扣非亏损引发市场争议#】8月20日晚，科大讯飞发布2026年半年报，营收稳增、利润承压的分化表现，让公司的战略转型与发展前景成为市场焦点。财报显示，公司上半年实现营业收入116.23亿元，同比增长6.52%，经营体量稳步提升，不过扣非净利润亏 ​_新浪新闻",
+            "excerpt_chars": 612,
+            "contains_fund_name": false,
+            "contains_company_name": true
+          }
+        ],
+        "raw_content_url_count": 8,
+        "result_keys": [
+          "byte_size",
+          "checksum",
+          "elapsed_ms",
+          "excerpts",
+          "final_url",
+          "mime_type",
+          "normalized_text_checksum",
+          "objective",
+          "provider_request_id",
+          "raw_truncated",
+          "redirects",
+          "retrieved_at",
+          "source_id",
+          "status_code",
+          "text",
+          "text_length",
+          "text_truncated",
+          "title",
+          "truncated",
+          "untrusted_external_content",
+          "url"
+        ]
+      },
+      {
+        "call_id": "call_7987f52cf94e4223b9f60b54",
+        "matches_actual_manifest": true,
+        "source_metadata": [
+          {
+            "url": "https://www.xueqiu.com/3667526041/408983576",
+            "source_id": "web-069c7f161db69f241c4a",
+            "title": "上半年营收116亿元，科大讯飞跑出AI商业化的另一条路 ■财报发布会，多家券商给予“买入”评级■与华为共同参与巴西政府23亿大单项目■通过自主可控技术底座，走向产业引领的可行路... - 雪球",
+            "excerpt_chars": 4614,
+            "contains_fund_name": false,
+            "contains_company_name": true
+          }
+        ],
+        "raw_content_url_count": 6,
+        "result_keys": [
+          "checksum",
+          "excerpts",
+          "normalized_text_checksum",
+          "omitted",
+          "retrieved_at",
+          "source_id",
+          "title",
+          "url"
+        ]
+      },
+      {
+        "call_id": "call_f6924ec05b9e4210a0acbdad",
+        "matches_actual_manifest": true,
+        "source_metadata": [
+          {
+            "url": "https://xueqiu.com/9173021627/406495578?_ugc_source=ugcbaiducard",
+            "source_id": "web-68fa50fa308724d0a480",
+            "title": null,
+            "excerpt_chars": 66,
+            "contains_fund_name": false,
+            "contains_company_name": false
+          }
+        ],
+        "raw_content_url_count": 6,
+        "result_keys": [
+          "checksum",
+          "excerpts",
+          "normalized_text_checksum",
+          "omitted",
+          "retrieved_at",
+          "source_id",
+          "title",
+          "url"
+        ]
+      }
+    ],
+    "web_stats": [
+      {
+        "tool_name": "web_search",
+        "tool_call_id": "call_de3b21588c244998802e1927",
+        "full_result_hash": "fb7c684a690ce17690820799490d54c7de0f3e9df822ab38ec33b0a4a5608b4f",
+        "full_chars": 451,
+        "full_tokens": 225,
+        "projected_chars": 451,
+        "projected_tokens": 225,
+        "omitted": false,
+        "consumed": true,
+        "omission_reason": "none",
+        "allocated_tokens": 225,
+        "minimum_reference_tokens": 225,
+        "budget_exceeded": false,
+        "shared_budget_tokens": 12000,
+        "shared_projected_tokens": 6266,
+        "shared_budget_exceeded": false,
+        "unavoidable_metadata_tokens": 0
+      },
+      {
+        "tool_name": "web_search",
+        "tool_call_id": "call_5191bb32b11d482a966793ff",
+        "full_result_hash": "e66bb1da112610e6e73961fa45a94f9dd5e20173fa9b1f81102cebd426003e30",
+        "full_chars": 4553,
+        "full_tokens": 2276,
+        "projected_chars": 1281,
+        "projected_tokens": 640,
+        "omitted": true,
+        "consumed": true,
+        "omission_reason": "consumed_citation_digest",
+        "allocated_tokens": 640,
+        "minimum_reference_tokens": 640,
+        "budget_exceeded": false,
+        "shared_budget_tokens": 12000,
+        "shared_projected_tokens": 6266,
+        "shared_budget_exceeded": false,
+        "unavoidable_metadata_tokens": 0
+      },
+      {
+        "tool_name": "web_fetch",
+        "tool_call_id": "call_34eb61d4e1b9418b911b6d9f",
+        "full_result_hash": "53acfabc74d8ba92870cf3ce34e5eadbd4a89652feaeb04de60870a207a958cf",
+        "full_chars": 2866,
+        "full_tokens": 1433,
+        "projected_chars": 2866,
+        "projected_tokens": 1433,
+        "omitted": false,
+        "consumed": false,
+        "omission_reason": "none",
+        "allocated_tokens": 1433,
+        "minimum_reference_tokens": 250,
+        "budget_exceeded": false,
+        "shared_budget_tokens": 12000,
+        "shared_projected_tokens": 6266,
+        "shared_budget_exceeded": false,
+        "unavoidable_metadata_tokens": 0
+      },
+      {
+        "tool_name": "web_fetch",
+        "tool_call_id": "call_7987f52cf94e4223b9f60b54",
+        "full_result_hash": "ba512a1b8ee0c46752c9170ab707cd80c9c40063ea4b7b0c486fdad4ab51a381",
+        "full_chars": 11005,
+        "full_tokens": 6697,
+        "projected_chars": 5785,
+        "projected_tokens": 3452,
+        "omitted": true,
+        "consumed": false,
+        "omission_reason": "balanced_model_projection",
+        "allocated_tokens": 4000,
+        "minimum_reference_tokens": 245,
+        "budget_exceeded": false,
+        "shared_budget_tokens": 12000,
+        "shared_projected_tokens": 6266,
+        "shared_budget_exceeded": false,
+        "unavoidable_metadata_tokens": 0
+      },
+      {
+        "tool_name": "web_fetch",
+        "tool_call_id": "call_f6924ec05b9e4210a0acbdad",
+        "full_result_hash": "b2455fb2d05b114ccce1cbd4295cabed8d8fbabd84f8ed7910aa88c449858066",
+        "full_chars": 35575,
+        "full_tokens": 17787,
+        "projected_chars": 1033,
+        "projected_tokens": 516,
+        "omitted": true,
+        "consumed": false,
+        "omission_reason": "balanced_model_projection",
+        "allocated_tokens": 4000,
+        "minimum_reference_tokens": 255,
+        "budget_exceeded": false,
+        "shared_budget_tokens": 12000,
+        "shared_projected_tokens": 6266,
+        "shared_budget_exceeded": false,
+        "unavoidable_metadata_tokens": 0
+      }
+    ]
+  },
+  {
+    "turn_id": "01a0cc0f-bf17-7a1c-b256-fc6ace0e5058",
+    "views": [
+      {
+        "call_id": "call_29c4c57a16384d13b8c99709",
+        "matches_actual_manifest": true,
+        "source_metadata": [
+          {
+            "url": null,
+            "source_id": null,
+            "title": null,
+            "excerpt_chars": 0,
+            "contains_fund_name": false,
+            "contains_company_name": false
+          }
+        ],
+        "raw_content_url_count": 0,
+        "result_keys": []
+      },
+      {
+        "call_id": "call_c34a39295d3c4129bc9bbf7b",
+        "matches_actual_manifest": true,
+        "source_metadata": [
+          {
+            "url": "https://xueqiu.com/9173021627/406495578?_ugc_source=ugcbaiducard",
+            "source_id": "web-68fa50fa308724d0a480",
+            "title": null,
+            "excerpt_chars": 0,
+            "contains_fund_name": false,
+            "contains_company_name": false
+          },
+          {
+            "url": "https://www.zhipin.com/job_detail/263efced3f6344ba1Xx_0ty5ElpS.html",
+            "source_id": "web-9cb6471f0c7c57f029c8",
+            "title": null,
+            "excerpt_chars": 0,
+            "contains_fund_name": false,
+            "contains_company_name": false
+          },
+          {
+            "url": "https://www.zhipin.com/job_detail/b03a3f0fc87d149103N43dS_E1VZ.html",
+            "source_id": "web-b5939030e4d07e9f46a8",
+            "title": null,
+            "excerpt_chars": 0,
+            "contains_fund_name": false,
+            "contains_company_name": false
+          },
+          {
+            "url": "https://pdf.dfcfw.com/pdf/H2_AN202608281828578998_1.pdf",
+            "source_id": "web-fa007ddd2d65a63d01e9",
+            "title": null,
+            "excerpt_chars": 0,
+            "contains_fund_name": false,
+            "contains_company_name": false
+          },
+          {
+            "url": "https://www.zhipin.com/job_detail/943b7e1923faaf801HB439m_GFRQ.html",
+            "source_id": "web-8d1c33f382810d78b2e9",
+            "title": null,
+            "excerpt_chars": 0,
+            "contains_fund_name": false,
+            "contains_company_name": false
+          }
+        ],
+        "raw_content_url_count": 5,
+        "result_keys": [
+          "count",
+          "omitted",
+          "results"
+        ]
+      },
+      {
+        "call_id": "call_5a2e913af466459d9c7cfacd",
+        "matches_actual_manifest": true,
+        "source_metadata": [
+          {
+            "url": "https://xueqiu.com/9173021627/406495578?_ugc_source=ugcbaiducard",
+            "source_id": "web-68fa50fa308724d0a480",
+            "title": null,
+            "excerpt_chars": 59,
+            "contains_fund_name": false,
+            "contains_company_name": false
+          }
+        ],
+        "raw_content_url_count": 6,
+        "result_keys": [
+          "checksum",
+          "excerpts",
+          "normalized_text_checksum",
+          "omitted",
+          "retrieved_at",
+          "source_id",
+          "title",
+          "url"
+        ]
+      },
+      {
+        "call_id": "call_356a58769ecf4f528026dbf8",
+        "matches_actual_manifest": true,
+        "source_metadata": [
+          {
+            "url": "https://pdf.dfcfw.com/pdf/H2_AN202608281828578998_1.pdf",
+            "source_id": "web-fa007ddd2d65a63d01e9",
+            "title": null,
+            "excerpt_chars": 5902,
+            "contains_fund_name": true,
+            "contains_company_name": false
+          }
+        ],
+        "raw_content_url_count": 6,
+        "result_keys": [
+          "checksum",
+          "excerpts",
+          "normalized_text_checksum",
+          "omitted",
+          "retrieved_at",
+          "source_id",
+          "title",
+          "url"
+        ]
+      }
+    ],
+    "web_stats": [
+      {
+        "tool_name": "web_search",
+        "tool_call_id": "call_29c4c57a16384d13b8c99709",
+        "full_result_hash": "fb7c684a690ce17690820799490d54c7de0f3e9df822ab38ec33b0a4a5608b4f",
+        "full_chars": 451,
+        "full_tokens": 225,
+        "projected_chars": 451,
+        "projected_tokens": 225,
+        "omitted": false,
+        "consumed": true,
+        "omission_reason": "none",
+        "allocated_tokens": 225,
+        "minimum_reference_tokens": 225,
+        "budget_exceeded": false,
+        "shared_budget_tokens": 12000,
+        "shared_projected_tokens": 5298,
+        "shared_budget_exceeded": false,
+        "unavoidable_metadata_tokens": 0
+      },
+      {
+        "tool_name": "web_search",
+        "tool_call_id": "call_c34a39295d3c4129bc9bbf7b",
+        "full_result_hash": "aecc8dc43a5fd3cbd8975009febf653557e2b0514a8ede0cb73d8002db1c4910",
+        "full_chars": 3698,
+        "full_tokens": 1849,
+        "projected_chars": 1122,
+        "projected_tokens": 561,
+        "omitted": true,
+        "consumed": true,
+        "omission_reason": "consumed_citation_digest",
+        "allocated_tokens": 561,
+        "minimum_reference_tokens": 561,
+        "budget_exceeded": false,
+        "shared_budget_tokens": 12000,
+        "shared_projected_tokens": 5298,
+        "shared_budget_exceeded": false,
+        "unavoidable_metadata_tokens": 0
+      },
+      {
+        "tool_name": "web_fetch",
+        "tool_call_id": "call_5a2e913af466459d9c7cfacd",
+        "full_result_hash": "c13a50b6c2d46e173258ce35c56be925a30983590c16bb11a271414978c063a6",
+        "full_chars": 35574,
+        "full_tokens": 17787,
+        "projected_chars": 1025,
+        "projected_tokens": 512,
+        "omitted": true,
+        "consumed": true,
+        "omission_reason": "consumed_citation_digest",
+        "allocated_tokens": 512,
+        "minimum_reference_tokens": 255,
+        "budget_exceeded": false,
+        "shared_budget_tokens": 12000,
+        "shared_projected_tokens": 5298,
+        "shared_budget_exceeded": false,
+        "unavoidable_metadata_tokens": 0
+      },
+      {
+        "tool_name": "web_fetch",
+        "tool_call_id": "call_356a58769ecf4f528026dbf8",
+        "full_result_hash": "8e9fdb90c9de8bac58ba50372661ca4a2741a0bf972a3cbe5f1151ba2a9471db",
+        "full_chars": 73487,
+        "full_tokens": 38852,
+        "projected_chars": 7030,
+        "projected_tokens": 4000,
+        "omitted": true,
+        "consumed": false,
+        "omission_reason": "balanced_model_projection",
+        "allocated_tokens": 4000,
+        "minimum_reference_tokens": 251,
+        "budget_exceeded": false,
+        "shared_budget_tokens": 12000,
+        "shared_projected_tokens": 5298,
+        "shared_budget_exceeded": false,
+        "unavoidable_metadata_tokens": 0
+      }
+    ]
+  },
+  {
+    "turn_id": "01a0cc10-1970-7e1b-bc80-f437d827dba8",
+    "views": [
+      {
+        "call_id": "call_29c4c57a16384d13b8c99709",
+        "matches_actual_manifest": true,
+        "source_metadata": [
+          {
+            "url": null,
+            "source_id": null,
+            "title": null,
+            "excerpt_chars": 0,
+            "contains_fund_name": false,
+            "contains_company_name": false
+          }
+        ],
+        "raw_content_url_count": 0,
+        "result_keys": []
+      },
+      {
+        "call_id": "call_c34a39295d3c4129bc9bbf7b",
+        "matches_actual_manifest": true,
+        "source_metadata": [
+          {
+            "url": "https://xueqiu.com/9173021627/406495578?_ugc_source=ugcbaiducard",
+            "source_id": "web-68fa50fa308724d0a480",
+            "title": null,
+            "excerpt_chars": 0,
+            "contains_fund_name": false,
+            "contains_company_name": false
+          },
+          {
+            "url": "https://www.zhipin.com/job_detail/263efced3f6344ba1Xx_0ty5ElpS.html",
+            "source_id": "web-9cb6471f0c7c57f029c8",
+            "title": null,
+            "excerpt_chars": 0,
+            "contains_fund_name": false,
+            "contains_company_name": false
+          },
+          {
+            "url": "https://www.zhipin.com/job_detail/b03a3f0fc87d149103N43dS_E1VZ.html",
+            "source_id": "web-b5939030e4d07e9f46a8",
+            "title": null,
+            "excerpt_chars": 0,
+            "contains_fund_name": false,
+            "contains_company_name": false
+          },
+          {
+            "url": "https://pdf.dfcfw.com/pdf/H2_AN202608281828578998_1.pdf",
+            "source_id": "web-fa007ddd2d65a63d01e9",
+            "title": null,
+            "excerpt_chars": 0,
+            "contains_fund_name": false,
+            "contains_company_name": false
+          },
+          {
+            "url": "https://www.zhipin.com/job_detail/943b7e1923faaf801HB439m_GFRQ.html",
+            "source_id": "web-8d1c33f382810d78b2e9",
+            "title": null,
+            "excerpt_chars": 0,
+            "contains_fund_name": false,
+            "contains_company_name": false
+          }
+        ],
+        "raw_content_url_count": 5,
+        "result_keys": [
+          "count",
+          "omitted",
+          "results"
+        ]
+      },
+      {
+        "call_id": "call_5a2e913af466459d9c7cfacd",
+        "matches_actual_manifest": true,
+        "source_metadata": [
+          {
+            "url": "https://xueqiu.com/9173021627/406495578?_ugc_source=ugcbaiducard",
+            "source_id": "web-68fa50fa308724d0a480",
+            "title": null,
+            "excerpt_chars": 59,
+            "contains_fund_name": false,
+            "contains_company_name": false
+          }
+        ],
+        "raw_content_url_count": 6,
+        "result_keys": [
+          "checksum",
+          "excerpts",
+          "normalized_text_checksum",
+          "omitted",
+          "retrieved_at",
+          "source_id",
+          "title",
+          "url"
+        ]
+      },
+      {
+        "call_id": "call_356a58769ecf4f528026dbf8",
+        "matches_actual_manifest": true,
+        "source_metadata": [
+          {
+            "url": "https://pdf.dfcfw.com/pdf/H2_AN202608281828578998_1.pdf",
+            "source_id": "web-fa007ddd2d65a63d01e9",
+            "title": null,
+            "excerpt_chars": 94,
+            "contains_fund_name": true,
+            "contains_company_name": false
+          }
+        ],
+        "raw_content_url_count": 6,
+        "result_keys": [
+          "checksum",
+          "excerpts",
+          "normalized_text_checksum",
+          "omitted",
+          "retrieved_at",
+          "source_id",
+          "title",
+          "url"
+        ]
+      },
+      {
+        "call_id": "call_6aa684d77b2f4443b9327262",
+        "matches_actual_manifest": true,
+        "source_metadata": [
+          {
+            "url": "https://www.sina.cn/news/detail/5341295540961285.html",
+            "source_id": "web-6b0f0d1ed9ea143d5445",
+            "title": null,
+            "excerpt_chars": 0,
+            "contains_fund_name": false,
+            "contains_company_name": false
+          },
+          {
+            "url": "http://mt.sohu.com/a/1073243860_250147",
+            "source_id": "web-3b2643b7c806016487cc",
+            "title": null,
+            "excerpt_chars": 0,
+            "contains_fund_name": false,
+            "contains_company_name": false
+          },
+          {
+            "url": "https://www.xueqiu.com/3667526041/408983576",
+            "source_id": "web-069c7f161db69f241c4a",
+            "title": null,
+            "excerpt_chars": 0,
+            "contains_fund_name": false,
+            "contains_company_name": false
+          }
+        ],
+        "raw_content_url_count": 3,
+        "result_keys": [
+          "count",
+          "omitted",
+          "results"
+        ]
+      },
+      {
+        "call_id": "call_09a2b712971042a99c6e2c66",
+        "matches_actual_manifest": true,
+        "source_metadata": [
+          {
+            "url": "https://www.sina.cn/news/detail/5341295540961285.html",
+            "source_id": "web-6b0f0d1ed9ea143d5445",
+            "title": "【#科大讯飞半年营收增6.52%，优选G端落地，高额研发投入推高扣非亏损引发市场争议#】8月20日晚，科大讯飞发布2026年半年报，营收稳增、利润承压的分化表现，让公司的战略转型与发展前景成为市场焦点。财报显示，公司上半年实现营业收入116.23亿元，同比增长6.52%，经营体量稳步提升，不过扣非净利润亏 ​_新浪新闻",
+            "excerpt_chars": 612,
+            "contains_fund_name": false,
+            "contains_company_name": true
+          }
+        ],
+        "raw_content_url_count": 8,
+        "result_keys": [
+          "byte_size",
+          "checksum",
+          "elapsed_ms",
+          "excerpts",
+          "final_url",
+          "mime_type",
+          "normalized_text_checksum",
+          "objective",
+          "provider_request_id",
+          "raw_truncated",
+          "redirects",
+          "retrieved_at",
+          "source_id",
+          "status_code",
+          "text",
+          "text_length",
+          "text_truncated",
+          "title",
+          "truncated",
+          "untrusted_external_content",
+          "url"
+        ]
+      }
+    ],
+    "web_stats": [
+      {
+        "tool_name": "web_search",
+        "tool_call_id": "call_29c4c57a16384d13b8c99709",
+        "full_result_hash": "fb7c684a690ce17690820799490d54c7de0f3e9df822ab38ec33b0a4a5608b4f",
+        "full_chars": 451,
+        "full_tokens": 225,
+        "projected_chars": 451,
+        "projected_tokens": 225,
+        "omitted": false,
+        "consumed": true,
+        "omission_reason": "none",
+        "allocated_tokens": 225,
+        "minimum_reference_tokens": 225,
+        "budget_exceeded": false,
+        "shared_budget_tokens": 12000,
+        "shared_projected_tokens": 3603,
+        "shared_budget_exceeded": false,
+        "unavoidable_metadata_tokens": 0
+      },
+      {
+        "tool_name": "web_search",
+        "tool_call_id": "call_c34a39295d3c4129bc9bbf7b",
+        "full_result_hash": "aecc8dc43a5fd3cbd8975009febf653557e2b0514a8ede0cb73d8002db1c4910",
+        "full_chars": 3698,
+        "full_tokens": 1849,
+        "projected_chars": 1122,
+        "projected_tokens": 561,
+        "omitted": true,
+        "consumed": true,
+        "omission_reason": "consumed_citation_digest",
+        "allocated_tokens": 561,
+        "minimum_reference_tokens": 561,
+        "budget_exceeded": false,
+        "shared_budget_tokens": 12000,
+        "shared_projected_tokens": 3603,
+        "shared_budget_exceeded": false,
+        "unavoidable_metadata_tokens": 0
+      },
+      {
+        "tool_name": "web_fetch",
+        "tool_call_id": "call_5a2e913af466459d9c7cfacd",
+        "full_result_hash": "c13a50b6c2d46e173258ce35c56be925a30983590c16bb11a271414978c063a6",
+        "full_chars": 35574,
+        "full_tokens": 17787,
+        "projected_chars": 1025,
+        "projected_tokens": 512,
+        "omitted": true,
+        "consumed": true,
+        "omission_reason": "consumed_citation_digest",
+        "allocated_tokens": 512,
+        "minimum_reference_tokens": 255,
+        "budget_exceeded": false,
+        "shared_budget_tokens": 12000,
+        "shared_projected_tokens": 3603,
+        "shared_budget_exceeded": false,
+        "unavoidable_metadata_tokens": 0
+      },
+      {
+        "tool_name": "web_fetch",
+        "tool_call_id": "call_356a58769ecf4f528026dbf8",
+        "full_result_hash": "8e9fdb90c9de8bac58ba50372661ca4a2741a0bf972a3cbe5f1151ba2a9471db",
+        "full_chars": 73487,
+        "full_tokens": 38852,
+        "projected_chars": 1025,
+        "projected_tokens": 512,
+        "omitted": true,
+        "consumed": true,
+        "omission_reason": "consumed_citation_digest",
+        "allocated_tokens": 512,
+        "minimum_reference_tokens": 251,
+        "budget_exceeded": false,
+        "shared_budget_tokens": 12000,
+        "shared_projected_tokens": 3603,
+        "shared_budget_exceeded": false,
+        "unavoidable_metadata_tokens": 0
+      },
+      {
+        "tool_name": "web_search",
+        "tool_call_id": "call_6aa684d77b2f4443b9327262",
+        "full_result_hash": "e35fc1030a8b483011086f0d8e48b5d633f63b58c607a4e149605ad2d82d7986",
+        "full_chars": 2785,
+        "full_tokens": 1392,
+        "projected_chars": 692,
+        "projected_tokens": 346,
+        "omitted": true,
+        "consumed": true,
+        "omission_reason": "consumed_citation_digest",
+        "allocated_tokens": 512,
+        "minimum_reference_tokens": 346,
+        "budget_exceeded": false,
+        "shared_budget_tokens": 12000,
+        "shared_projected_tokens": 3603,
+        "shared_budget_exceeded": false,
+        "unavoidable_metadata_tokens": 0
+      },
+      {
+        "tool_name": "web_fetch",
+        "tool_call_id": "call_09a2b712971042a99c6e2c66",
+        "full_result_hash": "0ec1c31490446ecc2f3a416350a9170be75b7e6cba1d93175872f2764d502051",
+        "full_chars": 2895,
+        "full_tokens": 1447,
+        "projected_chars": 2895,
+        "projected_tokens": 1447,
+        "omitted": false,
+        "consumed": false,
+        "omission_reason": "none",
+        "allocated_tokens": 1447,
+        "minimum_reference_tokens": 250,
+        "budget_exceeded": false,
+        "shared_budget_tokens": 12000,
+        "shared_projected_tokens": 3603,
+        "shared_budget_exceeded": false,
+        "unavoidable_metadata_tokens": 0
+      }
+    ]
+  },
+  {
+    "turn_id": "01a0cc10-675f-745c-82c6-777dc5ba4e90",
+    "views": [
+      {
+        "call_id": "call_1ddbe8783f8c449a8d991851",
+        "matches_actual_manifest": true,
+        "source_metadata": [
+          {
+            "url": null,
+            "source_id": null,
+            "title": null,
+            "excerpt_chars": 0,
+            "contains_fund_name": false,
+            "contains_company_name": false
+          }
+        ],
+        "raw_content_url_count": 0,
+        "result_keys": [
+          "agent_invocation_id",
+          "target_agent_id",
+          "content"
+        ]
+      }
+    ],
+    "web_stats": []
+  }
+]

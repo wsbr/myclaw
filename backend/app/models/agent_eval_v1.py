@@ -82,6 +82,7 @@ class AgentEvalCase(Base):
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     input_text: Mapped[str] = mapped_column(Text, nullable=False)
     assertions: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+    case_metadata: Mapped[dict | None] = mapped_column(JSON)
     weight: Mapped[Decimal] = mapped_column(
         Numeric(12, 4), default=Decimal("1"), nullable=False
     )

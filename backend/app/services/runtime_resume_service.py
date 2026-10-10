@@ -9,11 +9,12 @@ from sqlalchemy import select
 from app.core.tool_registry.base import ToolResult
 from app.models.common import uuid7
 from app.models.runtime_v1 import (
-    AgentInvocation, Approval, Clarification, DurableRunner, RunnerCheckpoint,
+    AgentInvocation, Approval, CapabilitySnapshot, Clarification, DurableRunner, RunnerCheckpoint,
     ToolInvocation, WorkItem, Run,
 )
 from app.persistence.reliable_writes import ExecutionEventWriter, OutboxWriter
 from app.persistence.runtime_graph import persist_replacement_runner
+from app.runtime.tool_presentation import project_search_result, resolve_tool_presentation
 
 
 NON_TERMINAL_TOOL = {
@@ -54,6 +55,13 @@ async def tool_continuation(
         ToolInvocation.work_item_id == work_item_id,
         ToolInvocation.source_turn_id == source_turn_id,
     ).order_by(ToolInvocation.created_at, ToolInvocation.id)))
+    # Runtime coordination may finish admitting an operation while its domain
+    # action still waits for a human/Agent result. Its acknowledgement is an
+    # audit fact, not the provider's final Tool response. Those responses are
+    # reconstructed by clarification_continuation / AgentInvocation settlement.
+    invocations = [item for item in invocations if not (
+        item.authorization_snapshot or {}
+    ).get("runtime_durable_wait")]
     if not invocations:
         return []
     assistant = {
@@ -77,6 +85,23 @@ async def tool_continuation(
                     "outcome_unknown" if invocation.status == "outcome_unknown" else "provider"
                 ),
             ).model_dump(mode="json")
+        elif invocation.tool_key == "search_tools" and result.get("status") == "succeeded":
+            # Keep discovery's internal frozen definitions out of provider
+            # continuation, just as the synchronous Agent loop does.
+            capability_id = getattr(invocation, "capability_snapshot_id", None)
+            capability = await db.get(CapabilitySnapshot, capability_id) if capability_id else None
+            if capability is not None:
+                principal = capability.execution_principal or {}
+                presentation = await resolve_tool_presentation(
+                    db, capability_snapshot=capability,
+                    authentication_source=principal.get("authentication_source") or "web_session",
+                )
+                result = project_search_result(ToolResult.model_validate(result), presentation).model_dump(mode="json")
+            else:
+                result = {**result, "data": {
+                    "tools": (result.get("data") or {}).get("tools", []),
+                    "loaded_tool_definitions": [],
+                }}
         messages.append(_tool_message(invocation.provider_tool_call_id, result))
     return messages
 

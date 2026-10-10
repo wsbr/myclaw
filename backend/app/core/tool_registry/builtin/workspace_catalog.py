@@ -53,7 +53,7 @@ class ListFilesTool(BaseTool):
     name = "list_files"
     description = (
         "WHEN: inspect a Workspace directory before reading or editing. "
-        "WHEN NOT: do not use for file contents; use read_file or search_files. "
+        "WHEN NOT: do not use for file contents; reading or searching contents requires its own available capability. "
         "RETURNS: a stable page of file/directory metadata plus next_cursor. "
         "RECOVERY: continue with next_cursor when truncated."
     )
@@ -260,7 +260,7 @@ class ApplyPatchTool(BaseTool):
     name = "apply_patch"
     description = (
         "WHEN: apply an exact unified diff to one or more existing Workspace files. "
-        "WHEN NOT: use write_file for whole-file create/replace. "
+        "WHEN NOT: whole-file creation or replacement requires its own available capability. "
         "RETURNS: checksums before/after for every file. "
         "RECOVERY: refresh files and regenerate the diff after a context or checksum conflict."
     )

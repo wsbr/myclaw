@@ -1,0 +1,68 @@
+{
+  "scope": "read-only diagnostics of the two named UAT sessions; no production modifications or live model calls",
+  "release": "uat-delegation-failure-20260923-f98acb9a83b4a7b2",
+  "time_zone": "UTC+08:00",
+  "sessions": [
+    {
+      "session_id": "01a0cbf8-91d5-7320-8bfb-e6f12dcbe760",
+      "run_id": "01a0cbf8-9234-7411-b5e6-5876bd030719",
+      "start": "2026-09-23 09:54:20",
+      "end": "2026-09-23 09:56:19",
+      "duration_seconds": 119,
+      "status": "completed",
+      "delegation_status": "succeeded",
+      "collaboration_path": "bound_agent",
+      "agent_versions": [
+        8,
+        4
+      ],
+      "group_enabled": [
+        false,
+        false
+      ],
+      "logical_model_turns": 6,
+      "provider_attempts": 7,
+      "succeeded_provider_attempts": 6,
+      "successful_attempts_with_request_id": 6,
+      "reported_input_tokens": 21195,
+      "reported_output_tokens": 2955,
+      "web_search_executed": 2,
+      "web_search_failed_schema": 1,
+      "web_fetch_succeeded": 3
+    },
+    {
+      "session_id": "01a0cc0e-9f55-721b-9040-490dbba30065",
+      "run_id": "01a0cc0e-9f9c-74a7-b438-0f445eb5f46f",
+      "start": "2026-09-23 10:18:26",
+      "end": "2026-09-23 10:20:33",
+      "duration_seconds": 127,
+      "status": "completed",
+      "delegation_status": "succeeded",
+      "collaboration_path": "bound_agent",
+      "agent_versions": [
+        9,
+        5
+      ],
+      "group_enabled": [
+        true,
+        true
+      ],
+      "logical_model_turns": 10,
+      "provider_attempts": 10,
+      "succeeded_provider_attempts": 10,
+      "successful_attempts_with_request_id": 10,
+      "reported_input_tokens": 37951,
+      "reported_output_tokens": 2168,
+      "web_search_executed": 3,
+      "web_search_failed_schema": 1,
+      "web_search_authorization_rejected": 1,
+      "web_fetch_succeeded": 3
+    }
+  ],
+  "notes": [
+    "Counts and durations are persisted ledger observations, not inferred provider billing.",
+    "Original invalid search URLs were discarded and are unavailable.",
+    "Exact tool-message projections were reproduced from durable pending results without network calls; every archived view matches its original AgentTurn context_manifest checksum.",
+    "No external fact-checking of the financial/news claims was performed."
+  ]
+}

@@ -30,6 +30,8 @@ async def agent_eval_gate_issues(
         if version is None:
             issues.append(f"eval suite {suite.name} has no immutable current version")
             continue
+        if (version.gate_policy or {}).get("required_for_publish", True) is False:
+            continue
         passed = await db.scalar(select(AgentEvalRun.id).where(
             AgentEvalRun.agent_id == agent_id,
             AgentEvalRun.suite_version_id == version.id,

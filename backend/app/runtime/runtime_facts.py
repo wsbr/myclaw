@@ -45,5 +45,5 @@ def runtime_clock_system_rules(clock: dict[str, Any]) -> str:
         f"timezone is {clock['timezone']} (UTC offset {clock['utc_offset']}). "
         "Resolve relative dates such as today, yesterday, this week, recently, "
         "and their Chinese equivalents against this clock, and use explicit dates "
-        "when forming web searches or reporting time-sensitive facts."
+        "when resolving time-sensitive requests or reporting facts."
     )

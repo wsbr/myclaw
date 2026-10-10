@@ -2,6 +2,7 @@ import { lazy, Suspense, useState, useEffect } from 'react'
 import { useNavigate, useLocation, Routes, Route, Navigate } from 'react-router-dom'
 import {
   Activity,
+  FlaskConical,
   Bot,
   Brain,
   BookOpen,
@@ -43,6 +44,7 @@ const KnowledgePage = lazy(() => import('@/pages/Knowledge'))
 const AccountPage = lazy(() => import('@/pages/Account'))
 const AgentNetworkPage = lazy(() => import('@/pages/AgentNetwork'))
 const SchedulesPage = lazy(() => import('@/pages/Schedules'))
+const EvalsPage = lazy(() => import('@/pages/Evals'))
 
 const SIDEBAR_KEY = 'myclaw_sidebar_collapsed'
 
@@ -51,6 +53,7 @@ type NavItem = { key: string; label: string; icon: typeof Bot; roles?: string[] 
 const navSections: Array<{ label: string; items: NavItem[] }> = [
   { label: '智能体工作区', items: [
     { key: '/agents', label: '智能体', icon: Bot },
+    { key: '/evals', label: '评测', icon: FlaskConical, roles: ['builder', 'admin'] },
     { key: '/network', label: '协作网络', icon: Network },
     { key: '/knowledge', label: '知识库', icon: BookOpen },
     { key: '/schedules', label: '定时任务', icon: CalendarClock },
@@ -76,6 +79,7 @@ const navItems = navSections.flatMap(section => section.items)
 const breadcrumbMap: Record<string, string> = {
   '/agents': '智能体',
   '/network': '协作网络',
+  '/evals': '评测',
   '/memories': '记忆',
   '/knowledge': '知识库',
   '/schedules': '定时任务',
@@ -247,6 +251,7 @@ export default function WorkspaceLayout() {
             <Routes>
               <Route path="/" element={<AgentListPage />} />
               <Route path="/agents" element={<AgentListPage />} />
+              <Route path="/evals" element={<EvalsPage />} />
               <Route path="/network" element={<AgentNetworkPage />} />
               <Route path="/agents/new/config" element={<AgentConfigPage />} />
               <Route path="/agents/:id/config" element={<AgentConfigPage />} />

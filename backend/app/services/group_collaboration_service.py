@@ -62,9 +62,55 @@ def _group_card_is_eligible(card: AgentCard) -> bool:
     )
 
 
+async def resolve_group_emergence_anchor(
+    db, *, tenant_id: str, account_id: str | None,
+    agent_id: str, agent_version_id: str,
+) -> ResolvedGroupMember:
+    """Require the Chat's frozen Agent to remain eligible to join its Group."""
+
+    version = await db.get(AgentAssemblyVersion, agent_version_id)
+    if (
+        version is None or version.agent_id != agent_id
+        or version.publication_status != "published"
+        or version.immutable_at is None
+    ):
+        raise GroupPolicyError(
+            "group_initiator_unavailable", "The Chat Agent version is unavailable for Group"
+        )
+    if not version.group_enabled:
+        raise GroupPolicyError(
+            "group_initiator_not_network_enabled",
+            "The Chat Agent must enable Group collaboration before selecting members",
+        )
+    try:
+        agent, card = await resolve_callable_agent(
+            db, tenant_id=tenant_id, account_id=account_id,
+            actor_agent_id="__group_emergence__", target_agent_id=agent_id,
+        )
+    except (LookupError, PermissionError) as error:
+        raise GroupPolicyError("group_initiator_unavailable", str(error)) from error
+    if card.agent_version_id != version.id:
+        raise GroupPolicyError(
+            "group_initiator_snapshot_changed",
+            "The Chat Agent publication changed; start a new Chat before forming a Group",
+        )
+    collaboration = dict(card.collaboration_summary or {})
+    governance = collaboration.get("governance") or {}
+    if (
+        not card.group_enabled or not _group_card_is_eligible(card)
+        or collaboration.get("discoverable") is False
+        or (isinstance(governance, dict) and governance.get("discoverable") is False)
+    ):
+        raise GroupPolicyError(
+            "group_initiator_not_network_enabled",
+            "The Chat Agent is not currently eligible for Group collaboration",
+        )
+    return ResolvedGroupMember(agent.id, version, card)
+
+
 async def build_group_emergence_candidate_snapshot(
     db, *, tenant_id: str, account_id: str | None,
-    current_agent_id: str | None = None,
+    current_agent_id: str, current_agent_version_id: str,
 ) -> dict:
     """Freeze the complete model-facing semantic candidate catalog for Chat.
 
@@ -73,14 +119,29 @@ async def build_group_emergence_candidate_snapshot(
     than truncated, because a partial catalog would bias the model's choice.
     """
 
+    try:
+        anchor = await resolve_group_emergence_anchor(
+            db, tenant_id=tenant_id, account_id=account_id,
+            agent_id=current_agent_id, agent_version_id=current_agent_version_id,
+        )
+    except GroupPolicyError as error:
+        return {
+            "status": "unavailable", "reason": error.code,
+            "candidate_count": 0, "current_chat_agent_id": current_agent_id,
+            "candidates": [], "candidate_versions": {},
+        }
+
     cards = await discover_agent_cards(
         db,
         tenant_id=tenant_id,
         account_id=account_id,
+        actor_agent_id=current_agent_id,
+        actor_agent_version_id=current_agent_version_id,
         group_enabled=True,
         limit=500,
         exhaustive=True,
     )
+    cards = [anchor.card, *cards]
     eligible = [card for card in cards if _group_card_is_eligible(card)]
     # Directory discovery has a hard defensive ceiling of 500. Reaching it
     # means completeness cannot be proven, so do not let the model choose from
@@ -612,6 +673,14 @@ async def emerge_group_after_chat(
         or source_run.status != "completed"
     ):
         return None
+    source_work = await db.get(WorkItem, source_runner.work_item_id)
+    if (
+        source_work is None or source_work.id != source_run.root_work_item_id
+        or source_work.run_id != source_run.id or source_work.parent_work_item_id is not None
+        or source_work.owner_agent_id != source_runner.agent_id
+        or source_work.agent_version_id != source_runner.agent_version_id
+    ):
+        return None
     session = await db.scalar(select(UserSession).where(
         UserSession.id == source_run.session_id,
     ).with_for_update())
@@ -651,21 +720,34 @@ async def emerge_group_after_chat(
     frozen_candidate_versions = dict(
         frozen_emergence.get("candidate_versions") or {}
     )
-    # The Chat Agent is the user's conversation anchor, not a specialist the
-    # model may accidentally omit. New selections already persist it; this
-    # normalization also makes queued selections from the previous contract
-    # safe after deployment.
-    if (
-        source_runner.agent_id in frozen_candidate_versions
-        and source_runner.agent_id not in selected_ids
-    ):
-        selected_ids = [source_runner.agent_id, *selected_ids]
     skip_reason = None
     if selection is None:
         skip_reason = "model_selected_no_group"
-    elif len(selected_ids) < 2 or len(selected_ids) != len(set(selected_ids)):
+    else:
+        try:
+            anchor = await resolve_group_emergence_anchor(
+                db, tenant_id=session.tenant_id, account_id=session.account_id,
+                agent_id=source_runner.agent_id,
+                agent_version_id=source_runner.agent_version_id,
+            )
+        except GroupPolicyError as error:
+            skip_reason = error.code
+        else:
+            frozen_anchor = dict(frozen_candidate_versions.get(source_runner.agent_id) or {})
+            if (
+                frozen_emergence.get("current_chat_agent_id") != source_runner.agent_id
+                or frozen_anchor.get("agent_version_id") != source_runner.agent_version_id
+                or frozen_anchor.get("card_content_hash") != anchor.card.content_hash
+            ):
+                skip_reason = "group_initiator_snapshot_changed"
+            elif source_runner.agent_id not in selected_ids:
+                # Preserve the initiating Agent even for an older queued selection.
+                selected_ids = [source_runner.agent_id, *selected_ids]
+    if skip_reason is None and (
+        len(selected_ids) < 2 or len(selected_ids) != len(set(selected_ids))
+    ):
         skip_reason = "invalid_model_group_selection"
-    elif len(selected_ids) > settings.emergent_group_max_members:
+    elif skip_reason is None and len(selected_ids) > settings.emergent_group_max_members:
         skip_reason = "group_member_limit_exceeded"
     if skip_reason is not None:
         await ExecutionEventWriter(db).append(
@@ -764,11 +846,7 @@ async def emerge_group_after_chat(
             caused_by_event_id=selection.id,
         )
         return None
-    reporter_id = (
-        source_runner.agent_id
-        if source_runner.agent_id in {item.agent_id for item in resolved}
-        else resolved[0].agent_id
-    )
+    reporter_id = source_runner.agent_id
     group = await db.scalar(select(GroupSession).where(
         GroupSession.session_id == session.id,
         GroupSession.status == "open",
@@ -784,10 +862,6 @@ async def emerge_group_after_chat(
     user_messages = [item for item in source_messages if item.sender_type == "user"]
     assistant_messages = [item for item in source_messages if item.sender_type == "agent"]
     source_user = user_messages[-1] if user_messages else None
-    source_work = (
-        await db.get(WorkItem, source_run.root_work_item_id)
-        if source_run.root_work_item_id else None
-    )
     source_assistant = (
         await db.get(Message, source_runner.result_message_id)
         if source_runner.result_message_id else None

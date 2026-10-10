@@ -63,7 +63,7 @@ def default_run_budget(mode: str) -> dict[str, int]:
         "max_provider_attempts": 96,
         "max_tool_invocations": 64,
         "max_agent_invocations": 24,
-        "max_agent_depth": 1,
+        "max_agent_depth": 8,
         "max_agent_fan_out_per_work_item": 8,
         "max_transport_retries": 8,
         # A real-model Plan implementation can legitimately span roughly 20

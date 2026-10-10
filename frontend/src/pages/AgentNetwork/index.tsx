@@ -30,7 +30,7 @@ export default function AgentNetworkPage() {
   const resolve = useMutation({
     mutationFn: () => agentsApi.resolveNetworkAgent(directId.trim()),
     onSuccess: card => {
-      if (!card.group_enabled) return message.error('该智能体未启用群组协作')
+      if (!card.group_enabled) return message.error('该智能体未开启协作网络参与资格')
       setDirectCard(card)
       message.success('已通过智能体 ID 解析当前发布版本')
     },
@@ -41,13 +41,13 @@ export default function AgentNetworkPage() {
       <div>
         <Title level={2} className="!mb-1"><Space><Network className="size-6" />协作网络</Space></Title>
         <Paragraph type="secondary">
-          这里只展示当前已发布、可见、可用且通过治理过滤的群组智能体。它是只读候选目录；正常对话中，模型会根据用户诉求读取智能体的名称与描述，选择必要成员，再在对话完成后涌现为协作群组。
+          这里展示已发布、开启协作网络且对你可见、可用的智能体。双方开启网络后，可在你的已有权限内无需互相绑定进行发现与委派。直接向其中一个智能体发起普通对话，它会按任务需要寻找成员，并可自动建立包含自己的群组继续协作。
         </Paragraph>
       </div>
 
       <Alert type="info" showIcon
-        message="群组成员由模型按语义选出"
-        description="每次正常对话完成后，系统从当时已发布、可见、可调用且开启群组模式的智能体中选择必要成员；每次群组运行都会冻结自己的成员与版本快照。" />
+        message="按需协作，每轮成员固定"
+        description="发现、委派与组队工具仍须由各智能体显式绑定。需要群组时，模型选择包含当前智能体的必要成员，在普通对话完成后自动建群；本轮成员与版本固定，后续新一轮可重新选择。显式绑定的逐跳委派不要求开启网络，也不在此目录中单独展示。" />
 
       <Card>
         <div className="grid gap-3 md:grid-cols-2">
@@ -65,7 +65,7 @@ export default function AgentNetworkPage() {
         </div>
       </Card>
 
-      {cards.length === 0 && !isLoading ? <Empty description="没有满足当前发布与治理条件的群组智能体" /> : (
+      {cards.length === 0 && !isLoading ? <Empty description="没有满足当前发布与授权条件的网络智能体" /> : (
         <div className="grid gap-3 lg:grid-cols-3">
           {cards.map(card => {
             const capabilities = (card.capabilities_summary.tool_keys || card.capabilities_summary.capabilities || []) as string[]

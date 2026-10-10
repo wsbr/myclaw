@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQueries, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Alert, Button, Card, Form, Input, InputNumber, Modal, Radio, Select, Space, Spin, Switch, Table, Tabs, Tag, Typography, message } from 'antd'
-import { ArrowLeftOutlined, CloudUploadOutlined, ExperimentOutlined, KeyOutlined, PauseCircleOutlined, PlayCircleOutlined, PlusOutlined, SaveOutlined, UserAddOutlined } from '@ant-design/icons'
-import { agentsApi, AgentApiKey, AgentDraft, AgentEvalRun, AgentEvalSuite, AgentOption, AgentPublishedVersion } from '@/api/agents'
+import { Alert, Button, Card, Form, Input, Modal, Radio, Select, Space, Spin, Switch, Table, Tabs, Tag, Typography, message } from 'antd'
+import { ArrowLeftOutlined, CloudUploadOutlined, ExperimentOutlined, KeyOutlined, PauseCircleOutlined, PlayCircleOutlined, SaveOutlined, UserAddOutlined } from '@ant-design/icons'
+import { agentsApi, AgentApiKey, AgentDraft, AgentOption, AgentPublishedVersion } from '@/api/agents'
 import PromptEditor from '@/components/PromptEditor'
 import { displayLabel } from '@/lib/presentation'
+import { toolBindingOptions } from '@/lib/toolCatalog'
 import { contextPolicyOptions, contextSelectionChanged, contextSelectionUnavailable, matchContextPreset, resolveContextPresets } from './contextPresets'
 
 const policyTypes = ['context', 'history', 'memory_write', 'memory_recall'] as const
@@ -20,9 +21,6 @@ export default function AgentConfigPage() {
   const [testOpen, setTestOpen] = useState(false)
   const [testContent, setTestContent] = useState('')
   const [keyOpen, setKeyOpen] = useState(false)
-  const [evalOpen, setEvalOpen] = useState(false)
-  const [editingSuite, setEditingSuite] = useState<AgentEvalSuite | null>(null)
-  const [evalForm] = Form.useForm()
   const [memberIds, setMemberIds] = useState<string[]>([])
 
   const { data: detail, isLoading } = useQuery({
@@ -40,6 +38,9 @@ export default function AgentConfigPage() {
   const options = (items: AgentOption[]) => items.map(item => ({ label: item.key ? `${item.name} · ${item.key}` : item.name, value: item.id }))
   const contextPolicyId = Form.useWatch('context_policy_id', { form, preserve: true })
   const historyPolicyId = Form.useWatch('history_policy_id', { form, preserve: true })
+  const selectedToolIds = Form.useWatch('tool_ids', { form, preserve: true }) as string[] | undefined
+  const toolOptions = toolBindingOptions(tools,
+    optionQueries[2].isPending || optionQueries[2].isError ? [] : selectedToolIds ?? detail?.draft.tool_ids ?? [])
   const contextPolicyQueries = optionQueries.slice(5, 7)
   const contextOptionsLoading = contextPolicyQueries.some(query => query.isPending)
   const contextOptionsFailed = contextPolicyQueries.some(query => query.isError)
@@ -117,15 +118,6 @@ export default function AgentConfigPage() {
   const versions = useQuery({
     queryKey: ['agent-versions', id], queryFn: () => agentsApi.listVersions(id!), enabled: !isNew,
   })
-  const evalSuites = useQuery({
-    queryKey: ['agent-eval-suites', id], queryFn: () => agentsApi.listEvalSuites(id!),
-    enabled: !isNew,
-  })
-  const evalRuns = useQuery({
-    queryKey: ['agent-eval-runs', id], queryFn: () => agentsApi.listEvalRuns(id!),
-    enabled: !isNew,
-    refetchInterval: query => query.state.data?.some(run => ['queued', 'running'].includes(run.status)) ? 3000 : false,
-  })
   const agentMembers = useQuery({
     queryKey: ['agent-members', id], queryFn: () => agentsApi.getMembers(id!),
     enabled: !isNew && detail?.agent.visibility === 'private',
@@ -155,71 +147,6 @@ export default function AgentConfigPage() {
         message.error(error?.response?.data?.error?.message || '成员白名单保存失败')
       }
     },
-  })
-  const openEvalDefinition = (suite?: AgentEvalSuite) => {
-    const selected = suite ?? null
-    setEditingSuite(selected)
-    evalForm.setFieldsValue({
-      name: selected?.name ?? '发布质量门禁',
-      description: selected?.description ?? '',
-      min_pass_rate: Number(selected?.gate_policy?.min_pass_rate ?? 1),
-      cases_json: JSON.stringify(selected?.cases.map(item => ({
-        case_key: item.case_key, name: item.name, input_text: item.input_text,
-        assertions: item.assertions, weight: item.weight,
-      })) ?? [{
-        case_key: 'basic', name: '基础结果', input_text: '请完成一项典型任务',
-        assertions: { min_chars: 1 }, weight: 1,
-      }], null, 2),
-    })
-    setEvalOpen(true)
-  }
-  const saveEvalSuite = useMutation({
-    mutationFn: async (values: { name: string; description?: string; min_pass_rate: number; cases_json: string }) => {
-      let cases
-      try { cases = JSON.parse(values.cases_json) } catch { throw new Error('cases_json_invalid') }
-      if (!Array.isArray(cases)) throw new Error('cases_json_invalid')
-      const definition = {
-        name: values.name, description: values.description ?? '',
-        gate_policy: { min_pass_rate: String(values.min_pass_rate) }, cases,
-      }
-      return editingSuite
-        ? agentsApi.versionEvalSuite(id!, editingSuite.id, definition)
-        : agentsApi.createEvalSuite(id!, definition)
-    },
-    onSuccess: () => {
-      setEvalOpen(false); setEditingSuite(null); evalForm.resetFields()
-      message.success(editingSuite ? '已发布新的不可变评测套件版本' : '已创建发布门禁套件')
-      queryClient.invalidateQueries({ queryKey: ['agent-eval-suites', id] })
-      queryClient.invalidateQueries({ queryKey: ['agent-capability-check', id] })
-    },
-    onError: (error: any) => message.error(
-      error?.message === 'cases_json_invalid'
-        ? '用例 JSON 必须是数组'
-        : error?.response?.data?.error?.message || '评测套件保存失败',
-    ),
-  })
-  const runEval = useMutation({
-    mutationFn: (suite: AgentEvalSuite) => agentsApi.runEvalSuite(
-      id!, suite.id, detail!.draft.draft_revision,
-    ),
-    onSuccess: () => {
-      message.success('评测已启动，每个用例都创建了独立的真实运行')
-      queryClient.invalidateQueries({ queryKey: ['agent-eval-runs', id] })
-    },
-    onError: (error: any) => message.error(
-      error?.response?.data?.error?.details?.issues?.join('；')
-      || error?.response?.data?.error?.message || '评测启动失败',
-    ),
-  })
-  const evalState = useMutation({
-    mutationFn: (suite: AgentEvalSuite) => agentsApi.setEvalSuiteState(
-      id!, suite.id, suite.status === 'active' ? 'deactivate' : 'activate',
-    ),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['agent-eval-suites', id] })
-      queryClient.invalidateQueries({ queryKey: ['agent-capability-check', id] })
-    },
-    onError: () => message.error('评测门禁状态更新失败'),
   })
   const showSecret = (key: AgentApiKey) => Modal.success({
     title: '访问密钥仅显示一次',
@@ -309,7 +236,12 @@ export default function AgentConfigPage() {
             <Typography.Text type="secondary">采样参数由平台模型注册表统一治理。</Typography.Text>
           </Card> },
           { key: 'capabilities', label: '能力装配', children: <Card>
-            <Form.Item name="tool_ids" label="平台工具" extra="按智能体显式装配；例如选中“定时任务”后，用户即可在普通对话中用自然语言创建和管理任务。"><Select mode="multiple" options={options(tools)} optionFilterProp="label" /></Form.Item>
+            {optionQueries[2].isError && <Alert className="mb-4" type="error" showIcon message="工具目录加载失败，现有绑定不会自动更改"
+              action={<Button size="small" onClick={() => optionQueries[2].refetch()}>重试</Button>} />}
+            <Form.Item name="tool_ids" label="平台工具" extra="文件、检索、定时任务以及会话与协作工具统一在此显式绑定。按需选择，保存草稿并发布后生效；群组专用工具仅在群组中可用。">
+              <Select mode="multiple" options={toolOptions} optionFilterProp="label" loading={optionQueries[2].isPending}
+                disabled={optionQueries[2].isPending || optionQueries[2].isError} placeholder="选择此智能体需要的工具" />
+            </Form.Item>
             <Form.Item name="skill_ids" label="技能"><Select mode="multiple" options={options(skills)} optionFilterProp="label" /></Form.Item>
           </Card> },
           { key: 'context', label: '上下文与记忆', children: <Card>
@@ -367,9 +299,9 @@ export default function AgentConfigPage() {
             <Form.Item name="memory_recall_policy_id" label="记忆召回策略" rules={[{ required: true }]}><Select options={options(policies[3])} /></Form.Item>
           </Card> },
           { key: 'collaboration', label: '协作与访问', children: <Card>
-            <Form.Item name="bound_agent_ids" label="可调用智能体"><Select mode="multiple" options={options(boundAgents.filter(item => item.id !== id))} optionFilterProp="label" /></Form.Item>
-            <Form.Item name="group_enabled" label="允许加入群组协作" valuePropName="checked"><Switch /></Form.Item>
-            <Typography.Paragraph type="secondary">绑定只授予发现与调用范围，不提升原始用户权限。</Typography.Paragraph>
+            <Form.Item name="bound_agent_ids" label="显式绑定的可调用智能体" extra="无需开启协作网络。A 绑定 B、B 绑定 C 时可逐跳协作；不会因此允许 A 直接调用 C。"><Select mode="multiple" options={options(boundAgents.filter(item => item.id !== id))} optionFilterProp="label" /></Form.Item>
+            <Form.Item name="group_enabled" label="参与协作网络" valuePropName="checked" extra="双方开启后，可在用户已有权限内无需互相绑定进行发现、委派与群组协作。普通对话中，智能体可按需要寻找成员并自动建立包含自己的群组；本轮成员固定，下一轮可调整。"><Switch /></Form.Item>
+            <Typography.Paragraph type="secondary">两种协作方式所需的发现、调用与组队工具，都须在「能力装配」中显式绑定并发布。智能体绑定和网络开关均不会提升原始用户权限。</Typography.Paragraph>
             {isNew ? <Alert showIcon type="info" message="创建私有智能体后即可配置成员白名单" />
               : detail?.agent.visibility === 'private' ? <Card size="small" title="私有智能体成员白名单">
                 <Alert className="mb-4" showIcon type="info"
@@ -420,52 +352,10 @@ export default function AgentConfigPage() {
                 { title: '发布时间', dataIndex: 'published_at', render: (value: string | null) => value ? new Date(value).toLocaleString() : '—' },
               ]} />
           </Card> }] : []),
-          ...(!isNew ? [{ key: 'evals', label: '评测与门禁', children: <Space direction="vertical" size="large" className="w-full">
-            <Alert showIcon type="info" message="评测证据与发布候选精确绑定"
-              description="每个用例创建独立的真实草稿测试运行。只有当前套件版本通过，且草稿与冻结依赖的候选哈希完全一致，发布按钮才会放行；任何草稿或依赖变化都会使旧成绩失效。" />
-            <Card title="发布门禁套件" extra={<Button type="primary" icon={<PlusOutlined />} onClick={() => openEvalDefinition()}>新建套件</Button>}>
-              <Table rowKey="id" loading={evalSuites.isLoading} dataSource={evalSuites.data ?? []} pagination={false}
-                expandable={{ expandedRowRender: (suite: AgentEvalSuite) => <div className="space-y-2">
-                  <Typography.Paragraph>{suite.description || '无说明'}</Typography.Paragraph>
-                  <Typography.Paragraph copyable={{ text: suite.content_hash }}><Typography.Text strong>套件哈希：</Typography.Text> {suite.content_hash}</Typography.Paragraph>
-                  <Table rowKey="id" size="small" pagination={false} dataSource={suite.cases} columns={[
-                    { title: '用例', dataIndex: 'name' },
-                    { title: '用例键', dataIndex: 'case_key' },
-                    { title: '输入', dataIndex: 'input_text', ellipsis: true },
-                    { title: '断言', dataIndex: 'assertions', render: (value: object) => <Typography.Text code>{JSON.stringify(value)}</Typography.Text> },
-                  ]} />
-                </div> }}
-                columns={[
-                  { title: '名称', dataIndex: 'name' },
-                  { title: '版本', dataIndex: 'current_version_no', render: (value: number) => `v${value}` },
-                  { title: '状态', dataIndex: 'status', render: (value: string) => <Tag color={value === 'active' ? 'success' : 'default'}>{displayLabel(value)}</Tag> },
-                  { title: '通过线', dataIndex: 'gate_policy', render: (value: { min_pass_rate?: string }) => `${Number(value?.min_pass_rate ?? 1) * 100}%` },
-                  { title: '用例数', dataIndex: 'cases', render: (value: unknown[]) => value.length },
-                  { title: '操作', render: (_: unknown, suite: AgentEvalSuite) => <Space wrap>
-                    <Button size="small" onClick={() => openEvalDefinition(suite)}>发布新版本</Button>
-                    <Button size="small" type="primary" disabled={suite.status !== 'active'} loading={runEval.isPending} onClick={() => runEval.mutate(suite)}>运行评测</Button>
-                    <Button size="small" loading={evalState.isPending} onClick={() => evalState.mutate(suite)}>{suite.status === 'active' ? '停用门禁' : '启用门禁'}</Button>
-                  </Space> },
-                ]} />
-            </Card>
-            <Card title="评测运行">
-              <Table rowKey="id" loading={evalRuns.isLoading} dataSource={evalRuns.data ?? []} pagination={false}
-                expandable={{ expandedRowRender: (run: AgentEvalRun) => <Table rowKey="id" size="small" pagination={false} dataSource={run.case_runs} columns={[
-                  { title: '用例', dataIndex: 'name' },
-                  { title: '状态', dataIndex: 'status', render: (value: string) => <Tag color={value === 'passed' ? 'success' : value === 'failed' || value === 'error' ? 'error' : 'processing'}>{displayLabel(value)}</Tag> },
-                  { title: '断言结果', dataIndex: 'assertion_results', render: (value: object[]) => value.length ? <Typography.Text code>{JSON.stringify(value)}</Typography.Text> : '等待结算' },
-                  { title: '错误', dataIndex: 'failure_code', render: (value: string | null) => value || '—' },
-                  { title: '运行', render: (_: unknown, item: { session_id: string; run_id: string }) => <Button size="small" onClick={() => navigate(`/agents/${id}/chat/${item.session_id}`)}>查看过程</Button> },
-                ]} /> }}
-                columns={[
-                  { title: '套件', render: (_: unknown, run: AgentEvalRun) => `${run.suite_name} v${run.suite_version_no}` },
-                  { title: '候选哈希', dataIndex: 'candidate_content_hash', render: (value: string) => <Typography.Text code copyable>{value.slice(0, 16)}</Typography.Text> },
-                  { title: '状态', dataIndex: 'status', render: (value: string) => <Tag color={value === 'passed' ? 'success' : value === 'failed' || value === 'error' ? 'error' : 'processing'}>{displayLabel(value)}</Tag> },
-                  { title: '结果', render: (_: unknown, run: AgentEvalRun) => `${run.passed_count}/${run.case_count} · ${run.score == null ? '—' : `${(Number(run.score) * 100).toFixed(1)}%`}` },
-                  { title: '时间', dataIndex: 'created_at', render: (value: string) => new Date(value).toLocaleString() },
-                ]} />
-            </Card>
-          </Space> }] : []),
+          ...(!isNew ? [{ key: 'evals', label: '评测与门禁', children: <Card title="评测工作台">
+            <Typography.Paragraph>在评测工作台管理用例、导入真实运行、执行回归并对比结果。发布仍会校验当前配置是否满足已启用的门禁。</Typography.Paragraph>
+            <Button onClick={() => navigate(`/evals?agent=${id}`)}>打开评测工作台</Button>
+          </Card> }] : []),
           ...(!isNew ? [{ key: 'api', label: '接口接入', children: <Card title="智能体访问密钥"
             extra={<Button type="primary" icon={<KeyOutlined />} onClick={() => setKeyOpen(true)}>创建密钥</Button>}>
             <Alert className="mb-4" type="info" showIcon message="外部系统使用智能体访问密钥与用户标识调用；密钥不代表新的用户身份。" />
@@ -503,19 +393,6 @@ export default function AgentConfigPage() {
           <Form.Item name="name" label="名称" rules={[{ required: true }]}><Input /></Form.Item>
           <Form.Item name="caller_label" label="调用方标识" rules={[{ required: true }]}><Input /></Form.Item>
           <Form.Item name="expires_at" label="到期时间（ISO 8601，可选）"><Input placeholder="2026-12-31T23:59:59+08:00" /></Form.Item>
-        </Form>
-      </Modal>
-      <Modal title={editingSuite ? '发布评测套件新版本' : '新建评测门禁套件'} open={evalOpen}
-        width={760} onCancel={() => { setEvalOpen(false); setEditingSuite(null) }}
-        onOk={() => evalForm.submit()} confirmLoading={saveEvalSuite.isPending}>
-        <Alert className="mb-4" type="warning" showIcon message="保存后定义与用例不可修改；编辑会发布新版本，并立即使旧版本成绩不再满足门禁。" />
-        <Form form={evalForm} layout="vertical" onFinish={values => saveEvalSuite.mutate(values)}>
-          <Form.Item name="name" label="套件名称" rules={[{ required: true }]}><Input maxLength={200} /></Form.Item>
-          <Form.Item name="description" label="说明"><Input.TextArea rows={2} /></Form.Item>
-          <Form.Item name="min_pass_rate" label="最低加权通过率（0–1）" rules={[{ required: true }]}><InputNumber min={0} max={1} step={0.05} className="w-full" /></Form.Item>
-          <Form.Item name="cases_json" label="用例 JSON" rules={[{ required: true }]} extra={'支持 contains_all、contains_none、min_chars、max_chars、max_cost；最多 20 个用例。'}>
-            <Input.TextArea autoSize={{ minRows: 12, maxRows: 24 }} style={{ fontFamily: 'monospace' }} />
-          </Form.Item>
         </Form>
       </Modal>
     </div>

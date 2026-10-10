@@ -75,7 +75,7 @@ trust / governance labels
 owner / contact boundary
 ```
 
-AgentCard 不公开 Instructions、私有 Memory、完整 Prompt、凭证或 Chain-of-Thought。`group_enabled` 只是“可以成为 Group 候选”的声明，不能单独推出 visibility、可调用性、授权或运行可用性。
+AgentCard 不公开 Instructions、私有 Memory、完整 Prompt、凭证或 Chain-of-Thought。`group_enabled` 是协作网络的双向参与资格：调用方和目标方都开启后，在原始用户可见、可调用及治理允许的范围内，无需互相绑定即可发现、委派或组队。单方开启不产生网络调用权限，也不代替用户授权或运行可用性校验。
 
 工作网必须区分：
 
@@ -93,20 +93,24 @@ Agent 自主工作并判断是否需要协作
         ↓
 在工作网搜索或使用已知 Agent
         ↓
-发出邀请 / 定向工作请求
+选择定向委派，或选择包含当前 Agent 的群组成员
         ↓
-对方接受、追问、反提议、拒绝或工作
+创建 AgentInvocation，或在 Chat 完成后自动建立 Group
         ↓
-形成 Subagent 委派或 Group Membership
+成员接受、追问、反提议、拒绝或工作，直到交付结果
 ```
 
 平台不要求预先存在 Group 模板、角色槽位或固定调用图。重复业务场景可以保存为用户自己的场景提示、验收夹具或成员收藏，但它们不是 Group 本体。
+
+普通用户直接 Chat A 即可进入这条路径：A 自主判断是否需要协作、查找合适成员，并在需要群组时保留自身作为会话锚点。网络成员无需逐对绑定，但 `discover_agents`、`invoke_agent`、`select_group_members` 及群内工具仍须由各 Agent 显式绑定并发布；网络开关不会自动添加工具。
 
 ## 两类多 Agent 关系
 
 ### 委派
 
 Chat 或 Plan 中，当前 Agent 为一个有边界的问题调用另一个 Agent。目标 Agent 在独立上下文中工作，最终结果返回调用方，由调用方继续对用户负责。
+
+除双方开启网络参与资格的路径外，`bound_agent_ids[]` 支持独立的逐跳显式委派：A 绑定 B、B 绑定 C 时可以按 A→B→C 协作，不要求开启 `group_enabled`。每一跳重新检查当前调用方的绑定、工具、原始用户权限和运行预算；B 的绑定不会变成 A 对 C 的直接授权，也不规定模型必须按此顺序调用。
 
 适合探索、测试、评审、摘要等只需要结果的任务。
 
@@ -165,12 +169,12 @@ replaced
 
 每个 Membership 记录 Agent、版本解析策略、邀请者、原因、共享上下文范围、有效时间和授权来源。平台还为每个 GroupRun 保存成员与 AgentVersion 快照，用于恢复和审计。
 
-成员变化是否可以立即生效，由 Collaboration Policy 决定：
+当前 GroupSession 的未来成员可以在后续 Chat 后重新选择，每个 GroupRun 始终使用 `fixed_for_run`，本轮不变更成员。`invite_agent` 对本轮图外邀请记录拒绝，返回 `membership_policy_fixed_for_run`，不创建邀请 Approval。未来若支持其他成员策略，仍需明确区分：
 
 - 高风险或未预授权范围：等待用户确认；
 - 用户预授权的候选、预算和数据范围内：可以自动加入；
 - 超过人数、成本、数据或组织边界：拒绝或升级；
-- 第一期 UAT：`fixed_for_run`，本轮不变更成员。
+- 本轮成员快照与后续新 Run 的成员选择。
 
 动态治理来自可解释的策略和成员事件，而不是版本化大 Charter 文档。
 
@@ -182,7 +186,7 @@ replaced
 2. **Membership Graph**：当前 Group 在某一时间点有哪些成员；
 3. **Interaction Graph**：真实 Message、AgentInvocation、共享任务和 Artifact 关系。
 
-不预建第四张“应该怎样协作”的业务图。UI 可以从真实事件生成动态图，但不能用建议边限制模型。
+显式绑定是逐跳调用授权关系，可以限制直接委派目标；它不指定必执行的业务流程。网络参与资格则允许授权范围内的无绑定协作。UI 可以从真实事件生成交互图，不能把推荐边当作授权，也不能把允许的调用边当作强制执行顺序。
 
 ## 信息共享
 
@@ -259,11 +263,11 @@ Agent 的信誉和历史合作可以影响推荐排序，不能产生数据或 T
 
 - 个人助手单独验证 Chat；
 - 项目经理验证显式 Plan 权限模式；
-- 用户从工作网选择产品、开发、测试三个 Agent 建立 Group；
-- GroupRun 保存三名成员的确定版本快照；
+- 普通用户 Chat 入口 Agent，由其判断协作需求并选择产品、开发、测试等必要成员；
+- Chat 完成后自动建立包含入口 Agent 的 Group，GroupRun 保存本轮成员的确定版本快照；
 - 成员内部消息、任务、调用、返工和计划保持动态；
 - 本轮禁用动态加人，只记录候选建议或拒绝；
-- 后续阶段在同一 Membership 模型上开启用户确认和预授权加入。
+- 后续 Chat 可重新选择下一轮成员，不在运行中的 GroupRun 扩员。
 
 第一期不需要 Group 模板、角色槽位、Charter Revision 或永久 Supervisor。它验证的是最小动态社会骨架，而不是把社会固化成模板。
 

@@ -8,6 +8,7 @@ import logging
 import secrets
 
 from sqlalchemy import or_, select
+from sqlalchemy.exc import IntegrityError
 
 from app.database import AsyncSessionLocal
 from app.core.telemetry import emit_runtime_span
@@ -42,7 +43,19 @@ async def ensure_runner_trace(runner_id: str, session_factory=AsyncSessionLocal)
             trace = RunnerTrace(id=uuid7(), trace_id=secrets.token_hex(16), root_span_id=secrets.token_hex(8), runner_id=runner.id,
                 session_id=runner.session_id, run_id=runner.run_id, work_item_id=runner.work_item_id,
                 agent_id=runner.agent_id, status="running", sampled=True, started_at=utcnow())
-            db.add(trace); await db.flush()
+            try:
+                async with db.begin_nested():
+                    db.add(trace)
+                    await db.flush()
+            except IntegrityError:
+                # Another observer can create the same Runner trace between
+                # our read and insert. Reuse it without emitting another link.
+                existing = await db.scalar(select(RunnerTrace).where(
+                    RunnerTrace.runner_id == runner_id,
+                ))
+                if existing is None:
+                    raise
+                return existing
             invocation = await db.scalar(select(AgentInvocation).where(
                 AgentInvocation.target_work_item_id == runner.work_item_id,
             ))
@@ -85,6 +98,7 @@ async def record_runner_span(
     status: str = "ok", attributes: dict | None = None,
     input_tokens: int | None = None, output_tokens: int | None = None,
     error_code: str | None = None,
+    fact_fingerprint: str | None = None,
     session_factory=AsyncSessionLocal,
 ) -> None:
     try:
@@ -95,6 +109,33 @@ async def record_runner_span(
         async with session_factory.begin() as db:
             trace = await db.scalar(select(RunnerTrace).where(RunnerTrace.runner_id == runner_id))
             if trace is None: return
+            projection_key = (
+                _projection_key(trace.id, name, fact_fingerprint)
+                if fact_fingerprint is not None else None
+            )
+            span = ObservabilitySpan(
+                id=uuid7(), runner_trace_id=trace.id,
+                span_id=secrets.token_hex(8), parent_span_id=trace.root_span_id,
+                name=name, span_kind=span_kind, projection_key=projection_key,
+                status=status, started_at=started_at, ended_at=ended_at,
+                duration_ms=duration_ms, attributes=dict(attributes or {}),
+                input_tokens=input_tokens, output_tokens=output_tokens,
+                error_code=error_code,
+            )
+            try:
+                # Reserve the projection in the database before exporting it.
+                # A read-before-write check alone races across worker processes.
+                async with db.begin_nested():
+                    db.add(span)
+                    await db.flush()
+            except IntegrityError as error:
+                if projection_key is not None and _is_projection_conflict(error) and await db.scalar(
+                    select(ObservabilitySpan.id).where(
+                        ObservabilitySpan.projection_key == projection_key,
+                    )
+                ) is not None:
+                    return
+                raise
             safe_attributes = {
                 "myclaw.runner.id": runner_id,
                 "myclaw.run.id": trace.run_id,
@@ -103,16 +144,11 @@ async def record_runner_span(
                 "myclaw.span.kind": span_kind,
                 **{f"myclaw.{key}": value for key, value in dict(attributes or {}).items()},
             }
-            _, span_id = emit_runtime_span(
+            _, span.span_id = emit_runtime_span(
                 trace_id=trace.trace_id, parent_span_id=trace.root_span_id,
                 name=name, started_at=started_at, ended_at=ended_at, status=status,
                 attributes=safe_attributes,
             )
-            db.add(ObservabilitySpan(id=uuid7(), runner_trace_id=trace.id,
-                span_id=span_id, parent_span_id=trace.root_span_id, name=name, span_kind=span_kind,
-                status=status, started_at=started_at, ended_at=ended_at,
-                duration_ms=duration_ms, attributes=dict(attributes or {}),
-                input_tokens=input_tokens, output_tokens=output_tokens, error_code=error_code))
     except Exception:
         logger.warning(
             "Failed to record durable Runner span",
@@ -120,6 +156,22 @@ async def record_runner_span(
             extra={"runner_id": runner_id, "span_name": name},
         )
         return
+
+
+def _projection_key(runner_trace_id: str, name: str, fingerprint: str) -> str:
+    """Stable identity for one version of one Runner ledger projection."""
+    return hashlib.sha256(json.dumps(
+        [runner_trace_id, name, fingerprint],
+        ensure_ascii=False, separators=(",", ":"),
+    ).encode()).hexdigest()
+
+
+def _is_projection_conflict(error: IntegrityError) -> bool:
+    detail = str(error.orig)
+    return (
+        "uq_observability_span_projection" in detail
+        or "UNIQUE constraint failed: observability_span.projection_key" in detail
+    )
 
 
 def _fact_window(items, *, start_attr: str, end_attr: str):
@@ -164,16 +216,6 @@ async def record_runner_fact_spans(
             ))
             if trace is None:
                 return
-            existing_spans = list(await db.scalars(
-                select(ObservabilitySpan).where(
-                    ObservabilitySpan.runner_trace_id == trace.id,
-                )
-            ))
-            existing_fact_fingerprints = {
-                (span.name, (span.attributes or {}).get("fact_fingerprint"))
-                for span in existing_spans
-                if (span.attributes or {}).get("fact_fingerprint")
-            }
             attempts = list(await db.scalars(
                 select(ProviderAttempt).join(
                     AgentTurn, AgentTurn.id == ProviderAttempt.agent_turn_id,
@@ -274,8 +316,6 @@ async def record_runner_fact_spans(
                 attributes["approval_kinds"] = sorted({item.kind for item in items})
             elif name in {"provider.attempt", "model_generation"}:
                 attributes["providers"] = sorted({item.provider for item in items})
-            if (name, attributes["fact_fingerprint"]) in existing_fact_fingerprints:
-                continue
             await record_runner_span(
                 runner_id,
                 name=name,
@@ -284,6 +324,7 @@ async def record_runner_fact_spans(
                 ended_at=ended_at,
                 status="error" if error_items else "ok",
                 attributes=attributes,
+                fact_fingerprint=attributes["fact_fingerprint"],
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 error_code=(
@@ -291,9 +332,6 @@ async def record_runner_fact_spans(
                     if error_items else None
                 ),
                 session_factory=session_factory,
-            )
-            existing_fact_fingerprints.add(
-                (name, attributes["fact_fingerprint"])
             )
     except Exception:
         logger.warning(

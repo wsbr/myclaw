@@ -36,6 +36,7 @@ class ObservabilitySpan(Base):
     __table_args__ = (
         CheckConstraint("status IN ('ok','error')", name="ck_observability_span_status"),
         Index("ix_observability_span_trace_started", "runner_trace_id", "started_at"),
+        UniqueConstraint("projection_key", name="uq_observability_span_projection"),
     )
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid7)
     runner_trace_id: Mapped[str] = mapped_column(String(36), ForeignKey("runner_trace.id"), nullable=False)
@@ -43,6 +44,9 @@ class ObservabilitySpan(Base):
     parent_span_id: Mapped[str | None] = mapped_column(String(16))
     name: Mapped[str] = mapped_column(String(200), nullable=False)
     span_kind: Mapped[str] = mapped_column(String(50), nullable=False)
+    # Only ledger projections have a key. Ordinary spans may repeat, and legacy
+    # duplicate spans remain intact (including their links) with a NULL key.
+    projection_key: Mapped[str | None] = mapped_column(String(64))
     status: Mapped[str] = mapped_column(String(20), nullable=False)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)
     ended_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False)

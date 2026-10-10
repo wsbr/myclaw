@@ -204,16 +204,12 @@ async def record_provider_attempt_usage(
         raise LookupError("provider attempt model version disappeared")
     observed_at = attempt.ended_at or utcnow()
     usage = dict(attempt.usage or {})
-    provider_reports_usage = bool((model.capabilities or {}).get("usage_in_stream"))
-    token_measurement = (
-        "measured"
-        if attempt.status == "succeeded" and (
-            provider_reports_usage or any(_decimal(usage.get(key)) > 0 for key in (
-                "input_tokens", "cached_input_tokens", "output_tokens",
-            ))
-        )
-        else "unknown"
-    )
+    # A model capability is not evidence that this response reported usage.
+    # Each counter has independent presence, including an explicit zero.
+    # A malformed model output can still have a valid billed usage report.
+    def token_quantity(metric: str) -> tuple[Decimal, str]:
+        value = usage.get(metric)
+        return _decimal(value), "measured" if value is not None else "unknown"
     active_ms = Decimal(0)
     active_status = "unknown"
     if attempt.started_at is not None and attempt.ended_at is not None:
@@ -223,11 +219,9 @@ async def record_provider_attempt_usage(
         active_status = "measured"
     quantities = {
         "requests": (Decimal(1), "measured"),
-        "input_tokens": (_decimal(usage.get("input_tokens")), token_measurement),
-        "cached_input_tokens": (
-            _decimal(usage.get("cached_input_tokens")), token_measurement,
-        ),
-        "output_tokens": (_decimal(usage.get("output_tokens")), token_measurement),
+        "input_tokens": token_quantity("input_tokens"),
+        "cached_input_tokens": token_quantity("cached_input_tokens"),
+        "output_tokens": token_quantity("output_tokens"),
         "active_milliseconds": (active_ms, active_status),
     }
     source_key = f"provider_attempt:{attempt.id}"

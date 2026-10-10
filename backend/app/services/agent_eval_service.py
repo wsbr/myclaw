@@ -15,7 +15,7 @@ from app.models.agent_eval_v1 import (
     AgentEvalSuiteVersion,
 )
 from app.models.common import utcnow, uuid7
-from app.models.runtime_v1 import Message, Run
+from app.models.runtime_v1 import Message, Run, ToolInvocation
 from app.models.usage_v1 import UsageLedgerEntry
 from app.services.agent_assembly_service import create_draft_test_snapshot
 from app.services.chat_service import create_user_session, enqueue_chat_message
@@ -23,32 +23,41 @@ from app.services.chat_service import create_user_session, enqueue_chat_message
 
 def _decimal(value: Any, *, field: str) -> Decimal:
     try:
-        return Decimal(str(value))
+        number = Decimal(str(value))
+        if not number.is_finite():
+            raise ValueError(f"{field} must be finite")
+        return number
     except (InvalidOperation, TypeError, ValueError) as error:
         raise ValueError(f"{field} must be numeric") from error
 
 
 def normalize_gate_policy(value: dict[str, Any] | None) -> dict[str, Any]:
     raw = dict(value or {})
-    unknown = set(raw) - {"min_pass_rate"}
+    unknown = set(raw) - {"min_pass_rate", "required_for_publish"}
     if unknown:
         raise ValueError(f"unsupported gate policy fields: {', '.join(sorted(unknown))}")
     threshold = _decimal(raw.get("min_pass_rate", "1"), field="min_pass_rate")
     if threshold < 0 or threshold > 1:
         raise ValueError("min_pass_rate must be between 0 and 1")
-    return {"min_pass_rate": str(threshold)}
+    policy = {"min_pass_rate": str(threshold)}
+    if "required_for_publish" in raw:
+        if not isinstance(raw["required_for_publish"], bool):
+            raise ValueError("required_for_publish must be boolean")
+        policy["required_for_publish"] = raw["required_for_publish"]
+    return policy
 
 
 def normalize_assertions(value: dict[str, Any]) -> dict[str, Any]:
     raw = dict(value or {})
     allowed = {
         "contains_all", "contains_none", "min_chars", "max_chars", "max_cost",
+        "require_tools", "require_successful_tools", "forbid_tools",
     }
     unknown = set(raw) - allowed
     if unknown:
         raise ValueError(f"unsupported assertion fields: {', '.join(sorted(unknown))}")
     normalized: dict[str, Any] = {}
-    for key in ("contains_all", "contains_none"):
+    for key in ("contains_all", "contains_none", "require_tools", "require_successful_tools", "forbid_tools"):
         items = raw.get(key, [])
         if not isinstance(items, list) or any(not isinstance(item, str) or not item for item in items):
             raise ValueError(f"{key} must be a list of non-empty strings")
@@ -56,10 +65,12 @@ def normalize_assertions(value: dict[str, Any]) -> dict[str, Any]:
             normalized[key] = items
     for key in ("min_chars", "max_chars"):
         if key in raw and raw[key] is not None:
-            number = int(raw[key])
+            number = _decimal(raw[key], field=key)
+            if number != number.to_integral_value():
+                raise ValueError(f"{key} must be an integer")
             if number < 0:
                 raise ValueError(f"{key} must be nonnegative")
-            normalized[key] = number
+            normalized[key] = int(number)
     if (
         "min_chars" in normalized and "max_chars" in normalized
         and normalized["max_chars"] < normalized["min_chars"]
@@ -85,6 +96,9 @@ def normalize_assertions(value: dict[str, Any]) -> dict[str, Any]:
         }
     if not normalized:
         raise ValueError("each eval case requires at least one assertion")
+    required = set(normalized.get("require_tools", [])) | set(normalized.get("require_successful_tools", []))
+    if required & set(normalized.get("forbid_tools", [])):
+        raise ValueError("a required tool cannot also be forbidden")
     return normalized
 
 
@@ -126,6 +140,16 @@ def normalize_cases(cases: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "assertions": normalize_assertions(dict(raw.get("assertions") or {})),
             "weight": str(weight),
         })
+        tags = raw.get("tags", [])
+        if not isinstance(tags, list) or len(tags) > 20 or any(
+            not isinstance(tag, str) or not tag.strip() or len(tag) > 50 for tag in tags
+        ):
+            raise ValueError("tags must contain at most 20 non-empty strings of up to 50 characters")
+        metadata = dict(raw.get("case_metadata") or {})
+        if tags:
+            metadata["tags"] = list(dict.fromkeys(tag.strip() for tag in tags))
+        if metadata:
+            normalized[-1]["case_metadata"] = metadata
     return normalized
 
 
@@ -173,6 +197,7 @@ async def create_eval_suite_version(
         id=uuid7(), suite_version_id=version.id, case_key=item["case_key"],
         name=item["name"], input_text=item["input_text"],
         assertions=item["assertions"], weight=Decimal(item["weight"]), sort_order=index,
+        case_metadata=item.get("case_metadata"),
     ) for index, item in enumerate(normalized_cases))
     await db.flush()
     suite.name = clean_name
@@ -291,6 +316,20 @@ async def evaluate_response(
         results.append(await _cost_assertion(
             db, run_id=run_id, contract=assertions["max_cost"],
         ))
+    if any(key in assertions for key in ("require_tools", "require_successful_tools", "forbid_tools")):
+        rows = list(await db.execute(select(ToolInvocation.tool_key, ToolInvocation.status).where(
+            ToolInvocation.run_id == run_id,
+        )))
+        called = {key for key, _ in rows}
+        succeeded = {key for key, status in rows if status == "succeeded"}
+        for key in ("require_tools", "require_successful_tools", "forbid_tools"):
+            for tool in assertions.get(key, []):
+                observed = succeeded if key == "require_successful_tools" else called
+                results.append({
+                    "assertion": key, "expected": tool,
+                    "passed": tool not in observed if key == "forbid_tools" else tool in observed,
+                    "actual": sorted(observed),
+                })
     return results
 
 
@@ -327,6 +366,9 @@ async def reconcile_one_eval_case(db: AsyncSession) -> bool:
             Message.sender_type == "agent",
             Message.role == "assistant",
             Message.status == "committed",
+            Message.scope_type == "chat",
+            Message.recipient_type == "session",
+            Message.sender_agent_id == eval_run.agent_id,
         ).order_by(Message.created_at.desc(), Message.id.desc()).limit(1))
         if response is None:
             case_run.status = "error"

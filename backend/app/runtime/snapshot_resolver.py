@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.models.agent_v1 import AgentAssemblyVersion, AgentVersionSkill, AgentVersionTool
 from app.models.common import uuid7
+from app.models.group_v1 import GroupRunMember
 from app.models.registry import (
     ModelVersion, SkillVersion, ToolConnectionRevision, ToolDefinition,
     ToolGovernance, ToolVersion,
@@ -21,8 +22,11 @@ from app.models.runtime_v1 import (
     BrowserSessionState, CapabilitySnapshot, DurableRunner, RunnerSkillSnapshot,
     RunnerToolSnapshot,
 )
-from app.runtime.coordination_tools import RUNTIME_COORDINATION_DEFINITIONS
-from app.services.agent_directory_service import discover_agent_cards
+from app.core.tool_registry.runtime_tools import (
+    RUNTIME_PLAN_READONLY_TOOLS, RUNTIME_TOOLS, is_runtime_tool_implementation,
+)
+from app.services.agent_directory_service import discover_agent_cards, resolve_bound_agent_cards
+from app.runtime.tool_presentation import project_tool_definition
 from app.services.runtime_policy_service import (
     FrozenRuntimePolicy,
     resolve_frozen_runtime_policies,
@@ -109,9 +113,6 @@ class SnapshotResolver:
         definitions: list[dict[str, Any]] = []
         authorized_definitions: list[dict[str, Any]] = []
         governance_by_key: dict[str, int] = {}
-        runtime_coordination_names = {
-            item["name"] for item in RUNTIME_COORDINATION_DEFINITIONS
-        }
         readonly = permission_mode in {"readonly", "plan_readonly"}
         budget_blocked = bool((hard_budget or {}).get("tool_calls_remaining") == 0)
         browser_session_active = await db.get(BrowserSessionState, runner.session_id) is not None
@@ -122,11 +123,6 @@ class SnapshotResolver:
             tool = tools_by_id.get(frozen.platform_tool_id)
             if tool is None:
                 raise SnapshotResolutionError(f"frozen Tool {frozen.platform_tool_id} is missing")
-            if tool.tool_key in runtime_coordination_names:
-                # Runtime coordination semantics win over an older assembly's
-                # Platform Tool of the same name. Provider schemas must contain
-                # each Tool name exactly once.
-                continue
             assembled_keys.append(tool.tool_key)
             version = await db.get(ToolVersion, frozen.tool_version_id)
             governance = await db.get(ToolGovernance, tool.id)
@@ -148,6 +144,10 @@ class SnapshotResolver:
             if reason:
                 denied.append({"capability": tool.tool_key, "reason_code": reason})
                 continue
+            runtime_owned = is_runtime_tool_implementation(
+                tool.tool_key, version.implementation_ref,
+            )
+            runtime_contract = RUNTIME_TOOLS.get(tool.tool_key) if runtime_owned else None
             governance_by_key[tool.tool_key] = governance.version
             definition = {
                 "name": tool.tool_key,
@@ -162,6 +162,7 @@ class SnapshotResolver:
                 "connection_id": frozen.connection_id,
                 "connection_revision_id": frozen.connection_revision_id,
                 "secret_fingerprint": frozen.secret_fingerprint,
+                "implementation_ref": version.implementation_ref,
                 "execution_mode": version.execution_mode,
                 "side_effect": version.side_effect,
                 "confirmation_policy": governance.confirmation_policy,
@@ -172,10 +173,41 @@ class SnapshotResolver:
                     "risk_rules": list(governance.risk_rules or []),
                 },
                 "annotations": dict(version.annotations or {}),
-                "source": "platform",
+                "source": "runtime" if runtime_owned else "platform",
             }
+            definition = project_tool_definition(
+                definition,
+                authentication_source=str(execution_principal.get("authentication_source") or "web_session"),
+            )
             authorized_definitions.append(definition)
-            if readonly and version.side_effect != "none":
+            if runtime_contract is not None:
+                is_group_runtime = (
+                    execution_principal.get("mode") == "group"
+                    or bool(execution_principal.get("group_run_id"))
+                )
+                if (
+                    (runtime_contract.get("group_only") and not is_group_runtime)
+                    or (runtime_contract.get("chat_only") and execution_principal.get("mode") != "chat")
+                ):
+                    denied.append({"capability": tool.tool_key, "reason_code": "runtime_tool_mode_denied"})
+                    continue
+                if tool.tool_key in {"discover_agents", "select_group_members"} and not assembly.group_enabled:
+                    denied.append({"capability": tool.tool_key, "reason_code": "agent_network_disabled"})
+                    continue
+                if version.execution_mode != "inline":
+                    denied.append({"capability": tool.tool_key, "reason_code": "runtime_execution_mode_invalid"})
+                    continue
+                if governance.confirmation_policy != "never":
+                    denied.append({
+                        "capability": tool.tool_key,
+                        "reason_code": "runtime_confirmation_policy_unsupported",
+                    })
+                    continue
+            planning_exception = (
+                runtime_owned and permission_mode == "plan_readonly"
+                and tool.tool_key in RUNTIME_PLAN_READONLY_TOOLS
+            )
+            if readonly and definition["side_effect"] != "none" and not planning_exception:
                 denied.append({
                     "capability": tool.tool_key,
                     "reason_code": "permission_mode_readonly",
@@ -191,37 +223,62 @@ class SnapshotResolver:
             if tool.tool_key in eager_keys or bool(version.annotations.get("eager")):
                 definitions.append(definition)
 
-        # Coordination Tools are Runtime-owned. They are injected consistently
-        # and cannot be selected, replaced, or disabled through Agent assembly.
-        is_group_runtime = (
-            execution_principal.get("mode") == "group"
-            or bool(execution_principal.get("group_run_id"))
-        )
-        for definition in RUNTIME_COORDINATION_DEFINITIONS:
-            if definition.get("group_only") and not is_group_runtime:
-                continue
-            if (
-                definition.get("chat_only")
-                and execution_principal.get("mode") != "chat"
-            ):
-                continue
-            name = definition["name"]
-            assembled_keys.append(name)
-            effective_keys.append(name)
-            definitions.append(dict(definition))
+        # Progressive disclosure requires an explicitly bound search_tools. If
+        # it is absent or blocked, expose every admitted Tool directly so that
+        # a valid non-eager binding never becomes unreachable to the model.
+        if not any(
+            item["name"] == "search_tools" and item["source"] == "runtime"
+            and item["name"] in effective_keys for item in authorized_definitions
+        ):
+            definitions = [
+                item for item in authorized_definitions if item["name"] in effective_keys
+            ]
 
         discoverable_cards = await discover_agent_cards(
             db,
             tenant_id=str(execution_principal["tenant_id"]),
             account_id=execution_principal.get("account_id"),
             actor_agent_id=runner.agent_id,
+            actor_agent_version_id=runner.agent_version_id,
             limit=100,
-        )
+        ) if assembly.group_enabled and set(effective_keys) & {
+            "discover_agents", "select_group_members", "invoke_agent",
+        } else []
         discover_scope = {
             "agent_ids": [card.agent_id for card in discoverable_cards],
             "agent_version_ids": [card.agent_version_id for card in discoverable_cards],
             "source": "current_published_agent_cards",
         }
+        bound_cards = await resolve_bound_agent_cards(
+            db, tenant_id=str(execution_principal["tenant_id"]),
+            account_id=execution_principal.get("account_id"),
+            actor_agent_id=runner.agent_id,
+            actor_agent_version_id=runner.agent_version_id,
+        ) if "invoke_agent" in effective_keys else []
+        callable_cards = {
+            card.agent_id: card for card in [*bound_cards, *discoverable_cards]
+        } if "invoke_agent" in effective_keys else {}
+        callable_scope = {
+            "agent_ids": list(callable_cards),
+            "agent_version_ids": [card.agent_version_id for card in callable_cards.values()],
+            "source": "explicit_bindings_and_enabled_network",
+            "bound_agents": [{
+                "agent_id": card.agent_id, "name": card.name,
+                "description": card.description,
+            } for card in bound_cards],
+        }
+        if execution_principal.get("mode") == "group" and "invoke_agent" in effective_keys:
+            members = list(await db.scalars(select(GroupRunMember).where(
+                GroupRunMember.group_run_id == execution_principal.get("group_run_id"),
+                GroupRunMember.agent_id != runner.agent_id,
+                GroupRunMember.participation_status == "available",
+            ).order_by(GroupRunMember.agent_id)))
+            callable_scope = {
+                "agent_ids": [member.agent_id for member in members],
+                "agent_version_ids": [member.agent_version_id for member in members],
+                "source": "fixed_group_run_members",
+                "bound_agents": [],
+            }
 
         frozen_skills = list(await db.scalars(
             select(AgentVersionSkill)
@@ -245,10 +302,9 @@ class SnapshotResolver:
 
         tool_schema_bundle_hash = _hash([{
             "name": item["name"], "input_schema": item["input_schema"],
+            "description": item.get("description", ""),
             "registration_hash": item["registration_hash"],
-        } for item in authorized_definitions + [
-            item for item in definitions if item.get("source") == "runtime"
-        ]])
+        } for item in authorized_definitions])
         payload = {
             "runner_id": runner.id,
             "agent_version_id": assembly.id,
@@ -258,7 +314,7 @@ class SnapshotResolver:
             "authorized_tool_versions": authorized_definitions,
             "denied_capabilities": denied,
             "discoverable_agents_scope": discover_scope,
-            "callable_agents_scope": discover_scope,
+            "callable_agents_scope": callable_scope,
             "permission_mode": permission_mode,
             "governance_versions": {
                 "tools": governance_by_key,
@@ -280,7 +336,7 @@ class SnapshotResolver:
             authorized_tool_versions=authorized_definitions,
             denied_capabilities=denied,
             discoverable_agents_scope=discover_scope,
-            callable_agents_scope=discover_scope,
+            callable_agents_scope=callable_scope,
             permission_mode=permission_mode,
             governance_versions=payload["governance_versions"],
             budget_snapshot=hard_budget or {}, runtime_release_id=settings.runtime_release_id,

@@ -34,7 +34,7 @@ class BrowserNavigateTool(BaseTool):
     name = "browser_navigate"
     description = (
         "WHEN: open a public URL in this MyClaw Session's isolated Chromium. "
-        "WHEN NOT: use web_fetch for non-interactive evidence; Browser never inherits user cookies/profile. "
+        "WHEN NOT: prefer a separately available page-reading capability for non-interactive evidence; Browser never inherits user cookies/profile. "
         "RETURNS: final URL, origin, title, HTTP status, and page revision. "
         "RECOVERY: inspect navigation errors or choose a public URL, then observe."
     )

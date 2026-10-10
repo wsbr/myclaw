@@ -13,9 +13,12 @@ class AgentEvalCaseInput(BaseModel):
     input_text: str = Field(min_length=1)
     assertions: dict[str, Any]
     weight: Decimal = Field(default=Decimal("1"), gt=0)
+    tags: list[str] = Field(default_factory=list, max_length=20)
+    source_run_id: str | None = Field(default=None, max_length=36)
 
 
 class AgentEvalSuiteDefinition(BaseModel):
+    expected_version: int | None = Field(default=None, gt=0)
     name: str = Field(min_length=1, max_length=200)
     description: str = ""
     gate_policy: dict[str, Any] = Field(default_factory=lambda: {"min_pass_rate": "1"})
@@ -34,6 +37,9 @@ class AgentEvalCaseResponse(BaseModel):
     assertions: dict[str, Any]
     weight: Decimal
     sort_order: int
+    tags: list[str] = Field(default_factory=list)
+    source_run_id: str | None = None
+    source_snapshot: dict[str, Any] | None = None
 
 
 class AgentEvalSuiteResponse(BaseModel):
@@ -66,6 +72,10 @@ class AgentEvalCaseRunResponse(BaseModel):
     failure_code: str | None
     started_at: datetime | None
     ended_at: datetime | None
+    input_text: str = ""
+    response_text: str | None = None
+    tags: list[str] = Field(default_factory=list)
+    runtime_status: str | None = None
 
 
 class AgentEvalRunResponse(BaseModel):

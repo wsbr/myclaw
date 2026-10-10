@@ -1,7 +1,17 @@
 from typing import AsyncIterator
 import anthropic
 from app.core.model_hub.base import BaseLLM, LLMResponse, LLMChunk, ToolCall, TokenUsage
+from app.core.model_hub.base import bounded_provider_id, provider_request_identity
 from app.core.model_hub.tool_wire import to_anthropic_tools
+from app.core.model_hub.parameters import validate_provider_parameters
+
+
+def _token_usage(usage) -> TokenUsage:
+    return TokenUsage(
+        input_tokens=getattr(usage, "input_tokens", None),
+        output_tokens=getattr(usage, "output_tokens", None),
+        cached_input_tokens=getattr(usage, "cache_read_input_tokens", None),
+    )
 
 
 def normalize_messages_for_anthropic(messages: list[dict]) -> tuple[str, list[dict]]:
@@ -62,12 +72,13 @@ def normalize_messages_for_anthropic(messages: list[dict]) -> tuple[str, list[di
 
 class AnthropicLLM(BaseLLM):
     def __init__(self, api_key: str, base_url: str | None = None):
-        self.client = anthropic.AsyncAnthropic(api_key=api_key, base_url=base_url)
+        self.client = anthropic.AsyncAnthropic(api_key=api_key, base_url=base_url, max_retries=0)
         self.tool_strict = True
 
     async def chat(self, messages: list[dict], tools: list[dict] | None, params: dict) -> LLMResponse:
+        validate_provider_parameters(params, provider="anthropic")
         message_system, normalized_messages = normalize_messages_for_anthropic(messages)
-        system = "\n\n".join(part for part in (params.get("system"), message_system) if part)
+        system = message_system
         kwargs = dict(
             model=params.get("model_id", "claude-sonnet-4-6"),
             max_tokens=params.get("max_tokens", 8192),
@@ -91,6 +102,8 @@ class AnthropicLLM(BaseLLM):
             kwargs["temperature"] = params["temperature"]
 
         resp = await self.client.messages.create(**kwargs)
+        request_id, request_id_source = provider_request_identity(resp)
+        response_id = bounded_provider_id(getattr(resp, "id", None))
 
         tool_calls = []
         text_content = ""
@@ -103,14 +116,18 @@ class AnthropicLLM(BaseLLM):
         return LLMResponse(
             content=text_content,
             tool_calls=tool_calls,
-            usage=TokenUsage(input_tokens=resp.usage.input_tokens, output_tokens=resp.usage.output_tokens),
+            usage=_token_usage(resp.usage),
             model=resp.model,
             finish_reason=resp.stop_reason or "stop",
+            provider_request_id=request_id or response_id,
+            provider_request_id_source=request_id_source or ("response_id_fallback" if response_id else None),
+            provider_response_id=response_id,
         )
 
     async def stream(self, messages: list[dict], tools: list[dict] | None, params: dict) -> AsyncIterator[LLMChunk]:
+        validate_provider_parameters(params, provider="anthropic")
         message_system, normalized_messages = normalize_messages_for_anthropic(messages)
-        system = "\n\n".join(part for part in (params.get("system"), message_system) if part)
+        system = message_system
         kwargs = dict(
             model=params.get("model_id", "claude-sonnet-4-6"),
             max_tokens=params.get("max_tokens", 8192),
@@ -137,8 +154,19 @@ class AnthropicLLM(BaseLLM):
         # while their JSON is incomplete; lifecycle, thinking and usage events
         # are metadata and remain safe to retry after a transport failure.
         async with self.client.messages.stream(**kwargs) as stream:
+            request_id, request_id_source = provider_request_identity(getattr(stream, "response", None))
+            response_id = None
+            if request_id:
+                yield LLMChunk(type="metadata", provider_request_id=request_id,
+                               provider_request_id_source=request_id_source)
             async for event in stream:
                 event_type = getattr(event, "type", None)
+                if event_type == "message_start":
+                    response_id = bounded_provider_id(getattr(getattr(event, "message", None), "id", None))
+                    if response_id:
+                        yield LLMChunk(type="metadata", provider_request_id=request_id,
+                                       provider_request_id_source=request_id_source,
+                                       provider_response_id=response_id)
                 delta_type = getattr(getattr(event, "delta", None), "type", None)
                 block_type = getattr(getattr(event, "content_block", None), "type", None)
                 if event_type == "content_block_start" and block_type == "tool_use":
@@ -162,13 +190,12 @@ class AnthropicLLM(BaseLLM):
 
         yield LLMChunk(
             type="done",
-            usage=TokenUsage(
-                input_tokens=final_message.usage.input_tokens,
-                output_tokens=final_message.usage.output_tokens,
-            ),
+            usage=_token_usage(final_message.usage),
             stop_reason=final_message.stop_reason,
             model=final_message.model,
-            provider_request_id=getattr(final_message, "id", None),
+            provider_request_id=request_id,
+            provider_request_id_source=request_id_source,
+            provider_response_id=bounded_provider_id(getattr(final_message, "id", None)) or response_id,
         )
 
     async def count_tokens(
@@ -176,10 +203,9 @@ class AnthropicLLM(BaseLLM):
         params: dict | None = None,
     ) -> int:
         params = dict(params or {})
+        validate_provider_parameters(params, provider="anthropic")
         message_system, normalized_messages = normalize_messages_for_anthropic(messages)
-        system = "\n\n".join(
-            part for part in (params.get("system"), message_system) if part
-        )
+        system = message_system
         kwargs = {
             "model": params.get("model_id", "claude-sonnet-4-6"),
             "messages": normalized_messages,
@@ -188,5 +214,9 @@ class AnthropicLLM(BaseLLM):
             kwargs["system"] = system
         if tools:
             kwargs["tools"] = to_anthropic_tools(tools, strict=self.tool_strict)
-        resp = await self.client.messages.count_tokens(**kwargs)
+        count_tokens = getattr(self.client.messages, "count_tokens", None)
+        if count_tokens is None:
+            # The pinned 0.40 SDK exposes this endpoint under beta.messages.
+            count_tokens = self.client.beta.messages.count_tokens
+        resp = await count_tokens(**kwargs)
         return resp.input_tokens

@@ -8,7 +8,9 @@ Platform Tool 是由 MyClaw 后端代码实现、注册并通过 Runtime 调度�
 
 `read_file`、`write_file`、`execute`、`publish_artifact` 是 Platform Tool。它们可能由核心代码提供，但不会因此被隐式加入 Agent。
 
-模型还可以通过相同的原生 tool-call 协议调用 `update_plan`、`ask_user`、`discover_agents`、`invoke_agent`、`invite_agent`、`search_group_history` 和 Group Message 等 **Runtime Coordination Tool**。这类能力由 Runtime 按当前模式、身份和协作关系注入，用于改变真实计划、等待或协作状态；其中 `search_group_history` 只读，其余能力按各自契约产生状态变化。它们不进入 Platform Tool Registry，也不能由 Agent 装配者选择、替换或借此扩大业务权限。两类能力共用调用协议，但治理来源和副作用语义不同。
+`search_tools`、`update_plan`、`find_agent_user`、`ask_user`、`discover_agents`、`select_group_members`、`invoke_agent`、`search_group_history`、`send_group_message`、`invite_agent`、`update_shared_task` 是由 Runtime 执行的协调工具。它们同样进入 Platform Tool Registry，通过不可变 ToolVersion 和 AgentVersionTool 显式绑定；不再自动注入。工具目录和 Agent 配置页统一显示这些工具的中文名称、标识及适用模式。
+
+Runtime 专用执行器只负责计划、等待和协作等领域状态，不构成第二套授权入口。注册使用 `namespace=runtime` 和 `origin=builtin`；`runtime_owned`、`runtime_modes` 注解用于展示，执行授权必须验证冻结的 ToolVersion 和可信代码入口，不能仅信任注解或 `source` 字段。
 
 ## 注册与治理
 
@@ -32,7 +34,7 @@ version
 
 - 查看注册元数据和 Schema；
 - 启用或停用；
-- 在 `never | per_call | session_grant` 之间切换 `confirmation_policy`；
+- 在工具支持的 `never | per_call | session_grant` 之间切换 `confirmation_policy`；Runtime 协调工具当前仅支持 `never`，其他设置或要求执行确认的风险规则返回 422；
 - 维护平台级连接或运行配置；
 - 执行连通性测试；
 - 查看哪些 Agent 正在使用。
@@ -55,11 +57,13 @@ effective_tools = assembled_tools
                   ∩ remaining_hard_budget
 ```
 
-Runtime Coordination Tool 不包含在 `assembled_tools` 中，其有效集合由当前 `permission_mode`、调用主体、Session/Group Membership、协作策略和预算独立计算。
+Runtime 协调工具包含在同一 `assembled_tools` 中，同样受显式绑定、平台启停、冻结版本、模式和预算约束。Group 专用工具只在 Group 运行中生效，`select_group_members` 只在 Chat 中生效，领域执行器继续校验成员、目标范围和根 WorkItem 等条件。计划模式允许已绑定的 `update_plan`、`ask_user` 完成计划维护和澄清；这个例外不会授权业务写入。
+
+注册升级不改写历史不可变 AgentVersion，也不为任何 Agent 自动授予新工具。需要原协调能力时，应在 Agent 草稿中选择对应工具并重新发布。Plan 模式缺少有效 `update_plan` 绑定时以 `working_plan_tool_unavailable` 明确失败，避免反复要求模型调用不可用工具。未绑定 `search_tools` 时，其他有效的已绑定工具直接呈现，避免只能授权却无法发现。
 
 Runtime 不依据用户消息措辞、Skill 内容、模型文本、Group 开关或历史使用自动添加 Tool。自然语言不需要包含内部 Tool key；相同机器状态下，改写、翻译或标点变化不能改变有效权限。
 
-当显式选择的 Tool 不存在或被停用时，Runner 应明确失败或按平台定义拒绝启动，不能静默删除 Tool 后继续造成能力漂移。
+当显式选择的 Tool 定义不存在时，Runner 拒绝构建快照；被停用、版本校验失败或受模式限制时，快照保留装配项并记录具体 `denied_capabilities`，调用返回明确的授权错误。不能抹掉原绑定或以其他工具版本替换。
 
 ## 调用边界
 
@@ -70,17 +74,27 @@ Runtime 不依据用户消息措辞、Skill 内容、模型文本、Group 开关
 - 平台级配置可用；
 - 调用满足该 Tool 自身的运行时约束。
 
+每次 Provider 请求之前，Runtime 将冻结装配与当前平台治理相交，统一生成 Tool 的展示 schema、说明和平台操作提示；动态搜索、幂等重放和续跑恢复使用同一投影。运行中停用的 Tool 不再展示，执行边界也重新检查停用状态，包括普通 inline Tool。未绑定工具不会因为提示词、Skill、目录搜索或模型配置自动获得权限。
+
+通用平台提示只描述权限和证据等公共规则。具体工具指令声明其所需能力，只有本轮实际呈现这些能力时才加入提示；Web 检索不再是所有 Agent 的默认步骤。旧不可变 ToolVersion 的已知平台文案可在展示层修正，原版本、绑定、合同 hash 和历史记录保持不变。负向限制和真实工具依赖不能通过删除安全条件来规避。
+
+定时触发的运行中，已绑定 `schedule_task` 只呈现 `operation=list` 及查询参数；搜索或恢复不能重新展开修改操作。执行层继续拒绝定时运行递归修改定时任务。
+
+当前按单个 Tool 的有效能力装配提示和 schema；未来工具组合包可以提供组合选择与指导，但必须经过同一装配、展示和执行边界，不产生隐式授权。
+
 Runtime Coordination Tool 的执行器必须再次校验身份、模式、Membership 与目标范围，并直接写入相应领域状态和 Event。Harness 不向模型暴露用于定义完成条件或关闭 Tool 集合的控制 Tool。这些协调能力不能声明任务成功、定义必需 Tool 清单或关闭业务能力。Provider 的完整普通消息或 `end_turn` 自然结束当前 Turn，Run 状态继续由 pending Invocation、等待、取消和预算等机器事实决定。
 
 任何模型可调用能力在授权期间都不是一次性槽位。某次 `write_file`、`execute`、`publish_artifact`、`invoke_agent` 或 `search_group_history` 成功后，Runtime 不得仅因“已经用过”就从后续 Turn 的有效集合中移除整个 Tool key。是否重复执行由具体 Invocation、参数、目标资源、因果 Action 和 operation key 判断。
 
 `invoke_agent` 还必须执行 Agent 可发现范围和 Group 参与者集合校验，详见 [Agent 协作](agent-collaboration.md)。
 
-`search_group_history` 只能查询当前 GroupSession 中对成员公开的 Message、ExecutionEvent 和 Artifact 索引。它必须校验当前 Agent 是 Group 成员，并排除其他 Agent 的 Instructions、私有记忆、Prompt、模型内部推理、未公开 Tool 数据和未发布 Workspace 文件。Group Runtime 自动注入这一核心只读协调能力；它不进入可选 Agent Tool 装配，也不扩大查询边界。
+`search_group_history` 只能查询当前 GroupSession 中对成员公开的 Message、ExecutionEvent 和 Artifact 索引。它必须校验当前 Agent 是 Group 成员，并排除其他 Agent 的 Instructions、私有记忆、Prompt、模型内部推理、未公开 Tool 数据和未发布 Workspace 文件。该能力需要显式绑定；同名旧注册项复用 ToolDefinition ID 并发布新 ToolVersion，旧版本保持原冻结合同。
 
 ## ToolInvocation 与执行类型
 
 所有 Tool 调用都持久化为一个语义上的 `ToolInvocation`，底层一次或多次物理尝试记录为 `ToolAttempt[]`。
+
+Runtime 协调工具也记录冻结版本、调用结果和幂等操作键，并消耗工具调用预算。协调请求持久化完成可结算该 ToolInvocation；`ask_user` 的 Clarification 和 Chat/Plan `invoke_agent` 的 AgentInvocation 等领域等待仍按各自恢复协议继续，幂等重放不得重复创建或丢失等待。
 
 平台支持两种由 Tool Registry 定义、Agent 不能覆盖的执行类型：
 
@@ -162,7 +176,7 @@ Runtime 在底层执行前必须重新读取 Tool 当前启停和 Confirmation P
 
 管理员可以在 Tool 列表页根据部署环境调整。后期若增加动态风险判断或垂类审批，必须先在本模块定义确定的裁决输入、优先级、失败语义和审计合同，再同步数据库、状态机与 API；不能通过非权威待办文档隐式扩展当前权限模型。
 
-`invoke_agent` 的允许与否由 Agent Network 可发现范围、Group Membership、当前 Collaboration Policy 和预算决定，不套用 Platform Tool 的 Confirmation Policy；若未来某类跨组织邀请需要人工审批，应创建明确的 Approval，而不是把它伪装成 Tool 装配配置。
+`invoke_agent` 首先要求显式 Agent 绑定和平台启用，再由 Agent Network 可发现范围、Group Membership、当前 Collaboration Policy 和预算裁决。Runtime 协调工具当前不支持 Sandbox 的执行确认恢复；其 Confirmation Policy 只允许 `never`，已有不受支持的配置会明确拒绝执行。领域审批和用户澄清继续遵守相应业务协议。
 
 ## 取消
 

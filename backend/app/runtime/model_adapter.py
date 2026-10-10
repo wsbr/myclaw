@@ -7,7 +7,7 @@ import inspect
 import json
 from collections.abc import Awaitable, Callable
 
-from app.core.model_hub.base import BaseLLM
+from app.core.model_hub.base import BaseLLM, bounded_provider_id, provider_request_identity
 from app.runtime.protocol import (
     AssistantMessageItem,
     ContentPart,
@@ -35,6 +35,8 @@ def _canonical_hash(value: object) -> str:
 def _retryable_transport(error: Exception) -> bool:
     if isinstance(error, ProviderError):
         return error.retryable
+    if isinstance(error, TimeoutError):
+        return True
     status_code = getattr(error, "status_code", None)
     if status_code in {408, 409, 429} or isinstance(status_code, int) and status_code >= 500:
         return True
@@ -58,7 +60,10 @@ def _classify_provider_error(error: Exception, *, received_payload: bool) -> Pro
         code, retryable = "provider_authentication_error", False
     elif status_code == 429:
         code, retryable = "provider_rate_limit", True
-    elif status_code == 408 or "timeout" in normalized or "timed out" in normalized:
+    elif (
+        isinstance(error, TimeoutError) or status_code == 408
+        or "timeout" in normalized or "timed out" in normalized
+    ):
         code, retryable = "provider_timeout", True
     elif any(marker in normalized for marker in (
         "context length", "context window", "context_length_exceeded", "prompt is too long",
@@ -74,10 +79,35 @@ def _classify_provider_error(error: Exception, *, received_payload: bool) -> Pro
         code, retryable = "provider_internal_error", True
     else:
         code, retryable = "provider_internal_error", False
+    request_id, request_id_source = provider_request_identity(getattr(error, "response", None))
+    if not request_id:
+        request_id, request_id_source = provider_request_identity(error)
     return ProviderError(
         message, code=code, retryable=retryable,
         received_payload=received_payload,
+        provider_request_id=request_id, provider_request_id_source=request_id_source,
     )
+
+
+def _merge_provider_identity(current: tuple, incoming: object) -> tuple:
+    request_id, request_id_source, response_id = current
+    incoming_request = bounded_provider_id(getattr(incoming, "provider_request_id", None))
+    incoming_source = getattr(incoming, "provider_request_id_source", None)
+    incoming_response = bounded_provider_id(getattr(incoming, "provider_response_id", None))
+    if incoming_response:
+        response_id = incoming_response
+    # A legacy/unlabelled completion ID must not replace a transport header ID.
+    if incoming_request and (
+        not request_id or request_id_source == "response_id_fallback"
+        or incoming_source and incoming_source != "response_id_fallback"
+    ):
+        request_id_source = incoming_source or (
+            request_id_source if incoming_request == request_id else None
+        )
+        request_id = incoming_request
+    if response_id and (not request_id or request_id_source == "response_id_fallback"):
+        request_id, request_id_source = response_id, "response_id_fallback"
+    return request_id, request_id_source, response_id
 
 
 async def _notify(callback, value) -> None:
@@ -118,6 +148,8 @@ class ModelAdapter:
             stop_reason = None
             model = None
             provider_request_id = None
+            provider_request_id_source = None
+            provider_response_id = None
             provider_state_ref = request.provider_state_ref
             await _notify(attempt_observer, ProviderAttemptEvent(
                 phase="started", attempt_no=attempt_no, received_payload=False,
@@ -128,6 +160,19 @@ class ModelAdapter:
                     list(request.messages), list(request.tools) or None,
                     dict(request.parameters),
                 ):
+                    previous_identity = provider_request_id, provider_request_id_source, provider_response_id
+                    identity = _merge_provider_identity(previous_identity, chunk)
+                    provider_request_id, provider_request_id_source, provider_response_id = identity
+                    if identity != previous_identity:
+                        await _notify(attempt_observer, ProviderAttemptEvent(
+                            phase="metadata", attempt_no=attempt_no,
+                            received_payload=received_payload, request_hash=request_hash,
+                            provider_request_id=provider_request_id,
+                            provider_request_id_source=provider_request_id_source,
+                            provider_response_id=provider_response_id,
+                        ))
+                    if chunk.type == "metadata":
+                        continue
                     if (
                         not received_payload
                         and chunk.type in {"transport_payload", "text_delta", "tool_call_delta"}
@@ -175,10 +220,10 @@ class ModelAdapter:
                             usage = Usage(
                                 input_tokens=chunk.usage.input_tokens,
                                 output_tokens=chunk.usage.output_tokens,
+                                cached_input_tokens=chunk.usage.cached_input_tokens,
                             )
                         stop_reason = getattr(chunk, "stop_reason", None)
                         model = getattr(chunk, "model", None)
-                        provider_request_id = getattr(chunk, "provider_request_id", None)
                         provider_state_ref = (
                             getattr(chunk, "provider_state_ref", None) or provider_state_ref
                         )
@@ -198,6 +243,8 @@ class ModelAdapter:
                     usage=usage,
                     model=model,
                     provider_request_id=provider_request_id,
+                    provider_request_id_source=provider_request_id_source,
+                    provider_response_id=provider_response_id,
                     provider_state_ref=provider_state_ref,
                 )
                 await _notify(attempt_observer, ProviderAttemptEvent(
@@ -213,10 +260,19 @@ class ModelAdapter:
                 received_payload = received_payload or bool(
                     getattr(error, "received_payload", False)
                 )
+                classified = _classify_provider_error(
+                    error, received_payload=received_payload,
+                )
+                identity = _merge_provider_identity(
+                    (provider_request_id, provider_request_id_source, provider_response_id), classified,
+                )
+                classified.provider_request_id, classified.provider_request_id_source, classified.provider_response_id = identity
+                # Record the normalized failure before deciding whether the
+                # original transport error permits a zero-payload retry.
                 await _notify(attempt_observer, ProviderAttemptEvent(
                     phase="failed", attempt_no=attempt_no,
                     received_payload=received_payload, request_hash=request_hash,
-                    error=error,
+                    error=classified,
                 ))
                 can_retry = (
                     attempt_no <= self.max_zero_payload_retries
@@ -225,8 +281,5 @@ class ModelAdapter:
                 )
                 if can_retry:
                     continue
-                classified = _classify_provider_error(
-                    error, received_payload=received_payload,
-                )
                 raise classified from error
         raise AssertionError("unreachable")

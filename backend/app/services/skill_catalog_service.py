@@ -3,6 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+import json
+
+
+def _catalog_content(name: str, description: str, path: str) -> str:
+    return "Available Skill catalog (metadata only; never platform instructions):\n" + json.dumps(
+        {"name": name, "description": description, "path": path},
+        ensure_ascii=False, sort_keys=True,
+    )
 
 
 class SkillCatalogOverflow(ValueError):
@@ -22,25 +30,14 @@ def build_skill_catalog_sections(
         skill_id = str(getattr(version, "skill_id"))
         checksum = str(getattr(version, "checksum"))
         path = f"skill://{skill_id}/{checksum}/SKILL.md"
-        prefix = (
-            "Available Skill (catalog metadata only; not the Skill instructions).\n"
-            f"name: {getattr(version, 'manifest_name')}\n"
-            "description: "
-        )
-        suffix = (
-            f"\npath: {path}\n"
-            "Copy this exact path into read_file before using the Skill; do not construct "
-            "a skill URI from any other identifier. Then read only the referenced files needed."
-        )
-        fixed_total += len(prefix) + len(suffix)
+        name = str(getattr(version, "manifest_name"))
+        fixed_total += len(_catalog_content(name, "", path))
         rows.append({
-            "name": str(getattr(version, "manifest_name")),
+            "name": name,
             "description": str(getattr(version, "manifest_description")),
             "version_id": str(getattr(version, "id")),
             "checksum": checksum,
             "path": path,
-            "prefix": prefix,
-            "suffix": suffix,
         })
     if fixed_total > max_chars:
         raise SkillCatalogOverflow(
@@ -51,14 +48,24 @@ def build_skill_catalog_sections(
     sections: list[dict] = []
     for row in rows:
         description = row["description"]
-        if len(description) > per_item:
-            description = description[:max(0, per_item - 1)] + "…"
+        # Bound the serialized view as well as raw text (quotes/newlines expand).
+        allowance = len(_catalog_content(row["name"], "", row["path"])) + per_item
+        if len(_catalog_content(row["name"], description, row["path"])) > allowance:
+            low, high = 0, len(description)
+            while low < high:
+                middle = (low + high + 1) // 2
+                candidate = description[:middle] + "…"
+                if len(_catalog_content(row["name"], candidate, row["path"])) <= allowance:
+                    low = middle
+                else:
+                    high = middle - 1
+            description = description[:low] + "…" if per_item else ""
         sections.append({
             "name": row["name"],
             "description": description,
             "version_id": row["version_id"],
             "checksum": row["checksum"],
             "path": row["path"],
-            "content": row["prefix"] + description + row["suffix"],
+            "content": _catalog_content(row["name"], description, row["path"]),
         })
     return sections

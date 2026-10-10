@@ -46,8 +46,10 @@ async def run_once() -> bool:
             return False
         try:
             async with AsyncSession(bind=connection, expire_on_commit=False) as db:
-                async with db.begin():
-                    result = await run_retention_cleanup(db, job_id=uuid7())
+                result = await run_retention_cleanup(db, job_id=uuid7())
+            if result.failures:
+                logger.error("retention cleanup partially failed: %s", result.failures)
+                return False
             logger.info("retention cleanup completed", extra={"deleted_counts": result.__dict__})
             return True
         finally:

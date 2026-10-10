@@ -260,6 +260,9 @@ class LongTaskProvider(CountingProvider):
 
 
 class LongTaskDispatcher:
+    def add_definitions(self, definitions):
+        self.definitions = {item["name"]: item for item in definitions}
+
     async def dispatch_batch(self, calls, **kwargs):
         result = ToolResult(success=True, summary="Step completed", data={"stdout": "raw-output " * 400, "exit_code": 0})
         return [DispatchResult(call.call_id, call.name, result, invocation_id="durable-" + call.call_id) for call in calls]

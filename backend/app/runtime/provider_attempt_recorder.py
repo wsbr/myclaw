@@ -1,11 +1,13 @@
 """Durable Provider attempt and usage recording shared by task and summary calls."""
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.common import utcnow, uuid7
 from app.models.runtime_v1 import AgentTurn, ProviderAttempt
-from app.runtime.protocol import ProviderAttemptEvent
+from app.core.model_hub.base import bounded_provider_id
+from app.runtime.protocol import ProviderAttemptEvent, normalize_stop_reason
 from app.services.usage_ledger_service import record_provider_attempt_usage
 
 if TYPE_CHECKING:
@@ -41,6 +43,14 @@ class TurnRecorder:
             await self.db.commit()
             return
         attempt = self.attempts[event.attempt_no]
+        if event.phase == "metadata":
+            request_id = bounded_provider_id(event.provider_request_id)
+            if request_id:
+                attempt.provider_request_id = request_id
+            # Headers/lifecycle IDs do not start payload accounting or end the
+            # attempt. Release this short transaction before reading more I/O.
+            await self.db.commit()
+            return
         if event.phase == "payload":
             attempt.received_payload = True
             if attempt.first_payload_at is None:
@@ -54,7 +64,7 @@ class TurnRecorder:
             attempt.tool_call_observed = bool(event.result.tool_calls)
             attempt.stop_reason = event.result.stop_reason.value
             attempt.usage = event.result.usage.as_dict()
-            attempt.provider_request_id = event.result.provider_request_id
+            attempt.provider_request_id = bounded_provider_id(event.result.provider_request_id) or attempt.provider_request_id
             attempt.provider_state_ref = event.result.provider_state_ref
         else:
             error = event.error
@@ -62,8 +72,33 @@ class TurnRecorder:
             # that uncertainty instead of disguising it as a clean transport
             # failure.
             attempt.status = "outcome_unknown" if event.received_payload else "failed"
-            attempt.error_code = getattr(error, "code", type(error).__name__)
+            attempt.error_code = getattr(error, "code", None) or "provider_internal_error"
             attempt.error_detail = str(error)
+            reported_usage = getattr(error, "usage", None)
+            if reported_usage is not None:
+                attempt.usage = reported_usage.as_dict()
+            provider_stop_reason = getattr(error, "stop_reason", None)
+            if provider_stop_reason is not None:
+                attempt.stop_reason = normalize_stop_reason(provider_stop_reason).value
+            attempt.provider_request_id = bounded_provider_id(getattr(error, "provider_request_id", None)) or attempt.provider_request_id
+            diagnostics = getattr(error, "diagnostics", None)
+            identifiers = {
+                key: value for key, value in {
+                    "provider_request_id": attempt.provider_request_id,
+                    "provider_request_id_source": getattr(error, "provider_request_id_source", None),
+                    "provider_response_id": bounded_provider_id(getattr(error, "provider_response_id", None)),
+                }.items() if value is not None
+            }
+            if diagnostics or identifiers:
+                detail = {
+                    "message": str(error),
+                    "provider_stop_reason": provider_stop_reason,
+                }
+                if diagnostics:
+                    detail["diagnostics"] = diagnostics
+                if identifiers:
+                    detail["provider_identifiers"] = identifiers
+                attempt.error_detail = json.dumps(detail, ensure_ascii=False, sort_keys=True)
         if self.usage_ledger_enabled:
             await record_provider_attempt_usage(
                 self.db,

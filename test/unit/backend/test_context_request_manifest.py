@@ -216,6 +216,9 @@ class _ResultDispatcher:
     def __init__(self, result):
         self.result = result
 
+    def add_definitions(self, definitions):
+        self.definitions = {item["name"]: item for item in definitions}
+
     async def dispatch_batch(self, calls, **kwargs):
         return [DispatchResult(call.call_id, call.name, self.result) for call in calls]
 

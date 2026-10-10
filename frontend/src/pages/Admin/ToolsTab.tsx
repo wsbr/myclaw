@@ -5,6 +5,7 @@ import { useState } from 'react'
 import type { AxiosResponse } from 'axios'
 import client from '../../api/client'
 import { displayLabel, selectOptions } from '@/lib/presentation'
+import { isRuntimeTool, runtimeModeLabel } from '@/lib/toolCatalog'
 
 type ToolDefinition = {
   id: string; tool_key: string; namespace: string; origin: 'builtin' | 'mcp'
@@ -43,6 +44,10 @@ export default function ToolsTab() {
   const [editing, setEditing] = useState<ToolDefinition | null>(null)
   const [details, setDetails] = useState<ToolDefinition | null>(null)
   const [connection, setConnection] = useState<ToolConnection | 'new' | null>(null)
+  const invalidateToolCatalog = () => {
+    queryClient.invalidateQueries({ queryKey: ['platform-tools'] })
+    queryClient.invalidateQueries({ queryKey: ['agent-options', 'platform-tools'] })
+  }
 
   const tools = useQuery({
     queryKey: ['platform-tools'],
@@ -70,7 +75,7 @@ export default function ToolsTab() {
   const updateTool = useMutation({
     mutationFn: ({ tool, patch }: { tool: ToolDefinition; patch: Record<string, unknown> }) =>
       client.patch(`/platform-tools/${tool.id}`, patch, { headers: commandHeaders(tool.config_version) }),
-    onSuccess: () => { message.success('工具治理已发布'); setEditing(null); queryClient.invalidateQueries({ queryKey: ['platform-tools'] }) },
+    onSuccess: () => { message.success('工具治理已发布'); setEditing(null); invalidateToolCatalog() },
     onError: (error: any) => message.error(error?.response?.data?.error?.code || '更新失败'),
   })
   const saveConnection = useMutation({
@@ -85,14 +90,14 @@ export default function ToolsTab() {
   })
   const reconcile = useMutation({
     mutationFn: () => client.post('/platform-tools/reconcile', {}, { headers: commandHeaders() }).then(response => response.data),
-    onSuccess: result => { message.success(`不可变目录已对账：新增 ${result.created}，新版本 ${result.updated}`); queryClient.invalidateQueries({ queryKey: ['platform-tools'] }) },
+    onSuccess: result => { message.success(`不可变目录已对账：新增 ${result.created}，新版本 ${result.updated}`); invalidateToolCatalog() },
   })
 
   const openTool = (tool: ToolDefinition) => {
     setEditing(tool)
     toolForm.setFieldsValue({
       display_name: tool.display_name, display_name_zh: tool.display_name_zh,
-      confirmation_policy: tool.confirmation_policy, enabled: tool.enabled,
+      confirmation_policy: isRuntimeTool(tool) ? 'never' : tool.confirmation_policy, enabled: tool.enabled,
       network_policy: JSON.stringify(tool.network_policy, null, 2),
       workspace_policy: JSON.stringify(tool.workspace_policy, null, 2),
       risk_rules: JSON.stringify(tool.risk_rules, null, 2),
@@ -126,17 +131,22 @@ export default function ToolsTab() {
         {item.connection_type === 'mcp' && <Button size="small" icon={<SyncOutlined />} onClick={async () => {
           const result = await client.post(`/mcp-servers/${item.id}/sync`, {}, { headers: commandHeaders() }).then(r => r.data)
           message.success(`MCP 同步 ${result.tools.length} 个工具，默认待审核`)
-          queryClient.invalidateQueries({ queryKey: ['platform-tools'] })
+          invalidateToolCatalog()
         }}>同步 MCP</Button>}
       </Space> },
     ]} />
   </>
 
   const toolTab = <>
+    <Alert className="mb-3" type="info" showIcon message="统一管理工具与智能体绑定"
+      description="会话与协作工具也在此启用、停用和查看合同。平台启用后，仍需在智能体的「能力装配」中选择绑定；协作对象与用户访问范围继续单独校验。" />
     <div className="mb-3 flex justify-end"><Button icon={<SyncOutlined />} loading={reconcile.isPending} onClick={() => reconcile.mutate()}>发布代码工具版本</Button></div>
     <Table rowKey="id" loading={tools.isLoading} dataSource={tools.data || []} pagination={false} columns={[
       { title: '工具', render: (_, item: ToolDefinition) => <><div>{item.display_name_zh || item.display_name}</div><code className="text-xs">{item.tool_key}</code></> },
-      { title: '来源', render: (_, item: ToolDefinition) => <Tag color={item.origin === 'mcp' ? 'purple' : 'blue'}>{item.namespace}</Tag> },
+      { title: '来源 / 适用模式', render: (_, item: ToolDefinition) => <Space direction="vertical" size={0}>
+        <Tag color={item.origin === 'mcp' ? 'purple' : isRuntimeTool(item) ? 'cyan' : 'blue'}>{isRuntimeTool(item) ? '内置会话与协作' : item.namespace}</Tag>
+        {runtimeModeLabel(item) && <span className="text-xs">{runtimeModeLabel(item)}</span>}
+      </Space> },
       { title: '版本', render: (_, item: ToolDefinition) => <span>v{item.version_no} <code>{item.content_hash?.slice(0, 8)}</code></span> },
       { title: '执行/风险', render: (_, item: ToolDefinition) => <Space direction="vertical" size={0}><Tag>{displayLabel(item.execution_mode)}</Tag><Tag>{displayLabel(item.side_effect)}</Tag></Space> },
       { title: '确认', dataIndex: 'confirmation_policy', render: value => <Tag color={value === 'per_call' ? 'orange' : value === 'session_grant' ? 'gold' : 'default'}>{displayLabel(value)}</Tag> },
@@ -150,14 +160,16 @@ export default function ToolsTab() {
     <Modal title={`治理 ${editing?.tool_key || ''}`} open={!!editing} onCancel={() => setEditing(null)} onOk={() => toolForm.submit()} confirmLoading={updateTool.isPending}>
       <Form form={toolForm} layout="vertical" onFinish={values => {
         if (!editing) return
-        try { updateTool.mutate({ tool: editing, patch: { ...values, network_policy: JSON.parse(values.network_policy), workspace_policy: JSON.parse(values.workspace_policy), risk_rules: JSON.parse(values.risk_rules) } }) }
+        try { updateTool.mutate({ tool: editing, patch: { ...values, ...(isRuntimeTool(editing) ? { confirmation_policy: 'never' } : {}), network_policy: JSON.parse(values.network_policy), workspace_policy: JSON.parse(values.workspace_policy), risk_rules: JSON.parse(values.risk_rules) } }) }
         catch { message.error('治理策略必须是有效 JSON') }
       }}>
         <Form.Item name="display_name" label="英文显示名" rules={[{ required: true }]}><Input /></Form.Item>
         <Form.Item name="display_name_zh" label="中文显示名（可选）">
           <Input placeholder="未配置时回退显示英文名称" />
         </Form.Item>
-        <Form.Item name="confirmation_policy" label="默认确认策略"><Select options={selectOptions(['never', 'per_call', 'session_grant'])} /></Form.Item>
+        <Form.Item name="confirmation_policy" label="默认确认策略" extra={editing && isRuntimeTool(editing) ? '会话与协作工具无需工具执行确认；协作对象和用户访问范围仍会校验。' : undefined}>
+          <Select disabled={!!editing && isRuntimeTool(editing)} options={selectOptions(editing && isRuntimeTool(editing) ? ['never'] : ['never', 'per_call', 'session_grant'])} />
+        </Form.Item>
         <Form.Item name="enabled" label="管理员审核启用" valuePropName="checked"><Switch /></Form.Item>
         <Form.Item name="network_policy" label="网络策略"><Input.TextArea rows={3} /></Form.Item>
         <Form.Item name="workspace_policy" label="工作区策略"><Input.TextArea rows={3} /></Form.Item>
@@ -169,6 +181,7 @@ export default function ToolsTab() {
         { key: 'identity', label: '不可变版本', children: `${details.tool_version_id} · ${details.content_hash}` },
         { key: 'impl', label: '实现', children: `${details.implementation_ref}@${details.implementation_version}` },
         { key: 'description', label: '模型说明', children: details.description },
+        ...(isRuntimeTool(details) ? [{ key: 'modes', label: '适用模式', children: runtimeModeLabel(details) || '由当前会话决定' }] : []),
         { key: 'input', label: '输入结构', children: <pre className="max-h-64 overflow-auto whitespace-pre-wrap">{JSON.stringify(details.input_schema, null, 2)}</pre> },
         { key: 'output', label: '输出结构', children: <pre className="max-h-64 overflow-auto whitespace-pre-wrap">{JSON.stringify(details.output_schema, null, 2)}</pre> },
         { key: 'errors', label: '错误目录', children: <pre className="whitespace-pre-wrap">{JSON.stringify(details.error_catalog, null, 2)}</pre> },

@@ -35,8 +35,10 @@ async def tools(db: AsyncSession = Depends(get_db), _: CurrentAccount = Depends(
     return [{
         "id": definition.id, "key": definition.tool_key,
         "name": definition.display_name, "description": definition.summary,
+        "display_name_zh": definition.display_name_zh,
         "execution_mode": version.execution_mode, "tool_version_id": version.id,
         "namespace": definition.namespace, "origin": definition.origin,
+        "annotations": dict(version.annotations or {}),
     } for definition, _, version in rows]
 
 

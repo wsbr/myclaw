@@ -23,6 +23,7 @@ from app.models.registry import (
     SandboxProfileVersion,
 )
 from app.core.tool_registry.schema import assert_valid_schema, builtin_result_schema
+from app.core.tool_registry.runtime_tools import RUNTIME_TOOLS
 from app.persistence.reliable_writes import PlatformAuditWriter
 from app.services.tool_display_names import builtin_tool_display_name_zh
 from app.services.context_policy_service import (
@@ -241,6 +242,8 @@ async def reconcile_platform_tools(
     """Publish immutable versions while preserving administrator governance."""
 
     specs = list(specs)
+    if len({spec.tool_key for spec in specs}) != len(specs):
+        raise ValueError("Tool reconciliation requires one contract per tool_key")
     reconciled: list[ToolDefinition] = []
     audit = PlatformAuditWriter(db)
     for spec in specs:
@@ -411,7 +414,7 @@ def builtin_tool_specs() -> list[CodeToolSpec]:
         "browser_interact": ("never", {"network_policy": {"egress": "current_browser_origin"}, "workspace_access": "write"}, "durable_async", "non_idempotent"),
         "browser_screenshot": ("never", {"network_policy": {"egress": "current_browser_page"}, "workspace_access": "write"}, "durable_async", "idempotent"),
     }
-    return [
+    platform_specs = [
         CodeToolSpec(
             tool_key=tool.name,
             display_name=tool.name.replace("_", " ").title(),
@@ -469,5 +472,33 @@ def builtin_tool_specs() -> list[CodeToolSpec]:
             initial_platform_config=governance[tool.name][1],
         )
         for tool in BUILTIN_TOOLS.values()
-        if tool.name in governance
+        if tool.name in governance and tool.name not in RUNTIME_TOOLS
     ]
+    # Runtime and ordinary built-ins share ToolDefinition/Version/Governance.
+    # In particular search_group_history must have one catalog entry: matching
+    # by tool_key preserves its existing Definition ID and frozen old versions.
+    runtime_specs = [
+        CodeToolSpec(
+            tool_key=name,
+            display_name=name.replace("_", " ").title(),
+            display_name_zh=builtin_tool_display_name_zh(name),
+            description=definition["description"],
+            input_schema=definition["input_schema"],
+            output_schema=definition["output_schema"],
+            namespace="runtime",
+            origin="builtin",
+            implementation_ref=definition["implementation_ref"],
+            implementation_version=definition["implementation_version"],
+            execution_mode=definition["execution_mode"],
+            side_effect=definition["side_effect"],
+            annotations=dict(definition["annotations"]),
+            error_catalog=[
+                {"category": "validation", "recovery": "Correct arguments and retry."},
+                {"category": "authorization", "recovery": "Use an authorized Agent and runtime mode."},
+                {"category": "conflict", "recovery": "Refresh the committed state before retrying."},
+            ],
+            initial_confirmation_policy="never",
+        )
+        for name, definition in RUNTIME_TOOLS.items()
+    ]
+    return platform_specs + runtime_specs

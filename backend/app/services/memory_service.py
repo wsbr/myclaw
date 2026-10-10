@@ -206,22 +206,8 @@ async def recall_memories(
     agent_id: str, policy_key: str,
     parameters: dict | None = None,
 ) -> list[MemoryRecord]:
-    snapshots = list(await db.scalars(select(RunnerMemorySnapshot).where(
-        RunnerMemorySnapshot.runner_id == runner_id,
-    ).order_by(RunnerMemorySnapshot.rank)))
-    if snapshots:
-        by_id = {row.id: row for row in await db.scalars(select(MemoryRecord).where(
-            MemoryRecord.tenant_id == tenant_id,
-            MemoryRecord.id.in_([snapshot.memory_id for snapshot in snapshots])
-        ))}
-        return [by_id[snapshot.memory_id] for snapshot in snapshots if snapshot.memory_id in by_id]
-    if policy_key == "memory_recall.none":
-        return []
-    merged = {"max_items": 20, "token_budget": 4_000, **dict(parameters or {})}
-    max_items = max(0, min(int(merged["max_items"]), 100))
-    token_budget = max(0, min(int(merged["token_budget"]), 100_000))
-    if max_items == 0 or token_budget == 0:
-        return []
+    # A frozen selection preserves identity and order, not permission to keep
+    # recalling a revoked fact or to cross the current principal's scope.
     statement = select(MemoryRecord).where(
         MemoryRecord.tenant_id == tenant_id,
         MemoryRecord.user_id == user_id, MemoryRecord.status == "active",
@@ -230,10 +216,27 @@ async def recall_memories(
         statement = statement.where(MemoryRecord.scope == "user_agent", MemoryRecord.agent_id == agent_id)
     elif policy_key == "memory_recall.user_combined":
         statement = statement.where(
-            (MemoryRecord.scope == "user") |
+            ((MemoryRecord.scope == "user") & MemoryRecord.agent_id.is_(None)) |
             ((MemoryRecord.scope == "user_agent") & (MemoryRecord.agent_id == agent_id))
         )
     else:
+        return []
+    snapshots = list(await db.scalars(select(RunnerMemorySnapshot).where(
+        RunnerMemorySnapshot.runner_id == runner_id,
+    ).order_by(RunnerMemorySnapshot.rank)))
+    if snapshots:
+        by_id = {row.id: row for row in await db.scalars(statement.where(
+            MemoryRecord.id.in_([snapshot.memory_id for snapshot in snapshots]),
+        ))}
+        return [by_id[snapshot.memory_id] for snapshot in snapshots if (
+            snapshot.memory_id in by_id
+            and snapshot.scope == by_id[snapshot.memory_id].scope
+            and snapshot.content_hash == by_id[snapshot.memory_id].normalized_hash
+        )]
+    merged = {"max_items": 20, "token_budget": 4_000, **dict(parameters or {})}
+    max_items = max(0, min(int(merged["max_items"]), 100))
+    token_budget = max(0, min(int(merged["token_budget"]), 100_000))
+    if max_items == 0 or token_budget == 0:
         return []
     candidates = list(await db.scalars(statement.order_by(
         MemoryRecord.updated_at.desc(), MemoryRecord.id.desc(),

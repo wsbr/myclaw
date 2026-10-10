@@ -19,7 +19,7 @@ async def search_cards(
     domain_tag: list[str] = Query(default=[]),
     capability: list[str] = Query(default=[]),
     governance_label: list[str] = Query(default=[]),
-    group_enabled: bool | None = None,
+    group_enabled: bool | None = True,
     limit: int = 50,
     db: AsyncSession = Depends(get_db),
     actor: SessionActor = Depends(get_session_actor),
@@ -48,6 +48,8 @@ async def get_card(
             db, tenant_id=actor.account.tenant_id, account_id=actor.account.id,
             actor_agent_id="__http_directory__", target_agent_id=agent_id,
         )
+        if not card.group_enabled:
+            raise LookupError("Agent does not participate in the network")
     except (LookupError, PermissionError):
         raise HTTPException(status_code=404, detail="Agent not found")
     return agent_card_view(card)

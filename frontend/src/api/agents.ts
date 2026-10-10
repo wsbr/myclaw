@@ -35,7 +35,11 @@ export interface AgentDraft {
 }
 
 export interface AgentDetail { agent: AgentSummary; draft: AgentDraft }
-export interface AgentOption { id: string; key?: string; name: string; description?: string }
+export interface AgentOption {
+  id: string; key?: string; name: string; description?: string
+  display_name_zh?: string; origin?: string; namespace?: string
+  annotations?: Record<string, unknown>; enabled?: boolean
+}
 export interface AgentPublishedVersion {
   id: string
   version_no: number
@@ -119,6 +123,9 @@ export interface AgentEvalCaseDefinition {
   input_text: string
   assertions: Record<string, unknown>
   weight: number | string
+  tags?: string[]
+  source_run_id?: string | null
+  source_snapshot?: { response_text?: string | null; tools?: Array<{ key: string; status: string }> }
 }
 
 export interface AgentEvalSuite {
@@ -130,7 +137,7 @@ export interface AgentEvalSuite {
   current_version_id: string
   current_version_no: number
   description: string
-  gate_policy: { min_pass_rate?: string }
+  gate_policy: { min_pass_rate?: string; required_for_publish?: boolean }
   content_hash: string
   cases: Array<AgentEvalCaseDefinition & { id: string; sort_order: number }>
   created_at: string
@@ -151,6 +158,10 @@ export interface AgentEvalCaseRun {
   failure_code: string | null
   started_at: string | null
   ended_at: string | null
+  input_text: string
+  response_text: string | null
+  tags: string[]
+  runtime_status: string | null
 }
 
 export interface AgentEvalRun {

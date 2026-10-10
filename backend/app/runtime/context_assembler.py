@@ -29,6 +29,7 @@ class ContextPackage:
     # input to the next projection or the only recoverable checkpoint payload.
     source_messages: tuple[dict[str, Any], ...] | None = None
     source_manifest: tuple[dict[str, Any], ...] | None = None
+    tool_guidance_specs: tuple[dict[str, Any], ...] = ()
 
 
 def oldest_history_group_size(package: ContextPackage) -> int:
@@ -106,6 +107,7 @@ class ContextAssembler:
         soft_input_target: int | None = None,
         hard_input_limit: int | None = None,
         tool_definitions: Iterable[dict[str, Any]] = (),
+        tool_guidance_specs: Iterable[dict[str, Any]] = (),
         web_result_budget_ratio: float = 0.20,
         context_policy_key: str = "context.standard",
         recent_history_messages: int = 0,
@@ -118,6 +120,7 @@ class ContextAssembler:
         soft_target = max(1, int(soft_input_target or token_budget))
         hard_limit = max(1, int(hard_input_limit or max(soft_target, token_budget)))
         tools = [dict(item) for item in tool_definitions]
+        guidance = tuple(dict(item) for item in tool_guidance_specs)
         sections = [dict(item) for item in policy_sections]
         skills = [dict(item) for item in skill_sections]
         messages: list[dict[str, Any]] = [{
@@ -131,6 +134,18 @@ class ContextAssembler:
             "source": "platform+agent+permission", "visibility": "private",
             "checksum": _digest(messages[0]), "token_estimate": _estimate(messages[0]),
         }]
+        if guidance:
+            from app.runtime.tool_guidance import render_tool_guidance
+
+            entry = {
+                "role": "system",
+                "content": render_tool_guidance(guidance, {item["name"] for item in tools}),
+            }
+            messages.append(entry)
+            manifest.append({
+                "source": "tool_guidance", "visibility": "private",
+                "checksum": _digest(entry), "token_estimate": _estimate(entry),
+            })
         for section in sections:
             section_manifest = dict(section.get("manifest") or {})
             if "checksum" in section_manifest:
@@ -153,7 +168,7 @@ class ContextAssembler:
             })
         for skill in skills:
             entry = {
-                "role": "system",
+                "role": "assistant",
                 "content": str(skill.get("content") or ""),
             }
             messages.append(entry)
@@ -176,7 +191,9 @@ class ContextAssembler:
             })
         history_messages = [dict(item) for item in history]
         history_sources = list(history_manifest)
-        pending = [dict(item) for item in pending_results]
+        from app.runtime.tool_guidance import normalize_runtime_notices
+
+        pending = normalize_runtime_notices(pending_results)
         pending_sources = list(pending_manifest)
         messages.extend(history_messages)
         messages.append({"role": "user", "content": current_input})
@@ -200,9 +217,10 @@ class ContextAssembler:
             **(pending_sources[index] if index < len(pending_sources) else {}),
         } for index, entry in enumerate(pending))
         manifest = request_manifest(messages, manifest)
-        fixed_count = 1 + len(sections) + len(skills) + (1 if working_plan else 0)
+        fixed_count = 1 + bool(guidance) + len(sections) + len(skills) + (1 if working_plan else 0)
         estimate = conservative_request_tokens(messages, tools)
         profile = {
+            "tool_guidance_specs": guidance,
             "context_policy_key": context_policy_key,
             "recent_history_messages": recent_history_messages,
             "recent_tool_rounds": recent_tool_rounds,

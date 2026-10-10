@@ -19,6 +19,7 @@ from app.models.runtime_v1 import (
 from app.runtime.action_dispatcher import ActionDispatcher, DispatchResult
 from app.runtime.context_assembler import ContextPackage, request_manifest
 from app.runtime.model_adapter import ModelAdapter
+from app.runtime.tool_presentation import project_search_result, resolve_tool_presentation
 from app.runtime.protocol import (
     AssistantMessageItem,
     NormalizedTurnResult,
@@ -148,6 +149,28 @@ class AgentLoopCoordinator:
                         budget_state.remaining_transport_retries,
                         provider_remaining,
                     )
+            presentation = await resolve_tool_presentation(
+                db, capability_snapshot=capability_snapshot,
+                authentication_source=runtime_context.authentication_source,
+                tool_definitions=presented_definitions,
+            )
+            presented_definitions = list(presentation.tool_definitions)
+            self.dispatcher.add_definitions(presented_definitions)
+            loaded_tool_version_ids.update(
+                item["tool_version_id"] for item in presented_definitions if item.get("tool_version_id")
+            )
+            from app.runtime.tool_guidance import refresh_tool_guidance
+            messages, source_manifest = refresh_tool_guidance(
+                messages, source_manifest, context.tool_guidance_specs,
+                {item["name"] for item in presented_definitions},
+                permission_summary={
+                    "mode": runtime_context.permission_mode,
+                    "discoverable_tool_count": len(
+                        presentation.effective_tool_keys - {item["name"] for item in presented_definitions}
+                    ),
+                    "denied_capability_count": len(presentation.denied_capabilities),
+                },
+            )
             request_count = None
             turn_web_projection = []
             turn_tool_projection = []
@@ -258,6 +281,7 @@ class AgentLoopCoordinator:
                         {
                             "name": item["name"],
                             "input_schema": item.get("input_schema") or {},
+                            "description": item.get("description", ""),
                             "registration_hash": item.get("registration_hash"),
                         }
                         for item in presented_definitions
@@ -469,15 +493,15 @@ class AgentLoopCoordinator:
                     provider_dispatch = dispatched
                     if call.name == "search_tools" and dispatched.result.success:
                         loaded = list((dispatched.result.data or {}).get("loaded_tool_definitions") or [])
-                        effective = set(
-                            capability_snapshot.effective_tool_keys
-                            if isinstance(capability_snapshot, CapabilitySnapshot)
-                            else capability_snapshot.get("effective_tool_keys", [])
+                        loaded_presentation = await resolve_tool_presentation(
+                            db, capability_snapshot=capability_snapshot,
+                            authentication_source=runtime_context.authentication_source,
+                            tool_definitions=loaded,
                         )
                         existing_names = {item["name"] for item in presented_definitions}
                         admitted = [
-                            item for item in loaded
-                            if item.get("name") in effective and item.get("name") not in existing_names
+                            item for item in loaded_presentation.tool_definitions
+                            if item.get("name") not in existing_names
                         ]
                         presented_definitions.extend(admitted)
                         self.dispatcher.add_definitions(admitted)
@@ -491,12 +515,7 @@ class AgentLoopCoordinator:
                         provider_dispatch = DispatchResult(
                             call_id=dispatched.call_id,
                             tool_name=dispatched.tool_name,
-                            result=dispatched.result.model_copy(update={
-                                "data": {
-                                    "tools": (dispatched.result.data or {}).get("tools", []),
-                                    "loaded_tool_definitions": [],
-                                },
-                            }),
+                            result=project_search_result(dispatched.result, loaded_presentation),
                             invocation_id=dispatched.invocation_id,
                             durable_wait=dispatched.durable_wait,
                             schema_error=dispatched.schema_error,
@@ -603,6 +622,7 @@ class AgentLoopCoordinator:
                         {
                             "name": item["name"],
                             "input_schema": item.get("input_schema") or {},
+                            "description": item.get("description", ""),
                             "registration_hash": item.get("registration_hash"),
                         }
                         for item in presented_definitions

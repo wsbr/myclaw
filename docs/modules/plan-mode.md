@@ -105,7 +105,7 @@ updated_at
 - 要求每个 item 对应数据库 WorkItem；
 - 限制 Agent 只能按顺序执行。
 
-计划更新使用小型 `update_plan` Runtime Coordination Tool。第一阶段 Provider 必须通过 native Tool Calling Conformance；不支持 Tool Calling 的 Provider 不能用于三模式 UAT，也不能通过解析文本、映射列表或 Adapter 伪造 PlanUpdate。未来若支持其他结构化 Action 协议，必须先作为新的可观测 Provider 能力进入 Model Conformance，而不是 Plan 模块的隐式兼容路径。
+计划更新使用小型 `update_plan` Runtime Coordination Tool。该工具必须在 Agent 草稿中显式绑定并发布，平台必须启用；缺少有效绑定时以 `working_plan_tool_unavailable` 失败，不自动注入、不循环要求模型生成无法执行的调用。已绑定的 `update_plan`、`ask_user` 在 `plan_readonly` 中允许维护计划和澄清，业务写入仍须等待批准。第一阶段 Provider 必须通过 native Tool Calling Conformance；不支持 Tool Calling 的 Provider 不能用于三模式 UAT，也不能通过解析文本、映射列表或 Adapter 伪造 PlanUpdate。未来若支持其他结构化 Action 协议，必须先作为新的可观测 Provider 能力进入 Model Conformance，而不是 Plan 模块的隐式兼容路径。
 
 ## 用户批准什么
 
@@ -174,6 +174,8 @@ Plan 的当前 Agent 仍对用户负责。它可以在调查或实施时按需�
 ```
 
 被调用 Agent 的结果返回当前 Agent。它不是 Group 成员，用户也不会自动进入其独立上下文。需要成员直接通信或用户直接介入多个 Agent 时，应建立 Group。
+
+Plan 使用同样的两条协作授权路径：显式绑定允许 A→B→C 逐跳委派，不要求开启群组网络；双方开启 `group_enabled` 时，也可在原始用户授权范围内无需绑定进行网络发现与委派。每一跳使用当前调用方自己的授权，不把 B→C 传递为 A→C。`discover_agents`、`invoke_agent` 等仍须在对应 AgentVersion 显式绑定，`plan_readonly` 限制继续传递到子调用。
 
 Plan 不冻结“参与者集合”。Agent 搜索和调用谁取决于当前 Collaboration Policy、权限、预算和任务判断。第一阶段 UAT 可以只开放产品、开发、测试三个候选 Agent，以控制变量，但这是部署配置，不是 Plan 产品语义。
 

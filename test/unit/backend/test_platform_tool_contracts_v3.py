@@ -49,6 +49,7 @@ from app.runtime.action_dispatcher import _approval_presentation
 from app.runtime.snapshot_resolver import _eager_platform_tool_keys
 from app.services.browser_worker_service import BrowserOutcomeUnknown, BrowserWorkerError
 from app.services.registry_reconcile import builtin_tool_specs
+from app.core.tool_registry.runtime_tools import RUNTIME_TOOLS
 from app.services.tool_display_names import mcp_tool_display_name_zh
 from app.config import settings
 from app.config import Settings
@@ -61,7 +62,8 @@ pytestmark = pytest.mark.unit
 def test_every_builtin_tool_has_an_intentional_chinese_display_name():
     specs = builtin_tool_specs()
 
-    assert {spec.tool_key for spec in specs} == set(BUILTIN_TOOLS)
+    assert {spec.tool_key for spec in specs} == set(BUILTIN_TOOLS) | set(RUNTIME_TOOLS)
+    assert len({spec.tool_key for spec in specs}) == len(specs)
     assert all(spec.display_name_zh for spec in specs)
     assert all(any("\u3400" <= char <= "\u9fff" for char in spec.display_name_zh) for spec in specs)
 

@@ -14,16 +14,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.tool_registry.base import RuntimeContext, ToolError, ToolResult
 from app.core.tool_registry.registry import ToolRegistry
+from app.core.tool_registry.runtime_tools import (
+    RUNTIME_PLAN_READONLY_TOOLS, RUNTIME_TOOLS, is_runtime_tool_implementation,
+)
 from app.core.tool_registry.schema import validation_error_refs, validation_errors
 from app.core.platform_secrets import secret_reference, store_secret
 from app.models.common import utcnow, uuid7
 from app.models.foundation import UserSession
+from app.models.agent_v1 import AgentAssemblyVersion, AgentVersionTool
+from app.models.registry import ToolConnectionRevision, ToolDefinition, ToolGovernance, ToolVersion
 from app.models.runtime_v1 import (
-    Approval, BrowserSessionState, CapabilitySnapshot, Run, SessionGrant, ToolInvocation,
+    Approval, BrowserSessionState, CapabilitySnapshot, DurableRunner, Run,
+    RunnerToolSnapshot, SessionGrant, ToolInvocation, WorkItem,
 )
 from app.persistence.reliable_writes import ExecutionEventWriter
 from app.runtime.coordination_tools import dispatch_coordination_tool
 from app.runtime.protocol import ToolCallItem
+from app.runtime.tool_presentation import project_search_result, project_tool_definition, resolve_tool_presentation
 from app.services.run_reliability_service import BudgetExceeded, assert_action_budget
 
 
@@ -418,6 +425,143 @@ async def _record_authorization_rejection(
     )
 
 
+def _runtime_candidate(definition: dict[str, Any]) -> bool:
+    return (
+        definition.get("name") in RUNTIME_TOOLS
+        or definition.get("source") == "runtime"
+        or str(definition.get("implementation_ref", "")).startswith("app.runtime.coordination_tools:")
+    )
+
+
+def _permission_mode_denies(definition: dict[str, Any], mode: str) -> bool:
+    if mode not in {"readonly", "plan_readonly"} or definition.get("side_effect", "none") == "none":
+        return False
+    return not (
+        mode == "plan_readonly"
+        and definition.get("name") in RUNTIME_PLAN_READONLY_TOOLS
+        and is_runtime_tool_implementation(
+            definition["name"], definition.get("implementation_ref"),
+        )
+    )
+
+
+async def _authorize_frozen_tool(
+    db: AsyncSession | None, *, definition: dict[str, Any],
+    capability_snapshot: CapabilitySnapshot | dict[str, Any], context: RuntimeContext,
+    run_id: str | None, work_item_id: str | None, source_turn_id: str | None,
+) -> tuple[dict[str, Any], bool, str | None]:
+    """Recheck every persisted Tool against its frozen identity and live policy.
+
+    Also admit a legacy, explicitly bound platform implementation with a runtime
+    tool's name through its original platform executor. It must not acquire new
+    coordination semantics merely because the catalog's current version changed.
+    """
+    if db is None or not all((run_id, work_item_id, source_turn_id, context.runner_id)):
+        return definition, False, "runtime_context_required"
+    binding_error = "runtime_tool_binding_invalid" if _runtime_candidate(definition) else "tool_binding_invalid"
+    runner = await db.get(DurableRunner, context.runner_id)
+    snapshot_id = (
+        capability_snapshot.id if isinstance(capability_snapshot, CapabilitySnapshot)
+        else capability_snapshot.get("id")
+    )
+    snapshot = await db.get(CapabilitySnapshot, snapshot_id) if snapshot_id else None
+    if (
+        runner is None or snapshot is None or runner.capability_snapshot_id != snapshot.id
+        or snapshot.runner_id != runner.id or snapshot.work_item_id != work_item_id
+        or snapshot.agent_version_id != runner.agent_version_id
+        or snapshot.permission_mode != context.permission_mode
+        or definition["name"] not in snapshot.effective_tool_keys
+        or runner.run_id != run_id or runner.work_item_id != work_item_id
+        or runner.session_id != context.session_id or runner.tenant_id != context.tenant_id
+        or runner.agent_id != context.agent_id
+        or (
+            (runner.principal_snapshot or {}).get("authentication_source") is not None
+            and runner.principal_snapshot["authentication_source"] != context.authentication_source
+        )
+    ):
+        return definition, False, binding_error
+    assembly = await db.get(AgentAssemblyVersion, runner.agent_version_id)
+    if assembly is None or assembly.immutable_at is None or assembly.publication_status not in {
+        "published", "draft_test_snapshot",
+    }:
+        return definition, False, binding_error
+    tool_id = definition.get("platform_tool_id")
+    version_id = definition.get("tool_version_id")
+    tool = await db.scalar(select(ToolDefinition).where(
+        ToolDefinition.id == tool_id,
+    ).execution_options(populate_existing=True).with_for_update(read=True)) if tool_id else None
+    version = await db.get(ToolVersion, version_id) if version_id else None
+    frozen = await db.get(AgentVersionTool, {
+        "agent_version_id": runner.agent_version_id, "platform_tool_id": tool_id,
+    }) if tool_id else None
+    runner_tool = await db.get(RunnerToolSnapshot, {
+        "runner_id": runner.id, "platform_tool_id": tool_id,
+    }) if tool_id else None
+    if (
+        tool is None or version is None or frozen is None or runner_tool is None
+        or tool.tool_key != definition["name"] or version.definition_id != tool.id
+        or frozen.tool_version_id != version.id or runner_tool.tool_version_id != version.id
+        or frozen.tool_version_content_hash != version.content_hash
+        or runner_tool.tool_version_content_hash != version.content_hash
+        or definition.get("tool_version_content_hash") != version.content_hash
+        or frozen.connection_revision_id != runner_tool.connection_revision_id
+        or frozen.secret_fingerprint != runner_tool.secret_fingerprint
+    ):
+        return definition, False, binding_error
+    if frozen.connection_revision_id:
+        connection = await db.get(ToolConnectionRevision, frozen.connection_revision_id)
+        if connection is None or connection.secret_fingerprint != frozen.secret_fingerprint:
+            return definition, False, binding_error
+    runtime_owned = is_runtime_tool_implementation(tool.tool_key, version.implementation_ref)
+    if not runtime_owned and (
+        definition.get("source") == "runtime"
+        or is_runtime_tool_implementation(tool.tool_key, definition.get("implementation_ref"))
+    ):
+        return definition, False, "runtime_tool_identity_mismatch"
+    # Shared locks observe current governance and let concurrent callers read
+    # the same Tool without introducing cross-session A/B exclusive-lock cycles.
+    governance = await db.scalar(select(ToolGovernance).where(
+        ToolGovernance.tool_definition_id == tool.id,
+    ).execution_options(populate_existing=True).with_for_update(read=True))
+    if tool.status != "active" or governance is None or not governance.enabled:
+        return definition, False, "platform_tool_disabled"
+    canonical = {
+        **definition, "source": "runtime" if runtime_owned else "platform",
+        "implementation_ref": version.implementation_ref,
+        "input_schema": version.input_schema, "output_schema": version.output_schema,
+        "side_effect": version.side_effect, "execution_mode": version.execution_mode,
+        "confirmation_policy": governance.confirmation_policy,
+        "confirmation_policy_version": governance.version,
+        "annotations": dict(version.annotations or {}),
+        "connection_id": frozen.connection_id,
+        "connection_revision_id": frozen.connection_revision_id,
+        "secret_fingerprint": frozen.secret_fingerprint,
+        "platform_config": {
+            "network_policy": dict(governance.network_policy or {}),
+            "workspace_policy": dict(governance.workspace_policy or {}),
+            "risk_rules": list(governance.risk_rules or []),
+        },
+    }
+    if runtime_owned:
+        contract = RUNTIME_TOOLS[tool.tool_key]
+        work = await db.get(WorkItem, work_item_id)
+        run = await db.get(Run, run_id)
+        if (
+            work is None or run is None or work.run_id != run.id
+            or work.session_id != context.session_id or run.session_id != context.session_id
+            or (contract.get("group_only") and not (run.mode == "group" or work.group_run_id))
+            or (contract.get("chat_only") and run.mode != "chat")
+        ):
+            return canonical, True, "runtime_tool_mode_denied"
+        if version.execution_mode != "inline":
+            return canonical, True, "runtime_execution_mode_invalid"
+        if governance.confirmation_policy != "never":
+            return canonical, True, "runtime_confirmation_policy_unsupported"
+    return project_tool_definition(
+        canonical, authentication_source=context.authentication_source,
+    ), runtime_owned, None
+
+
 class ActionDispatcher:
     def __init__(
         self, tool_definitions: list[dict[str, Any]], *,
@@ -460,28 +604,26 @@ class ActionDispatcher:
                     ),
                 ),
             )
+        recursive_schedule = _scheduled_schedule_mutation_failure(call, authentication_source)
+        if recursive_schedule is not None:
+            return recursive_schedule
         errors = _schema_errors(call.arguments, definition.get("input_schema") or {})
         if errors:
             return _schema_failure(
                 call, definition.get("input_schema") or {},
             )
-        if permission_mode == "plan_readonly" and definition.get("side_effect", "none") != "none":
+        if _permission_mode_denies(definition, permission_mode):
             return DispatchResult(
                 call.call_id, call.name,
                 ToolResult(
-                    status="failed", summary="Plan read-only mode denied this side effect",
+                    status="failed", summary="Read-only permission mode denied this side effect",
                     error=ToolError(
                         code="permission_mode_denied",
-                        message=f"Tool '{call.name}' has side effects before Plan approval",
+                        message=f"Tool '{call.name}' has side effects forbidden by {permission_mode}",
                         category="authorization", details={"permission_mode": permission_mode},
                     ),
                 ),
             )
-        recursive_schedule = _scheduled_schedule_mutation_failure(
-            call, authentication_source,
-        )
-        if recursive_schedule is not None:
-            return recursive_schedule
         return None
 
     async def _apply_web_retrieval_limits(
@@ -708,6 +850,39 @@ class ActionDispatcher:
                     ),
                 ),
             )
+        if db is not None and run_id and work_item_id and source_turn_id:
+            # Preserve the Session -> Run/Tool aggregate lock order across both
+            # platform and runtime dispatch, including the governance recheck.
+            await db.scalar(select(UserSession).where(
+                UserSession.id == runtime_context.session_id,
+            ).execution_options(populate_existing=True).with_for_update())
+        runtime_owned = False
+        if _runtime_candidate(definition) or (
+            db is not None and all((run_id, work_item_id, source_turn_id))
+        ):
+            definition, runtime_owned, denial = await _authorize_frozen_tool(
+                db, definition=definition, capability_snapshot=capability_snapshot,
+                context=runtime_context, run_id=run_id, work_item_id=work_item_id,
+                source_turn_id=source_turn_id,
+            )
+            if denial:
+                await _record_authorization_rejection(
+                    db, call=call, context=runtime_context, run_id=run_id,
+                    source_turn_id=source_turn_id, error_code=denial,
+                    error_category="authorization",
+                )
+                return DispatchResult(call.call_id, call.name, ToolResult(
+                    status="failed", summary="Tool is not authorized",
+                    error=ToolError(code=denial, message=denial, category="authorization"),
+                ))
+        recursive_schedule = _scheduled_schedule_mutation_failure(call, runtime_context.authentication_source)
+        if recursive_schedule is not None:
+            await _record_authorization_rejection(
+                db, call=call, context=runtime_context, run_id=run_id,
+                source_turn_id=source_turn_id,
+                error_code="schedule_recursive_mutation_denied", error_category="authorization",
+            )
+            return recursive_schedule
         if argument_normalizations is None:
             call, argument_normalizations = _prepare_tool_call(call, definition)
         errors = _schema_errors(call.arguments, definition.get("input_schema") or {})
@@ -718,10 +893,7 @@ class ActionDispatcher:
         # the actual semantic side-effect class at the Dispatcher boundary so
         # a stale, forged, or incorrectly assembled snapshot still cannot turn
         # plan_readonly into a successful mutation.
-        if (
-            runtime_context.permission_mode == "plan_readonly"
-            and definition.get("side_effect", "none") != "none"
-        ):
+        if _permission_mode_denies(definition, runtime_context.permission_mode):
             await _record_authorization_rejection(
                 db, call=call, context=runtime_context, run_id=run_id,
                 source_turn_id=source_turn_id,
@@ -732,94 +904,31 @@ class ActionDispatcher:
                 call.call_id, call.name,
                 ToolResult(
                     status="failed",
-                    summary="Plan read-only mode denied this side effect",
+                    summary="Read-only permission mode denied this side effect",
                     error=ToolError(
                         code="permission_mode_denied",
                         message=(
                             f"Tool '{call.name}' has side effects and cannot run "
-                            "before the current Plan revision is approved"
+                            f"with permission mode {runtime_context.permission_mode}"
                         ),
                         category="authorization",
-                        details={"permission_mode": "plan_readonly"},
+                        details={"permission_mode": runtime_context.permission_mode},
                     ),
                 ),
-            )
-
-        recursive_schedule = _scheduled_schedule_mutation_failure(
-            call, runtime_context.authentication_source,
-        )
-        if recursive_schedule is not None:
-            await _record_authorization_rejection(
-                db, call=call, context=runtime_context, run_id=run_id,
-                source_turn_id=source_turn_id,
-                error_code="schedule_recursive_mutation_denied",
-                error_category="authorization",
-            )
-            return recursive_schedule
-
-        if db is not None and run_id and work_item_id and source_turn_id:
-            # Agent turns run concurrently, but every durable dispatch writes
-            # a Session-scoped event sequence. Acquire that aggregate lock
-            # before Tool/Group rows so all dispatch paths share one lock
-            # order and cannot deadlock against settlement or Sandbox workers.
-            await db.scalar(select(UserSession).where(
-                UserSession.id == runtime_context.session_id,
-            ).execution_options(populate_existing=True).with_for_update())
-
-        if definition.get("source") == "runtime":
-            if db is None or not all((run_id, work_item_id, source_turn_id)):
-                return DispatchResult(
-                    call.call_id, call.name,
-                    ToolResult(
-                        status="failed", summary="Durable Runtime context is required",
-                        error_code="runtime_context_required",
-                        error="Durable Runtime context is required",
-                        error_category="provider",
-                    ),
-                )
-            if call.name == "invoke_agent":
-                try:
-                    await assert_action_budget(db, run_id, action_kind="agent")
-                except BudgetExceeded as error:
-                    return DispatchResult(
-                        call.call_id, call.name,
-                        ToolResult(
-                            status="failed", summary=str(error),
-                            error=ToolError(
-                                code=error.code, message=str(error),
-                                category="authorization",
-                                details={
-                                    "dimension": error.dimension,
-                                    "limit": error.limit, "used": error.used,
-                                },
-                            ),
-                        ),
-                    )
-            result, durable_wait, wait_reason = await dispatch_coordination_tool(
-                call.name, call.arguments, context=runtime_context, db=db,
-                run_id=run_id, work_item_id=work_item_id,
-                source_turn_id=source_turn_id, provider_call_id=call.call_id,
-            )
-            output_issues = validation_error_refs(
-                result.model_dump(mode="json"), definition["output_schema"],
-            )
-            if output_issues:
-                result = ToolResult(
-                    status="failed", summary="Runtime Tool returned an invalid result",
-                    error="Runtime Tool output failed its registered schema",
-                    error_code="tool_output_schema_error", error_category="provider",
-                    error_details={"errors": output_issues},
-                )
-                durable_wait = False
-                wait_reason = None
-            return DispatchResult(
-                call.call_id, call.name, result,
-                durable_wait=durable_wait, wait_reason=wait_reason,
             )
 
         confirmation_policy, dynamic_risk = await _dynamic_confirmation(
             db, definition=definition, arguments=call.arguments, context=runtime_context,
         )
+        if runtime_owned and confirmation_policy != "never":
+            return DispatchResult(call.call_id, call.name, ToolResult(
+                status="failed", summary="Runtime Tool does not support execution confirmation",
+                error=ToolError(
+                    code="runtime_confirmation_policy_unsupported",
+                    message="Runtime coordination uses its own domain approvals",
+                    category="authorization",
+                ),
+            ))
         invocation = None
         if db is not None and run_id and work_item_id and source_turn_id:
             encoded = json.dumps(call.arguments, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -853,9 +962,17 @@ class ActionDispatcher:
                 }
                 if existing.status in terminal and existing.result_data:
                     replayed = ToolResult.model_validate(existing.result_data)
+                    if runtime_owned and call.name == "search_tools" and replayed.success:
+                        presentation = await resolve_tool_presentation(
+                            db, capability_snapshot=capability_snapshot,
+                            authentication_source=runtime_context.authentication_source,
+                        )
+                        replayed = project_search_result(replayed, presentation, include_definitions=True)
                     return DispatchResult(
                         call.call_id, call.name, replayed,
                         invocation_id=existing.id,
+                        durable_wait=bool((existing.authorization_snapshot or {}).get("runtime_durable_wait")),
+                        wait_reason=(existing.authorization_snapshot or {}).get("runtime_wait_reason"),
                     )
                 return DispatchResult(
                     call.call_id, call.name,
@@ -872,6 +989,8 @@ class ActionDispatcher:
             if owning_run is not None:
                 try:
                     await assert_action_budget(db, run_id, action_kind="tool")
+                    if runtime_owned and call.name == "invoke_agent":
+                        await assert_action_budget(db, run_id, action_kind="agent")
                 except BudgetExceeded as error:
                     return DispatchResult(
                         call.call_id, call.name,
@@ -1076,13 +1195,22 @@ class ActionDispatcher:
             "tool_version_id": definition.get("tool_version_id"),
             "tool_connection_revision_id": definition.get("connection_revision_id"),
         })
-        result = self.executor(call.name, call.arguments, execution_context, db)
-        if inspect.isawaitable(result):
-            result = await result
+        durable_wait, wait_reason = False, None
+        if runtime_owned:
+            result, durable_wait, wait_reason = await dispatch_coordination_tool(
+                call.name, call.arguments, context=execution_context, db=db,
+                run_id=run_id, work_item_id=work_item_id,
+                source_turn_id=source_turn_id, provider_call_id=call.call_id,
+            )
+        else:
+            result = self.executor(call.name, call.arguments, execution_context, db)
+            if inspect.isawaitable(result):
+                result = await result
         output_issues = validation_error_refs(
             result.model_dump(mode="json"), definition["output_schema"],
         )
         if output_issues:
+            durable_wait, wait_reason = False, None
             result = ToolResult(
                 status="failed", summary="Tool returned an invalid result",
                 error="Tool output failed its immutable registered schema",
@@ -1103,6 +1231,12 @@ class ActionDispatcher:
 
             await apply_memory_candidate(db, result.data["candidate_id"])
         if invocation is not None:
+            if runtime_owned:
+                invocation.authorization_snapshot = {
+                    **dict(invocation.authorization_snapshot or {}),
+                    "runtime_durable_wait": durable_wait,
+                    "runtime_wait_reason": wait_reason,
+                }
             invocation.status = result.status
             invocation.result_data = result.model_dump(mode="json")
             if result.error:
@@ -1130,4 +1264,5 @@ class ActionDispatcher:
         return DispatchResult(
             call.call_id, call.name, result,
             invocation_id=invocation.id if invocation else None,
+            durable_wait=durable_wait, wait_reason=wait_reason,
         )

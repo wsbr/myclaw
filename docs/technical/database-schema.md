@@ -263,6 +263,10 @@ Provider 原始秘密、完整授权头和不允许持久化的 reasoning 不进
 
 `id PK`、`work_item_id FK`、`runner_id FK`、`execution_epoch`、`checkpoint_no`、`context_cursor_json`、`working_plan_revision NULL`、`pending_refs_json`、`safe_provider_state_ref NULL`、`content_hash`；唯一 `(runner_id,checkpoint_no)`，只追加。
 
+Checkpoint 始终拒绝 UPDATE。`0050` 为过期恢复快照提供受控 DELETE 例外：维护连接必须持有 `myclaw.retention_cleanup` leader lock；同一事务先追加 `retention.checkpoint_batch` 审计，绑定数据库连接、cutoff 与本批 checkpoint ID。触发器逐行核验 checkpoint、终态 WorkItem、终态 Run 均超过配置保留期，且 cutoff 不得晚于数据库当前时间减 30 天；所有比较保留微秒精度。批次审计自身拒绝 UPDATE/DELETE，批次失败时审计和删除一起回滚。Run、WorkItem、ExecutionEvent 与业务产物不随之删除。
+
+这些锁、批次允许列表与触发器是操作完整性保护，不替代生产环境的独立 retention 数据库权限。UAT 的共享数据库账号不能被描述成已经实现了独立权限边界。
+
 ### `memory_fact`、`memory_version`、`history_summary`
 
 - `memory_fact`：`id PK`、`tenant_id FK`、`account_id NULL`、`agent_id FK NULL`、`scope user|user_agent|agent`、`fact_key`、`current_version_id FK NULL`、`status active|deleted`、`version`；nullable 复合 FK `(tenant_id,account_id)`，CHECK 要求 user=(account 非空/agent 空)、user_agent=(两者非空)、agent=(account 空/agent 非空)；唯一 active fact 通过 `(tenant_id,account discriminator,scope,agent discriminator,fact_key,active_key)` generated key 保证；
@@ -354,9 +358,11 @@ Provider 的每次成功、失败、重试或 `outcome_unknown` Attempt 都会�
 
 ### `agent_eval_suite*`、`agent_eval_run*`
 
-- `agent_eval_suite` 是 Agent 下稳定的发布门禁标识，保存 active/inactive 与当前版本指针；`agent_eval_suite_version` 和 `agent_eval_case` 冻结名称、阈值、逐用例输入/权重/断言及内容哈希，由 MySQL trigger 禁止 UPDATE/DELETE。修改套件只能发布新版本。
-- `agent_eval_run` 绑定一个 `draft_test_snapshot` 的精确 `candidate_content_hash`、一个不可变 SuiteVersion 和门禁阈值快照；`agent_eval_case_run` 一对一引用真实 Session/Run，维护 Worker 在 Run 终态后读取最终 Message，并结算文本、长度与 Usage 账本成本断言。
-- 发布事务锁定当前 active Suite，逐个要求存在 `suite_version_id + candidate_content_hash + passed` 的终态 EvalRun。草稿内容、Model/Tool/Skill/Policy/Sandbox 当前版本或评测套件版本任一变化，都会改变匹配条件，旧成绩不会误放行新版本。
+- `agent_eval_suite` 是 Agent 下稳定的评测集标识，保存 active/inactive 与当前版本指针；`agent_eval_suite_version` 和 `agent_eval_case` 冻结名称、阈值、逐用例输入/权重/断言及内容哈希，由 MySQL trigger 禁止 UPDATE/DELETE。修改套件只能发布新版本。
+- `agent_eval_run` 绑定一个 `draft_test_snapshot` 的精确 `candidate_content_hash`、一个不可变 SuiteVersion 和门禁阈值快照；`agent_eval_case_run` 一对一引用真实 Session/Run，维护 Worker 在 Run 终态后读取最终 Message，并结算文本、长度、持久化工具调用及 Usage 账本成本断言。
+- 发布事务锁定当前 active 且 `gate_policy.required_for_publish != false` 的 Suite，逐个要求存在 `suite_version_id + candidate_content_hash + passed` 的终态 EvalRun。草稿内容、Model/Tool/Skill/Policy/Sandbox 当前版本或评测套件版本任一变化，都会改变匹配条件，旧成绩不会误放行新版本。
+
+Schema `0052` 为 `agent_eval_case` 增加可空 `case_metadata JSON`，保存场景 tags、服务端验证的 source_run_id 与 source_snapshot（输入、回答、工具名称/状态、AgentVersion 和内容哈希）。历史行保留 NULL，不改写既有定义；新元数据受原有整行不可变 trigger 保护并参与新版本内容哈希。source_run_id 是证据标识而非外键，来源清理后仍保留冻结快照。上线需先应用迁移再启动新版 API/Worker。
 
 ### `verification_result`
 
@@ -470,7 +476,7 @@ Registry、身份、角色、密钥、Retention、break-glass 和策略变更写
 - `agent_version` 为 published/deprecated/draft_test_snapshot 时拒绝行为内容字段 UPDATE 和整行 DELETE；只允许 `published→deprecated` 的状态/CAS/审计列变化，对应 Tool/Skill/Card 关系拒绝 UPDATE/DELETE；
 - `skill_version`、`policy_version`、`sandbox_profile_version` 拒绝内容列 UPDATE 和整行 DELETE，只允许稳定状态机中的 `status + version + status timestamp/actor` CAS 变化；
 - Artifact 为 published 后拒绝修改全部内容/归属/来源列；只允许状态机中的 status、availability/deletion 字段和治理 version CAS 变化；
-- append-only Event/Audit/Attempt/PlanUpdate/Checkpoint 拒绝 UPDATE/DELETE；Attempt 只允许由当前非终态向合法终态更新的状态列，不允许覆盖请求/结果事实；
+- append-only Event/Audit/Attempt/PlanUpdate 拒绝覆盖历史事实；Attempt 只允许由当前非终态向合法终态更新的状态列。Checkpoint 拒绝 UPDATE，DELETE 仅允许上文的受审计过期留存批次；
 - Run、WorkItem、Runner、Invocation 的终态不得迁回非终态；
 - 只有专用 migration/retention role 能执行已批准的结构迁移或 Retention tombstone，普通应用账号无 DDL 权限。
 
