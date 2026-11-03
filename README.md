@@ -14,7 +14,7 @@ MyClaw is an Agent-native runtime for durable Chat, plan-first execution, govern
 
 这次流转从 Recovery 的正常 Chat 开始；Recovery 只建立最小项目组并立即向用户返回，Evidence 完成自己的审查后按语义把安全核查交给 Security。定向消息只唤醒接收者，Group 留痕只保存收紧后的进度、分歧和结果。
 
-> **Release status:** `v0.3.1` is a single-machine/UAT release for development and architectural evaluation. The repository contains a production reference architecture, but the local Compose profile is not a production security or HA profile.
+> **Release status:** `v0.4.1` is a single-machine/UAT release for development and architectural evaluation. The repository contains a production reference architecture, but the local Compose profile is not a production security or HA profile.
 
 ## Run it locally
 
