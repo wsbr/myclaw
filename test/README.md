@@ -2,6 +2,8 @@
 
 本目录只保留两类门禁：不涉及 Agent 决策的确定性合同/安全/真实数据库检查，以及调用管理员当前真实主模型、真实 Provider 和真实 Chromium 的全栈验收。不存在替代模型、替代 Search、替代 Browser、替代 MCP 或 marker 驱动的 Agent 验收路径。
 
+以下命令均从项目根目录执行。
+
 ## 目录
 
 ```text
@@ -25,7 +27,7 @@ test/
 
 ```bash
 MYCLAW_ACCEPTANCE_COMMIT_SHA="$(git rev-parse HEAD)" \
-  ./scripts/run_ci_gates.sh standard
+  ./test/scripts/run_ci_gates.sh standard
 ```
 
 脚本只接受固定且干净的 commit。
@@ -41,7 +43,7 @@ read -r -s MYCLAW_REAL_LLM_API_KEY && export MYCLAW_REAL_LLM_API_KEY
 export MYCLAW_REAL_SEARCH_PROVIDER=bailian
 read -r -s MYCLAW_BAILIAN_API_KEY && export MYCLAW_BAILIAN_API_KEY
 MYCLAW_ACCEPTANCE_COMMIT_SHA="$(git rev-parse HEAD)" \
-  ./scripts/run_ci_gates.sh real
+  ./test/scripts/run_ci_gates.sh real
 ```
 
 真实门禁构建并运行 MySQL、Redis、API、两个 Runtime Worker、Sandbox Worker、Connector Worker、Browser Worker、Frontend 和 OTel Collector。测试通过管理员 write-only API 配置真实模型、所选真实 Search Provider 与公开 OpenAI Developer Docs MCP，然后完成：
@@ -55,5 +57,5 @@ MYCLAW_ACCEPTANCE_COMMIT_SHA="$(git rev-parse HEAD)" \
 测试栈端口默认为 MySQL `3307`、Redis `6380`、API `8001`、Frontend `8081`。清理仅限已核对的测试 Compose 项目：
 
 ```bash
-docker compose -f docker-compose.test.yml --profile fullstack down --volumes --remove-orphans
+docker compose -f test/docker-compose.test.yml --profile fullstack down --volumes --remove-orphans
 ```
